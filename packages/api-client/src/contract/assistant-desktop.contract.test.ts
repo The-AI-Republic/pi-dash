@@ -7,13 +7,17 @@
 // refuses 409. Shapes stay stub-covered in unit tests too.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../errors.js";
-import { desktopSessionRequiredFrom, getAgentProfile, postAgentToken } from "../contracts/assistant-desktop.js";
+import {
+  desktopSessionRequiredFrom,
+  getPidashAgentProfile,
+  postPidashAgentToken,
+} from "../contracts/assistant-desktop.js";
 import { contractEnabled, sharedDesktopSignedIn, sharedSignedIn } from "./setup.js";
 
 describe.skipIf(!contractEnabled)("assistant desktop contract", () => {
   it("refuses the profile read from a browser session", async () => {
     const client = await sharedSignedIn();
-    const refused: unknown = await getAgentProfile(client).then(
+    const refused: unknown = await getPidashAgentProfile(client).then(
       () => null,
       (error: unknown) => error
     );
@@ -24,7 +28,7 @@ describe.skipIf(!contractEnabled)("assistant desktop contract", () => {
 
   it("refuses the token mint from a browser session", async () => {
     const client = await sharedSignedIn();
-    const refused: unknown = await postAgentToken(client).then(
+    const refused: unknown = await postPidashAgentToken(client).then(
       () => null,
       (error: unknown) => error
     );
@@ -35,7 +39,7 @@ describe.skipIf(!contractEnabled)("assistant desktop contract", () => {
 describe.skipIf(!contractEnabled)("assistant desktop success contract", () => {
   it("reads the agent profile without a credential", async () => {
     const client = await sharedDesktopSignedIn();
-    const profile = await getAgentProfile(client);
+    const profile = await getPidashAgentProfile(client);
     expect(typeof profile.managed_runner_enabled).toBe("boolean");
     expect(typeof profile.lane).toBe("string");
     expect(typeof profile.base_url).toBe("string");
@@ -53,7 +57,7 @@ describe.skipIf(!contractEnabled)("assistant desktop success contract", () => {
     // CE has no lane the desktop may use: the mint answers 409 carrying
     // the refusal code, never a blank token that fails later inside a run.
     const client = await sharedDesktopSignedIn();
-    const failure = await postAgentToken(client).catch((error: unknown) => error);
+    const failure = await postPidashAgentToken(client).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(409);
   });

@@ -22,8 +22,9 @@ import { useComposerDictation } from "../hooks/useComposerDictation.js";
 import { ASSISTANT_CAPTION, ASSISTANT_HEADLINE, START_FAILED_TITLE } from "../lib/copy.js";
 import { needsLaneSetup } from "../lib/gate.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import { appendDictation } from "../../../shared/dictation/index.js";
+import { appendDictation, DICTATION_UI_ENABLED } from "../../../shared/dictation/index.js";
 import { Composer } from "./Composer.js";
+import { OpenHubModelPicker } from "./OpenHubModelPicker.js";
 import { SetupCard } from "./SetupCard.js";
 
 export interface AssistantLandingProps {
@@ -87,7 +88,8 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
               onSubmit={onStart}
               starting={start.isPending}
               bordered={false}
-              dictation={dictation}
+              dictation={DICTATION_UI_ENABLED ? dictation : undefined}
+              modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config.data} />}
             />
           </>
         )}

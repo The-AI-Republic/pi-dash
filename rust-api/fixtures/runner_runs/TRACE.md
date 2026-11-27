@@ -17,16 +17,16 @@ no-auth 500).
 
 - `fx-run-01-types-pure.golden.json` — FX-RUN-01 — `runner/models.py:207-329`
   (AgentRunStatus :207-234, AgentRunTrigger :237-253 + HUMAN_TRIGGERS :259-266
-  + AUTOMATIC_ISSUE_TRIGGERS :273 + run_is_human_triggered :276-278,
-  RefusalCategory :281-292, ApprovalStatus :295-299, ApprovalKind :302-306,
-  AgentChatSessionStatus :309-312, AgentChatMessageRole :315-319,
-  AgentChatMessageStatus :322-328) + ToolCallStatus `models.py:1178-1184`;
-  `runner/services/usage.py:1-173` (coerce_token :69-79, normalize_usage
-  :129-148, merge_usage :151-162, flat_token_fields :165-173); `runner/
-  diagnostics.py:1-245` (infer_agent_label :103-128, enrich_run_error :149-170,
-  classify_run_error :173-245); consts `views/runs.py:36-37`,
-  `views/run_endpoints.py:45` + `:491-503`, `views/chat.py:64`,
-  `services/chat.py:40-45`, `tasks.py:208,219`.
+  - AUTOMATIC_ISSUE_TRIGGERS :273 + run_is_human_triggered :276-278,
+    RefusalCategory :281-292, ApprovalStatus :295-299, ApprovalKind :302-306,
+    AgentChatSessionStatus :309-312, AgentChatMessageRole :315-319,
+    AgentChatMessageStatus :322-328) + ToolCallStatus `models.py:1178-1184`;
+    `runner/services/usage.py:1-173` (coerce_token :69-79, normalize_usage
+    :129-148, merge_usage :151-162, flat_token_fields :165-173); `runner/
+diagnostics.py:1-245` (infer_agent_label :103-128, enrich_run_error :149-170,
+    classify_run_error :173-245); consts `views/runs.py:36-37`,
+    `views/run_endpoints.py:45` + `:491-503`, `views/chat.py:64`,
+    `services/chat.py:40-45`, `tasks.py:208,219`.
 
 ## Models
 
@@ -45,12 +45,18 @@ no-auth 500).
   :1482, approvals_pending :1493, usage :1497, llm_model :1498, updated_at
   :1500, token properties :1517-1527; write path is D-14).
 
+- PDASHOSS01-183 (`AgentRun.failure_reason`, runner migrations
+  0032/0033): FX-RUN-02's `AgentRun.fields` gained the `failure_reason`
+  entry after `refusal_category` (CharField, `varchar(64)`, `db_index=True`,
+  default `""`, no choices) — the `_meta` shape of the new field, same keys
+  as the recorded `error_code` entry.
+
 ## Guards
 
 - `fx-run-04-guards.golden.json` — FX-RUN-04 — `runner/services/permissions.py:
-  1-137` (runner_visible_to_user_q :40-54, machine :57-67, runner :70-80,
+1-137` (runner_visible_to_user_q :40-54, machine :57-67, runner :70-80,
   filter_runs_usable_by_runner :83-123, can_manage_runner :126-137);
-  `runner/views/runs.py` _can_view_run :87-118 + _can_cancel_run :120-122;
+  `runner/views/runs.py` \_can_view_run :87-118 + \_can_cancel_run :120-122;
   `runner/services/chat.py` can_read :48-53, can_send :56-59, can_decide :62-67;
   `runner/views/chat.py` ChatSendThrottle :60-61 + get_throttles :269-272;
   `settings/common.py:93-97` (runner_chat_send 60/minute).
@@ -58,17 +64,17 @@ no-auth 500).
 ## Lifecycle
 
 - `fx-run-05-lifecycle.golden.json` — FX-RUN-05 — `runner/services/
-  agent_run_finalization.py:1-199` (merge_done_payload :30-45,
-  finalize_agent_run :48-86, _publish_effects :89-103, apply_terminal_effects
+agent_run_finalization.py:1-199` (merge_done_payload :30-45,
+  finalize_agent_run :48-86, \_publish_effects :89-103, apply_terminal_effects
   :105-199); `runner/services/run_lifecycle.py:1-463` (apply_run_paused
   :158-244, resume_unavailable :247-295, assign_rejected_busy :298-322,
-  _post_failure_comment :341-399, finalize_run_terminal :402-463);
+  \_post_failure_comment :341-399, finalize_run_terminal :402-463);
   `runner/services/scheduler_hook.py:1-42`.
 
 ## Chat service
 
 - `fx-run-06-chat-service.golden.json` — FX-RUN-06 — `runner/services/chat.py:
-  1-497` (drain :82-109, normalize_cwd :112-115, seq allocators :118-125,
+1-497` (drain :82-109, normalize_cwd :112-115, seq allocators :118-125,
   serialize_event :128-137, publish :140-147, append_locked :150-171,
   record_dedupe :180-190, enqueue message :193-224, enqueue warm :227-253,
   dispatch-failed :256-302, create/active/finalize/complete :305-400, sweeps
@@ -94,10 +100,14 @@ no-auth 500).
   approvals.py:58) — recorded as the raised `NotSupportedError`; the 404/409/
   flip/fan-out branches are unreachable live.
 
+- PDASHOSS01-183: the `metrics.body` golden gained the
+  `pi_dash_runs_failed_by_reason` family (`_labeled_gauge`), header-only for
+  the recorded rows (no FAILED run carries a stored reason).
+
 ## Handlers — daemon (+ web chat + SSE)
 
 - `fx-run-09-handlers-daemon.golden.json` — FX-RUN-09 — `runner/views/
-  run_endpoints.py:1-514` (all 12 endpoints); `runner/views/chat.py:1-857`
+run_endpoints.py:1-514` (all 12 endpoints); `runner/views/chat.py:1-857`
   (7 daemon endpoints :513-778, SSE :781-857, plus the 8 web chat endpoints
   :131-510 — the split gave web chat no separate FX id, so its goldens live
   here for whole-file coverage); chat serializer shapes `runner/serializers.py`
@@ -105,3 +115,19 @@ no-auth 500).
 - Ported bug: daemon chat `_resolve` dereferences `auth_runner.id` with no
   None guard (chat.py:522) — unauthenticated daemon chat POSTs raise
   `AttributeError` (live 500), recorded from a live call.
+
+## Failure taxonomy (PDASHOSS01-183)
+
+- `fx-run-10-failure.golden.json` — FX-RUN-10 — `runner/failure.py`
+  (RunFailureReason / FailurePolicy / policy_for / is_agent_side /
+  repeated_failure_limit_for / classify, constants);
+  `runner/diagnostics.py` `classify_run_error(error, failure_reason=…)`
+  (`_REASON_DISPLAY`, `_diagnostic_from_reason`);
+  `runner/services/run_lifecycle.py` `_post_failure_comment` body (prefix
+  gate, per-reason gate, render, notify decision) and
+  `_notify_clock_stopped` `message_html`. Recorded by running the real
+  Python on the PDASHOSS01-183 Python branch (pytest probe, Django test
+  settings): the classifier over every `test_failure_classify.py` table
+  vector plus edge cases × runner reasons × error codes; the comment body
+  with its I/O mocked and the streak injected (0/2/3/4) for every reason ×
+  five details.

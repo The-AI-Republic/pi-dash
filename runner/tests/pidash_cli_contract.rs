@@ -561,7 +561,10 @@ async fn http_403_maps_to_exit_auth() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("403");
     assert_eq!(err.exit_code, EXIT_AUTH);
-    assert_eq!(err.message, "HTTP 403 Forbidden: permission denied: forbidden");
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: forbidden"
+    );
 }
 
 #[tokio::test]
@@ -697,11 +700,17 @@ async fn writes_carry_the_run_id_header_reads_do_not() {
 
     client.get("users/me/").await.expect("get");
     client
-        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .patch(
+            "workspaces/acme/projects/p/work-items/i/",
+            &serde_json::json!({"state": "s"}),
+        )
         .await
         .expect("patch");
     client
-        .post("workspaces/acme/projects/p/work-items/i/comments/", &serde_json::json!({"comment_html": "x"}))
+        .post(
+            "workspaces/acme/projects/p/work-items/i/comments/",
+            &serde_json::json!({"comment_html": "x"}),
+        )
         .await
         .expect("post");
 
@@ -720,11 +729,17 @@ async fn writes_without_a_run_id_send_no_header() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
     client
-        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .patch(
+            "workspaces/acme/projects/p/work-items/i/",
+            &serde_json::json!({"state": "s"}),
+        )
         .await
         .expect("patch");
     let recorded = fake.recorded.lock().unwrap();
-    assert_eq!(recorded[0].run_id, None, "operator use must look like a human move");
+    assert_eq!(
+        recorded[0].run_id, None,
+        "operator use must look like a human move"
+    );
 }
 
 #[tokio::test]
@@ -822,6 +837,42 @@ async fn run_yield_stop_ticking_succeeds_against_an_older_server_that_ignores_it
 }
 
 #[tokio::test]
+async fn run_yield_succeeds_for_a_scheduler_run() {
+    // A scheduler run has no work item. The server records the outcome on
+    // the run and answers 200 with `work_item_id: null` — the command must
+    // exit 0 on that shape, with the scheduler run's id on the same route
+    // an issue run uses.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(
+            r#"{"ok":true,"run_id":"471f1cf9-0000-4000-8000-000000000000","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"b1","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#,
+        )
+    }))
+    .await;
+    let run_id = "471f1cf9-0000-4000-8000-000000000000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: None,
+            run_id: None,
+            stop_ticking: true,
+        },
+    )
+    .await
+    .expect("a scheduler run's yield must succeed");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/agent-runs/{run_id}/yield/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some(run_id));
+}
+
+#[tokio::test]
 async fn run_yield_without_a_run_id_fails_before_any_request() {
     let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
     let client = client(&fake);
@@ -868,9 +919,12 @@ const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
 
 #[tokio::test]
 async fn issue_list_without_filters_sends_no_query() {
+    // No flags now defaults to open groups (PDASHOSS01-352).
     assert_eq!(
         list_paths(list_args("ENG")).await,
-        vec![LIST_PATH.to_string()]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
     );
 }
 
@@ -898,9 +952,12 @@ async fn issue_list_state_group_flag() {
 async fn issue_list_label_flag_maps_to_labels_param() {
     let mut args = list_args("ENG");
     args.label = Some("bug,frontend".into());
+    // Label alone still gets the default open filter.
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&labels=bug%2Cfrontend"
+        )]
     );
 }
 
@@ -910,7 +967,9 @@ async fn issue_list_priority_flag() {
     args.priority = Some("urgent,high".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&priority=urgent%2Chigh"
+        )]
     );
 }
 
@@ -921,7 +980,7 @@ async fn issue_list_fields_flag() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
         )]
     );
 }
@@ -932,7 +991,9 @@ async fn issue_list_parent_none_sends_null_without_lookup() {
     args.parent = Some("none".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?parent=null")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=null"
+        )]
     );
 }
 
@@ -943,9 +1004,86 @@ async fn issue_list_parent_uuid_is_passed_as_is() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=00000000-0000-0000-0000-000000000009"
         )]
     );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_open_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_closed_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("closed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=completed%2Ccancelled")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_omits_filter() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    assert_eq!(list_paths(args).await, vec![LIST_PATH.to_string()]);
+}
+
+#[tokio::test]
+async fn issue_list_state_group_mixed_alias() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open,completed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_response_carries_visible_state_group() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &list_args("ENG"))
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "open");
+    assert_eq!(resp["count"], 0);
+}
+
+#[tokio::test]
+async fn issue_list_explicit_state_disables_default_and_omits_state_group_key() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    // Explicit --state: no default, and no state_group key (or null).
+    assert!(resp.get("state_group").is_none() || resp["state_group"].is_null());
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_shows_all_in_output() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "all");
 }
 
 #[tokio::test]
@@ -998,6 +1136,77 @@ async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
     assert!(err.detail.unwrap_or_default().contains("Valid states"));
 }
 
+// ---------------------------------------------------------------------------
+// Truncation note (PDASHOSS01-216): the server's default page size equals its
+// maximum (1000), so a >1000-item project is silently truncated unless the
+// caller checks `next_page_results`. The CLI flags that case on stderr —
+// stdout must stay the bare envelope and the exit code must stay 0.
+// ---------------------------------------------------------------------------
+
+const TRUNCATED_LIST_ENVELOPE: &str = r#"{"grouped_by":null,"sub_grouped_by":null,"total_count":4200,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":true,"prev_page_results":false,"count":1000,"total_pages":5,"total_results":4200,"extra_stats":null,"results":[]}"#;
+
+#[tokio::test]
+async fn issue_list_truncation_notes_on_stderr_with_clean_stdout() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    // stdout carries the envelope — the note must not leak into it. The only
+    // addition is the applied `state_group` filter the CLI echoes (`open` by
+    // default).
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    expected["state_group"] = serde_json::json!("open");
+    assert_eq!(printed, expected);
+}
+
+#[tokio::test]
+async fn issue_list_final_page_prints_nothing_on_stderr() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"total_count":3,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"count":3,"results":[]}"#,
+        )
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn issue_list_envelope_without_next_page_results_stays_silent() {
+    // A server old enough to omit the field looks like a complete list;
+    // the note must not fire on guesswork.
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn page_list_truncation_notes_on_stderr_too() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["page", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    assert_eq!(printed, expected);
+}
 
 // ---------------------------------------------------------------------------
 // `pidash page …` — the read path into project pages (PDASHOSS01-185).
@@ -1025,7 +1234,10 @@ async fn page_list_hits_the_project_pages_route() {
 
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(recorded[0].method, "GET");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/"
+    );
     assert_eq!(recorded[0].api_key.as_deref(), Some("test-token"));
 }
 
@@ -1126,7 +1338,9 @@ async fn page_get_body_only_uses_the_same_route_and_succeeds() {
 #[tokio::test]
 async fn page_get_body_only_errors_when_the_server_omits_markdown() {
     let fake = start_fake(Box::new(|_req| {
-        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-0000000000f1","description_html":"<p>x</p>"}"#)
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-0000000000f1","description_html":"<p>x</p>"}"#,
+        )
     }))
     .await;
 
@@ -1171,6 +1385,14 @@ async fn page_get_rejects_a_non_uuid_page_id_before_any_request() {
 const PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f1";
 const PARENT_PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f2";
 
+fn not_found() -> CannedResponse {
+    CannedResponse {
+        status: 404,
+        status_text: "Not Found",
+        body: r#"{"error":"Not found."}"#.into(),
+    }
+}
+
 fn created(body: &str) -> CannedResponse {
     CannedResponse {
         status: 201,
@@ -1199,6 +1421,7 @@ fn update_args() -> pidash::cli::page::UpdateArgs {
         parent: None,
         clear_parent: false,
         access: None,
+        allow_empty: false,
     }
 }
 
@@ -1224,7 +1447,10 @@ async fn page_create_posts_to_the_project_pages_route() {
 
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(recorded[0].method, "POST");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/"
+    );
     assert_eq!(recorded[0].run_id.as_deref(), Some("run-7"));
     assert_eq!(
         body_json(&recorded[0]),
@@ -1514,7 +1740,16 @@ async fn page_create_body_file_dash_reads_stdin() {
 
     let out = run_pidash(
         &fake,
-        &["page", "create", "--project", "ENG", "--title", "X", "--body-file", "-"],
+        &[
+            "page",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--body-file",
+            "-",
+        ],
         "# Piped\n\nfrom stdin\n",
     )
     .await;
@@ -1537,14 +1772,27 @@ async fn page_body_and_body_file_conflict_at_the_cli() {
     let out = run_pidash(
         &fake,
         &[
-            "page", "create", "--project", "ENG", "--title", "X", "--body", "x", "--body-file", "-",
+            "page",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--body",
+            "x",
+            "--body-file",
+            "-",
         ],
         "",
     )
     .await;
 
     assert_ne!(out.code, Some(0));
-    assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("cannot be used with"),
+        "stderr: {}",
+        out.stderr
+    );
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
 
@@ -1565,7 +1813,15 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
 
     let out = run_pidash(
         &fake,
-        &["page", "update", "conventions", "--project", "ENG", "--title", "Y"],
+        &[
+            "page",
+            "update",
+            "conventions",
+            "--project",
+            "ENG",
+            "--title",
+            "Y",
+        ],
         "",
     )
     .await;
@@ -1583,6 +1839,75 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
 const ISSUE_ID: &str = "00000000-0000-0000-0000-000000000001";
 const ISSUE_PROJECT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
 const ISSUE_DETAIL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo"}"#;
+/// What the server answers a work-item POST with: the issue serializer,
+/// which carries `sequence_id` and (when the deployment has a web base URL)
+/// `url`, but no `identifier`.
+const ISSUE_CREATED: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo","sequence_id":123,"url":"https://app.example/acme/browse/ENG-123"}"#;
+const ISSUE_PROJECTS: &str =
+    r#"[{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}]"#;
+
+const ISSUE_PROJECT_DETAIL: &str =
+    r#"{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}"#;
+
+/// A work-item POST answer without `url`, as from a deployment that has no
+/// web base URL configured.
+const ISSUE_CREATED_NO_URL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo","sequence_id":123}"#;
+
+/// Whether `reference` names the fake's one project the way the server
+/// resolves a project ref: the identifier in any case, or the UUID in any
+/// spelling.
+fn names_issue_project(reference: &str) -> bool {
+    reference.to_lowercase().replace('-', "") == ISSUE_PROJECT_ID.replace('-', "")
+        || reference.eq_ignore_ascii_case("ENG")
+}
+
+/// The project ref in a `/api/v1/workspaces/acme/projects/{ref}/...` path.
+fn project_ref_of(path: &str) -> &str {
+    path.strip_prefix("/api/v1/workspaces/acme/projects/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
+}
+
+/// A server-like fake for `issue create`: the work-item POST answers
+/// `created_body` for the known project and 404s any other ref, and the
+/// project detail route answers `detail` (or 404 for an unknown ref).
+fn issue_create_fake(created_body: &'static str, detail: CannedResponse) -> Handler {
+    Box::new(move |req| {
+        if req.method == "GET" && req.path == "/api/v1/workspaces/acme/projects/" {
+            return CannedResponse::ok(ISSUE_PROJECTS);
+        }
+        if !names_issue_project(project_ref_of(&req.path)) {
+            return not_found();
+        }
+        if req.method == "POST" {
+            return created(created_body);
+        }
+        CannedResponse {
+            status: detail.status,
+            status_text: detail.status_text,
+            body: detail.body.clone(),
+        }
+    })
+}
+
+fn forbidden() -> CannedResponse {
+    CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"You don't have the required permissions."}"#.into(),
+    }
+}
+
+fn issue_create_handler() -> Handler {
+    issue_create_fake(ISSUE_CREATED, CannedResponse::ok(ISSUE_PROJECT_DETAIL))
+}
+
+/// The single work-item POST among the recorded requests.
+fn the_create_post(recorded: &[RecordedRequest]) -> RecordedRequest {
+    let posts: Vec<_> = recorded.iter().filter(|r| r.method == "POST").collect();
+    assert_eq!(posts.len(), 1, "exactly one POST: {recorded:?}");
+    posts[0].clone()
+}
 const LONG_BODY: &str = "# Cold start\n\n- [ ] fixtures\n  - nested\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
 
 /// An issue patch makes the by-identifier GET, then the PATCH; both can be
@@ -1593,7 +1918,7 @@ fn issue_patch_handler() -> Handler {
 
 #[tokio::test]
 async fn issue_create_description_file_sends_the_file_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("body.md");
     std::fs::write(&path, LONG_BODY).unwrap();
@@ -1616,23 +1941,32 @@ async fn issue_create_description_file_sends_the_file_as_markdown() {
 
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].method, "POST");
-    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/work-items/");
+    let post = the_create_post(&recorded);
     assert_eq!(
-        body_json(&recorded[0]),
+        post.path,
+        "/api/v1/workspaces/acme/projects/ENG/work-items/"
+    );
+    assert_eq!(
+        body_json(&post),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_description_file_dash_reads_stdin() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description-file",
+            "-",
         ],
         LONG_BODY,
     )
@@ -1641,19 +1975,26 @@ async fn issue_create_description_file_dash_reads_stdin() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_inline_description_is_sent_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description", "## Hi",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description",
+            "## Hi",
         ],
         "",
     )
@@ -1662,9 +2003,246 @@ async fn issue_create_inline_description_is_sent_as_markdown() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": "## Hi"})
     );
+}
+
+// ---- issue create output (PDASHOSS01-408) -------------------------------
+//
+// The JSON `issue create` prints is the server payload plus a CLI-built
+// `identifier` (`PROJ-123`); `--output id` prints only that identifier, for
+// scripts that file follow-ups and need the new key.
+
+#[tokio::test]
+async fn issue_create_prints_identifier_sequence_id_and_url() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "eng", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["sequence_id"], 123);
+    assert_eq!(printed["url"], "https://app.example/acme/browse/ENG-123");
+    assert_eq!(printed["id"], ISSUE_ID);
+    assert_eq!(printed["project"], ISSUE_PROJECT_ID);
+}
+
+#[tokio::test]
+async fn issue_create_output_id_prints_only_the_identifier() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&the_create_post(&recorded)),
+        serde_json::json!({"name": "X"})
+    );
+}
+
+#[tokio::test]
+async fn issue_create_accepts_an_uppercase_project_uuid() {
+    let fake = start_fake(issue_create_handler()).await;
+    let upper = ISSUE_PROJECT_ID.to_uppercase();
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            &upper,
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+}
+
+#[tokio::test]
+async fn issue_create_unknown_project_exits_not_found() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "NOPE", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(EXIT_NOT_FOUND), "stderr: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+}
+
+/// The key comes from the created work item's own `url`, so create needs
+/// no project read: a caller the project-detail route refuses (403), but
+/// who may create work items, still gets the identifier.
+#[tokio::test]
+async fn issue_create_does_not_need_project_read_access() {
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED, forbidden())).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "only the POST: {recorded:?}");
+}
+
+/// The identifier matches the created item's `url`, never an older
+/// snapshot of the project identifier (here the detail route reports a
+/// different one, as after a rename).
+#[tokio::test]
+async fn issue_create_identifier_agrees_with_the_created_url() {
+    let renamed =
+        r#"{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"OPS","name":"Engineering"}"#;
+    let fake = start_fake(issue_create_fake(
+        ISSUE_CREATED,
+        CannedResponse::ok(renamed),
+    ))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            ISSUE_PROJECT_ID,
+            "--title",
+            "X",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["url"], "https://app.example/acme/browse/ENG-123");
+}
+
+/// Without a `url` (no web base URL configured), create reads the created
+/// item's project after the POST, by the UUID the POST returned.
+#[tokio::test]
+async fn issue_create_without_url_reads_the_project_after_creating() {
+    let fake = start_fake(issue_create_fake(
+        ISSUE_CREATED_NO_URL,
+        CannedResponse::ok(ISSUE_PROJECT_DETAIL),
+    ))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "eng", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["sequence_id"], 123);
+    assert!(printed.get("url").is_none());
+    let recorded = fake.recorded.lock().unwrap();
+    let methods: Vec<_> = recorded
+        .iter()
+        .map(|r| (r.method.as_str(), r.path.as_str()))
+        .collect();
+    assert_eq!(
+        methods,
+        vec![
+            ("POST", "/api/v1/workspaces/acme/projects/eng/work-items/"),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/"
+            ),
+        ]
+    );
+}
+
+/// Without a `url` and without project read access the item is still
+/// created: the JSON omits `identifier` and exits 0 (the server payload
+/// is still printed), while `--output id` cannot print a key and says the
+/// item was created.
+#[tokio::test]
+async fn issue_create_without_url_or_project_read_still_reports_the_created_item() {
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED_NO_URL, forbidden())).await;
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "ENG", "--title", "X"],
+        "",
+    )
+    .await;
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["id"], ISSUE_ID);
+    assert_eq!(printed["sequence_id"], 123);
+    assert!(printed.get("identifier").is_none());
+
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED_NO_URL, forbidden())).await;
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(out.code, Some(EXIT_SERVER), "stderr: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert!(out.stderr.contains(ISSUE_ID), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("was created"), "stderr: {}", out.stderr);
 }
 
 #[tokio::test]
@@ -1676,7 +2254,13 @@ async fn issue_patch_description_file_sends_the_file_as_markdown() {
 
     let out = run_pidash(
         &fake,
-        &["issue", "patch", "ENG-1", "--description-file", path.to_str().unwrap()],
+        &[
+            "issue",
+            "patch",
+            "ENG-1",
+            "--description-file",
+            path.to_str().unwrap(),
+        ],
         "",
     )
     .await;
@@ -1693,6 +2277,63 @@ async fn issue_patch_description_file_sends_the_file_as_markdown() {
         body_json(&recorded[1]),
         serde_json::json!({"description_markdown": LONG_BODY})
     );
+}
+
+const SAME_STATE: &str = "11111111-2222-3333-4444-555555555555";
+
+/// PDASHOSS01-406: `issue patch --state` naming the state the issue is
+/// already in prints the advisory `state_unchanged` note from `cmd_patch`.
+#[tokio::test]
+async fn issue_patch_same_state_prints_state_unchanged_note() {
+    let detail = format!(
+        r#"{{"id":"{ISSUE_ID}","project":"{ISSUE_PROJECT_ID}","name":"demo","state":"{SAME_STATE}"}}"#
+    );
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(detail.clone()))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--state", SAME_STATE],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let note = &printed["state_unchanged"];
+    assert_eq!(note["dispatch_expected"], serde_json::json!(false));
+    assert_eq!(note["state"], serde_json::json!(SAME_STATE));
+    assert!(
+        note["hint"]
+            .as_str()
+            .unwrap()
+            .contains("pidash issue run-ai ENG-1"),
+        "{note}"
+    );
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[1]),
+        serde_json::json!({"state": SAME_STATE})
+    );
+}
+
+/// A `--state` that differs from the issue's current state prints no note.
+#[tokio::test]
+async fn issue_patch_real_state_change_prints_no_note() {
+    let detail = format!(
+        r#"{{"id":"{ISSUE_ID}","project":"{ISSUE_PROJECT_ID}","name":"demo","state":"aaaaaaaa-2222-3333-4444-555555555555"}}"#
+    );
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(detail.clone()))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--state", SAME_STATE],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert!(printed.get("state_unchanged").is_none(), "{printed}");
 }
 
 #[tokio::test]
@@ -1718,16 +2359,36 @@ async fn issue_patch_description_file_dash_reads_stdin() {
 async fn issue_description_and_description_file_conflict_at_the_cli() {
     for args in [
         &[
-            "issue", "create", "--project", "ENG", "--title", "X", "--description", "x",
-            "--description-file", "-",
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
         ][..],
-        &["issue", "patch", "ENG-1", "--description", "x", "--description-file", "-"][..],
+        &[
+            "issue",
+            "patch",
+            "ENG-1",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
+        ][..],
     ] {
         let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
         let out = run_pidash(&fake, args, "body").await;
 
         assert_ne!(out.code, Some(0), "{args:?}");
-        assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+        assert!(
+            out.stderr.contains("cannot be used with"),
+            "stderr: {}",
+            out.stderr
+        );
         assert!(fake.recorded.lock().unwrap().is_empty());
     }
 }
@@ -1741,20 +2402,49 @@ async fn issue_empty_description_file_or_stdin_exits_2_without_a_request() {
 
     for (args, stdin) in [
         (
-            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-"],
+            vec![
+                "issue",
+                "create",
+                "--project",
+                "ENG",
+                "--title",
+                "X",
+                "--description-file",
+                "-",
+            ],
             "",
         ),
         (
-            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", &empty],
+            vec![
+                "issue",
+                "create",
+                "--project",
+                "ENG",
+                "--title",
+                "X",
+                "--description-file",
+                &empty,
+            ],
             "",
         ),
-        (vec!["issue", "patch", "ENG-1", "--description-file", "-"], "   \n"),
-        (vec!["issue", "patch", "ENG-1", "--description-file", &empty], ""),
+        (
+            vec!["issue", "patch", "ENG-1", "--description-file", "-"],
+            "   \n",
+        ),
+        (
+            vec!["issue", "patch", "ENG-1", "--description-file", &empty],
+            "",
+        ),
     ] {
         let fake = start_fake(issue_patch_handler()).await;
         let out = run_pidash(&fake, &args, stdin).await;
 
-        assert_eq!(out.code, Some(EXIT_INVALID), "{args:?} stderr: {}", out.stderr);
+        assert_eq!(
+            out.code,
+            Some(EXIT_INVALID),
+            "{args:?} stderr: {}",
+            out.stderr
+        );
         assert!(out.stderr.contains("is empty"), "stderr: {}", out.stderr);
         assert!(fake.recorded.lock().unwrap().is_empty(), "{args:?}");
     }
@@ -1917,7 +2607,9 @@ async fn fetch_project_labels_follows_next_page_results_true_across_pages() {
                      {"id":"l-2","name":"frontend"}]}"#,
             )
         } else if req.path.contains("cursor=") {
-            CannedResponse::ok(r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#)
+            CannedResponse::ok(
+                r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#,
+            )
         } else {
             CannedResponse::ok(
                 r#"{"count":1,"next_cursor":"1000:1:0","next_page_results":true,"results":[
@@ -2070,6 +2762,11 @@ async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
             remove_label: vec![],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await
@@ -2107,6 +2804,11 @@ async fn issue_patch_clear_labels_sends_an_empty_array() {
             remove_label: vec![],
             clear_labels: true,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await
@@ -2153,6 +2855,11 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
             remove_label: vec!["Frontend".into()],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await
@@ -2164,4 +2871,230 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
         .count();
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
+}
+
+// ---- `state list` project forms (PDASHOSS01-403) ----
+
+const STATES_BODY: &str = r#"{"count":2,"results":[{"id":"s1","name":"Todo","group":"unstarted"},{"id":"s2","name":"Done","group":"completed"}]}"#;
+const PROJECT_UUID: &str = "e509f5c9-c6fd-4b1a-a89c-8cb863610500";
+
+/// Fake that serves states for project `ENG` (and its UUID) and 404s
+/// everything else, like the server does for an unknown project.
+fn states_fake_handler() -> Handler {
+    Box::new(|req| {
+        let known = [
+            "/api/v1/workspaces/acme/projects/ENG/states/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ];
+        if known.contains(&req.path) {
+            CannedResponse::ok(STATES_BODY)
+        } else if req.path == "/api/v1/workspaces/acme/work-items/ENG-7/" {
+            CannedResponse::ok(format!(r#"{{"id":"i7","project":"{PROJECT_UUID}"}}"#))
+        } else {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        }
+    })
+}
+
+async fn state_list(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
+    let fake = start_fake(states_fake_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+#[tokio::test]
+async fn state_list_positional_project_slug_lists_project_states() {
+    let (resp, paths) = state_list(Some("ENG"), None).await;
+    let resp = resp.expect("slug positional succeeds");
+    assert_eq!(resp["results"][0]["name"], "Todo");
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
+
+#[tokio::test]
+async fn state_list_positional_project_uuid_lists_project_states() {
+    let (resp, paths) = state_list(Some(PROJECT_UUID), None).await;
+    assert_eq!(resp.expect("uuid positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![format!(
+            "/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn state_list_project_flag_slug_lists_project_states() {
+    let (resp, paths) = state_list(None, Some("ENG")).await;
+    assert_eq!(resp.expect("--project succeeds")["count"], 2);
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
+
+#[tokio::test]
+async fn state_list_positional_issue_identifier_still_resolves_its_project() {
+    let (resp, paths) = state_list(Some("ENG-7"), None).await;
+    assert_eq!(resp.expect("issue positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/workspaces/acme/work-items/ENG-7/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_names_the_project() {
+    for (positional, flag) in [(Some("NOPE"), None), (None, Some("NOPE"))] {
+        let (resp, _) = state_list(positional, flag).await;
+        let err = resp.expect_err("unknown project fails");
+        assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+        assert_eq!(err.message, "project 'NOPE' not found");
+    }
+}
+
+const MISSING_UUID: &str = "00000000-0000-4000-8000-000000000000";
+const MISSING_UUID_COMPACT: &str = "00000000000040008000000000000000";
+const SECRET_UUID: &str = "22222222-2222-4222-8222-222222222222";
+const DENIED_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Like the real servers: the states route checks project membership
+/// before existence, so any UUID the caller is not a member of gets 403.
+/// Project detail hides secret projects from non-members, so it answers
+/// 404 for both a missing project and a secret one the caller has not
+/// joined; only a visible project (`DENIED_UUID`) answers 200.
+fn states_forbidden_handler() -> Handler {
+    Box::new(|req| {
+        let forbidden = CannedResponse {
+            status: 403,
+            status_text: "Forbidden",
+            body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
+        };
+        let hidden = [MISSING_UUID, MISSING_UUID_COMPACT, SECRET_UUID]
+            .map(|id| format!("/api/v1/workspaces/acme/projects/{id}/"));
+        if hidden.contains(&req.path) {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        } else if req.path == format!("/api/v1/workspaces/acme/projects/{DENIED_UUID}/") {
+            CannedResponse::ok(format!(r#"{{"id":"{DENIED_UUID}","identifier":"ENG"}}"#))
+        } else {
+            forbidden
+        }
+    })
+}
+
+async fn state_list_forbidden(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
+    let fake = start_fake(states_forbidden_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+/// States 403 + detail 404 cannot tell a missing project from a secret
+/// one the caller has not joined, so the error names the project but
+/// stays a permission error (exit 3, HTTP 403), never "not found".
+fn assert_hidden_project_error(
+    resp: Result<serde_json::Value, pidash::api_client::CliError>,
+    name: &str,
+) {
+    let err = resp.expect_err("hidden or missing uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        format!("project '{name}' not found or not accessible")
+    );
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_uuid_names_the_project() {
+    for (positional, flag) in [(Some(MISSING_UUID), None), (None, Some(MISSING_UUID))] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, MISSING_UUID);
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_secret_project_uuid_is_not_reported_as_missing() {
+    for (positional, flag) in [(Some(SECRET_UUID), None), (None, Some(SECRET_UUID))] {
+        let (resp, _) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, SECRET_UUID);
+    }
+}
+
+#[tokio::test]
+async fn state_list_compact_project_uuid_takes_the_uuid_error_path() {
+    for (positional, flag) in [
+        (Some(MISSING_UUID_COMPACT), None),
+        (None, Some(MISSING_UUID_COMPACT)),
+    ] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, MISSING_UUID_COMPACT);
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_denied_project_uuid_keeps_the_permission_error() {
+    let (resp, _) = state_list_forbidden(Some(DENIED_UUID), None).await;
+    let err = resp.expect_err("denied uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: You do not have permission to perform this action."
+    );
+}
+
+#[tokio::test]
+async fn state_list_denied_project_slug_does_not_probe_project_detail() {
+    let (resp, paths) = state_list_forbidden(Some("ENG"), None).await;
+    assert_eq!(resp.expect_err("denied slug fails").exit_code, EXIT_AUTH);
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
 }

@@ -65,6 +65,11 @@ export function AddExistingModal({
   searchPlaceholder = "Search work items",
 }: AddExistingModalProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // The search field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button and can land after the reader has clicked into the field, eating
+  // their keystrokes on a busy host (NEWFRONT-1055, 1058).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const [selected, setSelected] = React.useState<string[]>([]);
   const [submitting, setSubmitting] = React.useState(false);
   const hits = useQuery({
@@ -114,6 +119,7 @@ export function AddExistingModal({
       title="Add existing work items"
       description="Search this project and attach the ones you pick."
       open={open}
+      initialFocus={searchRef}
       onOpenChange={(next) => onOpenChange(next)}
       actions={
         <>
@@ -128,6 +134,7 @@ export function AddExistingModal({
     >
       <div className="flex flex-col gap-(--space-4)">
         <Input
+          inputRef={searchRef}
           label="Search work items"
           placeholder={searchPlaceholder}
           value={query}

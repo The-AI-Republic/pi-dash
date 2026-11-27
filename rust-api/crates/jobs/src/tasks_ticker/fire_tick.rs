@@ -35,7 +35,7 @@
 //!
 //! # Seam (D-12 owns the callees)
 //!
-//! `dispatch_continuation_run`, `is_ticking_state`, `_active_run_for` and
+//! `dispatch_continuation_run`, `stage_runs_automatically`, `_active_run_for` and
 //! `_latest_prior_run` are orchestration territory (PIDASHCONV-49, which is
 //! blocked *by* this epic, so no edge) and are not re-ported here: they
 //! resolve through [`FireTickSeam`]. The stage→interval-column mapping
@@ -71,6 +71,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rand08::SeedableRng;
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QuerySelect};
+use sea_query::{Alias, Expr, Query, SelectStatement};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -112,6 +114,8 @@ pub struct ProjectTickCols {
     pub interval_review: Option<i32>,
     /// `agent_test_default_interval_seconds` (In Test rhythm).
     pub interval_test: Option<i32>,
+    /// `settings.agent_stages` resolved (both on by default).
+    pub stages: pidash_types::orchestration::StageSwitches,
 }
 
 /// The ticker row as claimed under lock, plus the issue/project ids the
@@ -150,7 +154,7 @@ pub struct TickerSnapshot {
 /// no seam reads).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeamAnswers {
-    /// `is_ticking_state(issue.state)` (`agent_ticker.py:187`).
+    /// The issue's stage runs automatically (`agent_ticker.py:187`).
     pub ticking_state: bool,
     /// `_active_run_for(issue) is not None` (`:197`).
     pub active_run: bool,
@@ -166,13 +170,18 @@ pub struct SeamAnswers {
 /// registry/mapping lookups; async methods touch the database through the
 /// implementor's own pool handle (never the claim transaction).
 pub trait FireTickSeam: Send + Sync {
-    /// `orchestration.agent_phases.is_ticking_state` (`agent_ticker.py:187`).
+    /// Whether ticks happen in `state` under the project's stage
+    /// switches (`agent_ticker.py:187`, lean agent workflow §6.1).
     ///
     /// The state row is resolved live by the caller (`read_claim` joins
     /// it, like Django's `select_related("issue__state")`): a cached
     /// boot-time map cannot see a project/state created after start
     /// (PIDASHCONV-1218).
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool;
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool;
 
     /// `ticker.effective_interval_seconds()` (`:241`): the stage→column
     /// resolution plus the project-column read with the stage default.
@@ -476,59 +485,59 @@ async fn read_claim(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ticker_id: Uuid,
 ) -> Result<Option<ClaimRead>, sqlx::Error> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT issue_id, "used", granted, waited, user_disabled,
-                  next_run_at, last_tick_at, enabled, disarm_reason,
-                  pending_entry, pending_entry_free,
-                  pending_entry_actor_id, pending_entry_trigger
-           FROM issue_agent_ticker
-           WHERE id = $1 AND deleted_at IS NULL
-           FOR UPDATE"#,
-    )
-    .bind(ticker_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let row = match row {
-        Some(row) => row,
+    use pidash_db::entity::{issue_agent_ticker, projects};
+    let model = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+        issue_agent_ticker::Entity::find_by_id(ticker_id)
+            .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(orm_sqlx)?
+    };
+    let model = match model {
+        Some(model) => model,
         None => return Ok(None),
     };
+    let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&Utc);
     let snapshot = TickerSnapshot {
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
+        used: model.used,
+        granted: model.granted,
+        waited: model.waited,
+        user_disabled: model.user_disabled,
+        next_run_at: model.next_run_at.map(at),
+        last_tick_at: model.last_tick_at.map(at),
+        enabled: model.enabled,
+        disarm_reason: model.disarm_reason.clone(),
+        pending_entry: model.pending_entry,
+        pending_entry_free: model.pending_entry_free,
+        pending_entry_actor_id: model.pending_entry_actor_id,
+        pending_entry_trigger: model.pending_entry_trigger.clone(),
     };
-    let issue_id: Uuid = row.try_get("issue_id")?;
+    let issue_id = model.issue_id;
     // `select_related("issue__state")`: resolve the state row live, with
     // no `deleted_at` filter (a soft-deleted state still resolves — the
     // FK does not care), so a state created or renamed after the worker
     // booted is seen (PIDASHCONV-1218).
-    let issue = sqlx::query(
-        r#"SELECT i.state_id AS state_id, i.project_id AS project_id,
-                  s.name AS state_name, s."group" AS state_group
-           FROM issues i
-           LEFT JOIN states s ON s.id = i.state_id
-           WHERE i.id = $1"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let (state, project_id): (Option<StateView>, Option<Uuid>) = match issue {
-        Some(issue) => {
-            let state_id: Option<Uuid> = issue.try_get("state_id")?;
+    let issue_row = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+        conn.query_one(DbBackend::Postgres.build(&issue_state_stmt(issue_id)))
+            .await
+            .map_err(orm_sqlx)?
+    };
+    let (state, project_id): (Option<StateView>, Option<Uuid>) = match issue_row {
+        Some(row) => {
+            let state_id: Option<Uuid> = row
+                .try_get::<Option<Uuid>>("", "state_id")
+                .map_err(orm_sqlx)?;
             let state = match state_id {
                 Some(id) => {
-                    let name: Option<String> = issue.try_get("state_name")?;
-                    let group: Option<String> = issue.try_get("state_group")?;
+                    let name: Option<String> = row
+                        .try_get::<Option<String>>("", "state_name")
+                        .map_err(orm_sqlx)?;
+                    let group: Option<String> = row
+                        .try_get::<Option<String>>("", "state_group")
+                        .map_err(orm_sqlx)?;
                     match (name, group) {
                         (Some(name), Some(group)) => Some(StateView { id, name, group }),
                         _ => None,
@@ -536,22 +545,32 @@ async fn read_claim(
                 }
                 None => None,
             };
-            (state, issue.try_get("project_id")?)
+            let project_id: Option<Uuid> = row
+                .try_get::<Option<Uuid>>("", "project_id")
+                .map_err(orm_sqlx)?;
+            (state, project_id)
         }
         None => (None, None),
     };
     let project = match project_id {
-        Some(pid) => sqlx::query_as(
-            r#"SELECT agent_default_max_ticks, agent_ticking_enabled,
-                      agent_default_interval_seconds,
-                      agent_review_default_interval_seconds,
-                      agent_test_default_interval_seconds
-               FROM projects WHERE id = $1"#,
-        )
-        .bind(pid)
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or_default(),
+        Some(pid) => {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+            projects::Entity::find_by_id(pid)
+                .select_only()
+                .columns([
+                    projects::Column::AgentDefaultMaxTicks,
+                    projects::Column::AgentTickingEnabled,
+                    projects::Column::AgentDefaultIntervalSeconds,
+                    projects::Column::AgentReviewDefaultIntervalSeconds,
+                    projects::Column::AgentTestDefaultIntervalSeconds,
+                    projects::Column::Settings,
+                ])
+                .into_model::<ProjectTickCols>()
+                .one(&conn)
+                .await
+                .map_err(orm_sqlx)?
+                .unwrap_or_default()
+        }
         None => ProjectTickCols::default(),
     };
     Ok(Some(ClaimRead {
@@ -572,24 +591,61 @@ pub struct ClaimRead {
     pub project: ProjectTickCols,
 }
 
-impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for ProjectTickCols {
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
+impl sea_orm::FromQueryResult for ProjectTickCols {
+    fn from_query_result(row: &sea_orm::QueryResult, pre: &str) -> Result<Self, sea_orm::DbErr> {
         // The tick-policy columns are INT4: decode at INT4 width (an
         // `Option<i64>` decode fails live with an INT4/INT8 mismatch).
-        let pool: Option<i32> = row.try_get("agent_default_max_ticks")?;
-        let ticking_enabled: Option<bool> = row.try_get("agent_ticking_enabled")?;
-        let interval_default: Option<i32> = row.try_get("agent_default_interval_seconds")?;
-        let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
-        let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
         Ok(Self {
-            pool,
-            ticking_enabled,
-            interval_default,
-            interval_review,
-            interval_test,
+            pool: row.try_get::<Option<i32>>(pre, "agent_default_max_ticks")?,
+            ticking_enabled: row.try_get::<Option<bool>>(pre, "agent_ticking_enabled")?,
+            interval_default: row.try_get::<Option<i32>>(pre, "agent_default_interval_seconds")?,
+            interval_review: row
+                .try_get::<Option<i32>>(pre, "agent_review_default_interval_seconds")?,
+            interval_test: row
+                .try_get::<Option<i32>>(pre, "agent_test_default_interval_seconds")?,
+            stages: match row.try_get::<Option<serde_json::Value>>(pre, "settings") {
+                Ok(Some(settings)) => {
+                    pidash_services::domain::project_settings::stage_switches_of(&settings)
+                }
+                _ => pidash_types::orchestration::StageSwitches::ALL,
+            },
         })
     }
+}
+
+/// A SeaORM failure as the sqlx error the old read raised (cf. `fire_binding::orm_sqlx`).
+fn orm_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed
+        }
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Issue + state read (`agent_ticker.py:101`, `select_related("issue",
+/// "issue__state")`): one statement, left join, no `deleted_at` filter,
+/// no lock — a soft-deleted state still resolves (PIDASHCONV-1218).
+pub fn issue_state_stmt(issue_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("issues", "state_id"))
+        .column(("issues", "project_id"))
+        .expr_as(Expr::col(("states", "name")), Alias::new("state_name"))
+        .expr_as(Expr::col(("states", "group")), Alias::new("state_group"))
+        .from("issues")
+        .left_join(
+            "states",
+            Expr::col(("issues", "state_id")).equals(("states", "id")),
+        )
+        .and_where(Expr::col(("issues", "id")).eq(issue_id));
+    query.to_owned()
 }
 
 /// Pre-claim disarm write (`agent_ticker.py:140-150` switch, `:171-181`
@@ -602,20 +658,33 @@ async fn write_preclaim_disarm(
     disarm_reason: TickerDisarmReason,
     now: &DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE issue_agent_ticker
-           SET enabled = FALSE, disarm_reason = $1,
-               pending_entry = FALSE, pending_entry_free = FALSE,
-               pending_entry_actor_id = NULL, pending_entry_trigger = '',
-               updated_at = $2
-           WHERE id = $3"#,
-    )
-    .bind(disarm_reason.as_str())
-    .bind(now)
-    .bind(ticker_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    use pidash_db::entity::issue_agent_ticker;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    issue_agent_ticker::Entity::update_many()
+        .col_expr(issue_agent_ticker::Column::Enabled, Expr::value(false))
+        .col_expr(
+            issue_agent_ticker::Column::DisarmReason,
+            Expr::value(disarm_reason.as_str().to_owned()),
+        )
+        .col_expr(issue_agent_ticker::Column::PendingEntry, Expr::value(false))
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryFree,
+            Expr::value(false),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryActorId,
+            Expr::value(None::<Uuid>),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryTrigger,
+            Expr::value(String::new()),
+        )
+        .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(*now))
+        .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+        .exec(&conn)
+        .await
+        .map(|_| ())
+        .map_err(orm_sqlx)
 }
 
 /// Clock-advance write (`agent_ticker.py:268-281`): `used`, `last_tick_at`,
@@ -627,25 +696,42 @@ async fn write_claim(
     ticket: &ClaimTicket,
     now: &DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE issue_agent_ticker
-           SET "used" = $1, last_tick_at = $2, next_run_at = $3,
-               enabled = $4, disarm_reason = $5,
-               pending_entry = FALSE, pending_entry_free = FALSE,
-               pending_entry_actor_id = NULL, pending_entry_trigger = '',
-               updated_at = $6
-           WHERE id = $7"#,
-    )
-    .bind(ticket.used)
-    .bind(now)
-    .bind(ticket.next_run_at)
-    .bind(ticket.enabled)
-    .bind(&ticket.disarm_reason)
-    .bind(now)
-    .bind(ticker_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    use pidash_db::entity::issue_agent_ticker;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    issue_agent_ticker::Entity::update_many()
+        .col_expr(issue_agent_ticker::Column::Used, Expr::value(ticket.used))
+        .col_expr(issue_agent_ticker::Column::LastTickAt, Expr::value(*now))
+        .col_expr(
+            issue_agent_ticker::Column::NextRunAt,
+            Expr::value(ticket.next_run_at),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::Enabled,
+            Expr::value(ticket.enabled),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::DisarmReason,
+            Expr::value(ticket.disarm_reason.clone()),
+        )
+        .col_expr(issue_agent_ticker::Column::PendingEntry, Expr::value(false))
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryFree,
+            Expr::value(false),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryActorId,
+            Expr::value(None::<Uuid>),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryTrigger,
+            Expr::value(String::new()),
+        )
+        .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(*now))
+        .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+        .exec(&conn)
+        .await
+        .map(|_| ())
+        .map_err(orm_sqlx)
 }
 
 /// Rollback write (`agent_ticker.py:318-330`): every `prev_*` field.
@@ -656,28 +742,119 @@ async fn write_rollback(
     ticket: &ClaimTicket,
     now: &DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE issue_agent_ticker
-           SET "used" = $1, next_run_at = $2,
-               enabled = $3, disarm_reason = $4,
-               pending_entry = $5, pending_entry_free = $6,
-               pending_entry_actor_id = $7, pending_entry_trigger = $8,
-               updated_at = $9
-           WHERE id = $10"#,
+    use pidash_db::entity::issue_agent_ticker;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    issue_agent_ticker::Entity::update_many()
+        .col_expr(
+            issue_agent_ticker::Column::Used,
+            Expr::value(ticket.prev_used),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::NextRunAt,
+            Expr::value(ticket.prev_next_run_at),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::Enabled,
+            Expr::value(ticket.prev_enabled),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::DisarmReason,
+            Expr::value(ticket.prev_disarm_reason.clone()),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntry,
+            Expr::value(ticket.prev_pending_entry),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryFree,
+            Expr::value(ticket.prev_pending_entry_free),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryActorId,
+            Expr::value(ticket.prev_pending_entry_actor_id),
+        )
+        .col_expr(
+            issue_agent_ticker::Column::PendingEntryTrigger,
+            Expr::value(ticket.prev_pending_entry_trigger.clone()),
+        )
+        .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(*now))
+        .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+        .exec(&conn)
+        .await
+        .map(|_| ())
+        .map_err(orm_sqlx)
+}
+
+/// The stage check before a claim (lean workflow §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageGate {
+    /// The issue sits in a stage that runs automatically: go on.
+    Proceed,
+    /// Not a stage at all (Done, Todo, no state): skip, leave the row.
+    Skip,
+    /// A registered stage the project switched off while the issue sat in
+    /// it: skip this tick without disarming. No run, no budget spent, the
+    /// ticker stays enabled, and the next tick is scheduled one interval
+    /// ahead as a fired tick would be, so turning the stage back on
+    /// resumes the existing schedule.
+    Reschedule,
+}
+
+/// When a skipped tick (§6.4) next comes due: one interval plus the jitter
+/// draw from `now`, the same as a fired tick's `next_run_at`.
+pub fn skipped_tick_next_run_at(
+    now: DateTime<Utc>,
+    interval_seconds: i64,
+    jitter_seconds: f64,
+) -> DateTime<Utc> {
+    now + chrono::Duration::milliseconds(
+        ((interval_seconds as f64 + jitter_seconds) * 1000.0).round() as i64,
     )
-    .bind(ticket.prev_used)
-    .bind(ticket.prev_next_run_at)
-    .bind(ticket.prev_enabled)
-    .bind(&ticket.prev_disarm_reason)
-    .bind(ticket.prev_pending_entry)
-    .bind(ticket.prev_pending_entry_free)
-    .bind(ticket.prev_pending_entry_actor_id)
-    .bind(&ticket.prev_pending_entry_trigger)
-    .bind(now)
-    .bind(ticker_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+}
+
+/// The skipped-tick write: `next_run_at` and `updated_at` only. `used`,
+/// `enabled`, `disarm_reason` and the pending columns are untouched.
+async fn write_skip_reschedule(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ticker_id: Uuid,
+    next_run_at: DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    use pidash_db::entity::issue_agent_ticker;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    issue_agent_ticker::Entity::update_many()
+        .col_expr(
+            issue_agent_ticker::Column::NextRunAt,
+            Expr::value(Some(next_run_at)),
+        )
+        .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(*now))
+        .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+        .exec(&conn)
+        .await
+        .map(|_| ())
+        .map_err(orm_sqlx)
+}
+
+/// Decide the stage check from the seam's verdict (`runs_automatically`)
+/// and the issue's live state.
+pub fn stage_gate(runs_automatically: bool, state: Option<&StateView>) -> StageGate {
+    if runs_automatically {
+        return StageGate::Proceed;
+    }
+    let registered_stage = state.is_some_and(|state| {
+        pidash_types::orchestration::phase_config_for(Some(
+            &pidash_types::orchestration::StateRef {
+                group: &state.group,
+                name: &state.name,
+            },
+        ))
+        .is_some()
+    });
+    if registered_stage {
+        StageGate::Reschedule
+    } else {
+        StageGate::Skip
+    }
 }
 
 /// Per-ticker worker (`agent_ticker.py:78-345`).
@@ -718,8 +895,22 @@ pub async fn fire_tick(
             Ok(false)
         }
         PreDecision::Proceed { free_claim, cap } => {
-            if !seam.is_ticking_state(read.state.as_ref()) {
-                return Ok(false);
+            let runs = seam.stage_runs_automatically(read.state.as_ref(), &read.project);
+            match stage_gate(runs, read.state.as_ref()) {
+                StageGate::Proceed => {}
+                StageGate::Skip => return Ok(false),
+                StageGate::Reschedule => {
+                    let interval = seam.tick_interval_seconds(read.state.as_ref(), &read.project);
+                    let next =
+                        skipped_tick_next_run_at(now, interval, jitter_seconds(interval, rng));
+                    write_skip_reschedule(&mut tx, ticker_id, next, &now).await?;
+                    tx.commit().await?;
+                    tracing::info!(
+                        "agent_ticker.fire_tick: skip issue={} reason=stage-switched-off",
+                        read.issue_id,
+                    );
+                    return Ok(false);
+                }
             }
             if seam.has_active_run(read.issue_id).await? {
                 tracing::info!(
@@ -759,13 +950,19 @@ pub async fn fire_tick(
                 .await?;
             match run {
                 None => {
+                    use pidash_db::entity::issue_agent_ticker;
                     let mut rollback_tx = pool.begin().await?;
-                    let exists: Option<(Uuid,)> = sqlx::query_as(
-                        "SELECT id FROM issue_agent_ticker WHERE id = $1 FOR UPDATE",
-                    )
-                    .bind(ticker_id)
-                    .fetch_optional(&mut *rollback_tx)
-                    .await?;
+                    let exists = {
+                        let conn = pidash_db::orm_tx::TxConn::new(&mut rollback_tx);
+                        issue_agent_ticker::Entity::find_by_id(ticker_id)
+                            .select_only()
+                            .columns([issue_agent_ticker::Column::Id])
+                            .lock_exclusive()
+                            .into_tuple::<Uuid>()
+                            .one(&conn)
+                            .await
+                            .map_err(orm_sqlx)?
+                    };
                     if exists.is_some() {
                         write_rollback(&mut rollback_tx, ticker_id, &ticket, &now).await?;
                     }
@@ -844,6 +1041,67 @@ pub fn register_fire_tick(registry: &mut Registry, pool: PgPool, seam: Arc<dyn F
 mod tests {
     use super::super::scan::fire_message;
     use super::*;
+
+    fn view(name: &str, group: &str) -> StateView {
+        StateView {
+            id: Uuid::nil(),
+            name: name.to_owned(),
+            group: group.to_owned(),
+        }
+    }
+
+    /// The live check the shim makes, for a project with these switches.
+    fn gate_for(state: Option<&StateView>, review: bool, test: bool) -> StageGate {
+        let project = ProjectTickCols {
+            stages: pidash_types::orchestration::StageSwitches { review, test },
+            ..Default::default()
+        };
+        let runs = crate::orchestration::shim_stage_runs_automatically(state, &project);
+        stage_gate(runs, state)
+    }
+
+    #[test]
+    fn a_skipped_tick_is_scheduled_one_interval_ahead() {
+        let now = DateTime::parse_from_rfc3339("2026-11-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            skipped_tick_next_run_at(now, 7200, 0.0),
+            now + chrono::Duration::hours(2)
+        );
+        assert_eq!(
+            skipped_tick_next_run_at(now, 7200, 1.5),
+            now + chrono::Duration::milliseconds(7_201_500)
+        );
+    }
+
+    #[test]
+    fn stage_gate_skips_and_reschedules_a_stage_switched_off_under_the_issue() {
+        let skip = StageGate::Reschedule;
+        let progress = view("In Progress", "started");
+        let review = view("In Review", "review");
+        let test = view("In Test", "test");
+        // Both on: every stage proceeds.
+        for state in [&progress, &review, &test] {
+            assert_eq!(gate_for(Some(state), true, true), StageGate::Proceed);
+        }
+        // Turned off while the issue sits there: skip and reschedule.
+        assert_eq!(gate_for(Some(&review), false, true), skip);
+        assert_eq!(gate_for(Some(&test), true, false), skip);
+        // The other stage and In Progress are unaffected.
+        assert_eq!(gate_for(Some(&test), false, true), StageGate::Proceed);
+        assert_eq!(gate_for(Some(&progress), false, false), StageGate::Proceed);
+        // Not a stage: skip without touching the row, as before.
+        assert_eq!(
+            gate_for(Some(&view("Done", "completed")), true, true),
+            StageGate::Skip
+        );
+        assert_eq!(
+            gate_for(Some(&view("Code Review", "review")), false, true),
+            StageGate::Skip
+        );
+        assert_eq!(gate_for(None, true, true), StageGate::Skip);
+    }
     use crate::worker::{route_for, Route};
     use chrono::TimeZone;
     use serde_json::{json, Value};
@@ -1322,7 +1580,11 @@ mod tests {
     async fn registry_owns_fire_tick_after_register() {
         struct NoSeam;
         impl FireTickSeam for NoSeam {
-            fn is_ticking_state(&self, _state: Option<&StateView>) -> bool {
+            fn stage_runs_automatically(
+                &self,
+                _state: Option<&StateView>,
+                _project: &ProjectTickCols,
+            ) -> bool {
                 true
             }
             fn tick_interval_seconds(
@@ -1373,5 +1635,29 @@ mod tests {
         let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
         let verdict = handler(job_with_args(json!([id.to_string()]))).await;
         assert!(verdict.is_err());
+    }
+
+    #[test]
+    fn issue_state_stmt_is_one_statement_left_join_no_guard() {
+        use sea_orm::DbBackend;
+        use sea_query::PostgresQueryBuilder;
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let stmt = issue_state_stmt(id);
+        let shape = stmt.to_string(PostgresQueryBuilder);
+        let lower = shape.to_ascii_lowercase();
+        for fragment in [
+            "from \"issues\"",
+            "left join \"states\"",
+            "state_id",
+            "project_id",
+            "state_name",
+            "state_group",
+        ] {
+            assert!(lower.contains(fragment), "missing {fragment} in:\n{shape}");
+        }
+        assert!(!lower.contains("deleted_at"), "no guard:\n{shape}");
+        assert!(!lower.contains("for update"), "unlocked:\n{shape}");
+        let built = DbBackend::Postgres.build(&issue_state_stmt(id));
+        assert!(built.sql.contains("$1"), "bind:\n{}", built.sql);
     }
 }

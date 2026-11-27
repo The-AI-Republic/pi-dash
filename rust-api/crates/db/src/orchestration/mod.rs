@@ -12,11 +12,13 @@
 //! * [`querysets`] — `core/querysets.py` whole plus the role-fact SQL
 //!   of `core/permissions.py` (decisions stay in the F-06 kernel).
 //!
-//! Reads reuse the D-11 [`dispatch`](crate::dispatch) `AgentRun`
+//! Reads reuse the D-11 [`dispatch`](crate::agent_runs) `AgentRun`
 //! shape + `AgentRunStatus` and the L1
 //! [`pidash_types::orchestration`] parser — never re-ported. All
-//! queries are executor-generic (`sqlx::query`, no build-time
-//! database); multi-statement flows take `&mut PgConnection`.
+//! queries are SeaORM statements over a [`ConnectionTrait`]
+//! (the pool connection or a transaction-held
+//! [`TxConn`](crate::orm_tx::TxConn)); multi-statement flows share
+//! one transaction.
 //!
 //! Fixture id replayed by the unit tests alongside each module:
 //! FX-ORCH-02 (`rust-api/fixtures/orchestration/fx02_reads/`).

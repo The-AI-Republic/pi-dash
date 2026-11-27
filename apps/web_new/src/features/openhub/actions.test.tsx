@@ -15,6 +15,24 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
   return { ...original, notifyError: vi.fn(), notifyInfo: vi.fn(), notifySuccess: vi.fn() };
 });
 
+const platformHarness = vi.hoisted(() => ({
+  kind: "web" as "web" | "desktop",
+  opened: [] as string[],
+  failOpen: false as boolean,
+}));
+
+vi.mock("../../core/platform/index.js", () => ({
+  get platform() {
+    return {
+      kind: platformHarness.kind,
+      openExternal: async (url: string): Promise<void> => {
+        if (platformHarness.failOpen) throw new Error("bridge missing");
+        platformHarness.opened.push(url);
+      },
+    };
+  },
+}));
+
 import { notifyError, notifyInfo, notifySuccess } from "../../shared/shell/index.js";
 import { openhubKeys } from "./api/keys.js";
 import { useMarketplacePage } from "./api/queries.js";
@@ -159,11 +177,17 @@ const realOpen = window.open;
 beforeEach(() => {
   vi.clearAllMocks();
   window.history.replaceState(null, "", "/acme/apps/");
+  platformHarness.kind = "web";
+  platformHarness.opened = [];
+  platformHarness.failOpen = false;
 });
 
 afterEach(() => {
   window.open = realOpen;
   resetAppClient();
+  platformHarness.kind = "web";
+  platformHarness.opened = [];
+  platformHarness.failOpen = false;
 });
 
 function setup(handlers: FlowHandlers = {}, hubUrl: string | null = "https://hub.airepublic.com") {
@@ -606,5 +630,66 @@ describe("closeDialog", () => {
     await waitFor(() => {
       expect(calls.some((call) => call.path.startsWith("/api/openhub/apps/marketplace/"))).toBe(true);
     });
+  });
+});
+
+describe("desktop provider connects (PIDESKAPP-186)", () => {
+  // On desktop the shell denies the reserved blank tab, so window.open
+  // always returns null. The flow must skip reserveConnectTab entirely,
+  // resolve the destination first, and hand it to the system browser.
+  it("opens the OAuth handoff in the system browser instead of the reserved tab", async () => {
+    platformHarness.kind = "desktop";
+    const open = vi.fn(() => null);
+    window.open = open as unknown as typeof window.open;
+    const { actions, catalog } = setup({
+      authStatus: () => ({ status: 200, body: { type: "oauth2", status: "needs_auth" } }),
+    });
+    await waitFor(() => expect(catalog.result.current.data).toBeDefined());
+
+    await act(async () => {
+      await actions.result.current.install(app({ appId: "app-oauth-x", authType: "oauth2" }));
+    });
+
+    expect(open).not.toHaveBeenCalled();
+    expect(platformHarness.opened).toEqual([
+      "https://api.test/api/openhub/apps/app-oauth-x/auth/oauth/begin/?return_path=%2Facme%2Fapps%2F",
+    ]);
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("opens the hub detail in the system browser for connected apps", async () => {
+    platformHarness.kind = "desktop";
+    window.open = vi.fn(() => null) as unknown as typeof window.open;
+    const { actions, catalog } = setup({
+      authStatus: () => ({ status: 200, body: { type: "oauth2", status: "connected" } }),
+    });
+    await waitFor(() => expect(catalog.result.current.data).toBeDefined());
+
+    await act(async () => {
+      await actions.result.current.connect(
+        app({ appId: "com.linear.linear", slug: "linear", name: "Linear", authType: "oauth2" })
+      );
+    });
+
+    expect(platformHarness.opened).toEqual(["https://hub.airepublic.com/apps/linear"]);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("reports a browser-open failure without the popup-blocked copy", async () => {
+    platformHarness.kind = "desktop";
+    platformHarness.failOpen = true;
+    window.open = vi.fn(() => null) as unknown as typeof window.open;
+    const { actions, catalog } = setup({
+      authStatus: () => ({ status: 200, body: { type: "oauth2", status: "needs_auth" } }),
+    });
+    await waitFor(() => expect(catalog.result.current.data).toBeDefined());
+
+    await act(async () => {
+      await actions.result.current.connect(app({ authType: "oauth2" }));
+    });
+
+    expect(notifyError).toHaveBeenCalledWith(COULD_NOT_CONNECT_TITLE, "Something went wrong. Try again.");
+    expect(notifyError).not.toHaveBeenCalledWith(expect.anything(), POPUP_BLOCKED_DESCRIPTION);
   });
 });

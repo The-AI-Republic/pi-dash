@@ -4,9 +4,11 @@
 // Pure rules for the project-settings General tab
 // (parity/specs/project-settings-general.md §PSET-005–009). Render-free so
 // the form, the write payloads and the unit suites share one answer: field
-// limits and messages, the short-code shaper, the visibility and executor
-// options, the automated-run policy math, the emblem value shapes and the
-// parsed failure codes.
+// limits and messages, the short-code shaper, the visibility options, the
+// automated-run policy math, the emblem value shapes and the parsed failure
+// codes. There is no executor choice: projects run on runners and the
+// default pod decides who runs the work (Pi Dash Agent design §6), so the
+// tab neither shows nor writes `default_agent_executor`.
 
 import { isApiError, type ProjectSettingsDetail, type ProjectUpdateInput } from "@pidash/api-client";
 
@@ -61,13 +63,6 @@ export const VISIBILITY_OPTIONS = [
   { value: 2, label: "Public" },
 ] as const;
 
-/** The three executor kinds, in picker order, with their visible labels. */
-export const EXECUTOR_OPTIONS = [
-  { kind: "local_runner", label: "Local runner" },
-  { kind: "cloud_agent", label: "Cloud agent" },
-  { kind: "managed_runner", label: "Desktop agent" },
-] as const;
-
 /** Default run pool when the stored budget is uncapped and none was typed. */
 export const DEFAULT_MAX_TICKS = 10;
 /** The server's no-cap sentinel for the run pool. */
@@ -97,13 +92,53 @@ export interface GeneralFormValues {
   baseBranch: string;
   repoUrl: string;
   logoProps: Record<string, unknown>;
-  executor: string;
   ticking: boolean;
   budget: string;
   noCap: boolean;
   /** True while the budget field is blank or uncapped; kept for restore. */
   lastCappedBudget: string;
   cadence: string;
+  /** Which stages run an agent: the agent decides, or the toggles below. */
+  stagesMode: StagesMode;
+  /** In Review runs an agent (read under Customize; kept under Auto). */
+  reviewStage: boolean;
+  /** In Test runs an agent (read under Customize; kept under Auto). */
+  testStage: boolean;
+}
+
+/** The stage-setting modes (`settings.agent_stages.mode`). */
+export type StagesMode = "auto" | "custom";
+
+/** The two choices of the Stages select. */
+export const STAGES_MODE_OPTIONS: ReadonlyArray<{ id: StagesMode; label: string }> = [
+  { id: "auto", label: "Auto — the agent decides which stages a work item needs" },
+  { id: "custom", label: "Customize" },
+];
+
+/** Helper text under the Stages control. */
+export const STAGES_HELP =
+  "A stage that is off is only a label. Work items can still be moved there, but no agent run starts unless you start one.";
+
+/** The stage values the form reads from a stored `settings.agent_stages`; missing reads as Auto, both on. */
+export function stagesFrom(
+  settings: ProjectSettingsDetail["settings"]
+): Pick<GeneralFormValues, "stagesMode" | "reviewStage" | "testStage"> {
+  const stored = settings?.agent_stages;
+  return {
+    stagesMode: stored?.mode === "custom" ? "custom" : "auto",
+    reviewStage: stored?.review ?? true,
+    testStage: stored?.test ?? true,
+  };
+}
+
+/** Whether the form's stage values differ from the stored ones. */
+export function stagesChanged(values: GeneralFormValues, project: Pick<ProjectSettingsDetail, "settings">): boolean {
+  const stored = stagesFrom(project.settings);
+  return (
+    values.stagesMode !== stored.stagesMode ||
+    values.reviewStage !== stored.reviewStage ||
+    values.testStage !== stored.testStage
+  );
 }
 
 export type GeneralField = "name" | "identifier" | "baseBranch" | "budget";
@@ -126,12 +161,12 @@ export function generalFormFrom(project: ProjectSettingsDetail): GeneralFormValu
     baseBranch: project.base_branch,
     repoUrl: project.repo_url,
     logoProps: project.logo_props,
-    executor: project.default_agent_executor === "" ? "local_runner" : project.default_agent_executor,
     ticking: project.agent_ticking_enabled,
     budget: capped === null ? "" : String(capped),
     noCap: capped === null,
     lastCappedBudget: String(capped ?? DEFAULT_MAX_TICKS),
     cadence: selectCadence(project.agent_default_interval_seconds),
+    ...stagesFrom(project.settings),
   };
 }
 
@@ -253,6 +288,11 @@ export interface BuildPayloadInput {
   values: GeneralFormValues;
   /** True when the cadence picker moved in this form session. */
   cadenceDirty: boolean;
+  /**
+   * True when the stage setting differs from the stored one. The key is
+   * written only then, so an unrelated save never touches it.
+   */
+  stagesDirty?: boolean;
 }
 
 /**
@@ -261,7 +301,11 @@ export interface BuildPayloadInput {
  * columns ride along only when the picker moved, so a rhythm set elsewhere
  * survives an unrelated save.
  */
-export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput): ProjectUpdateInput {
+export function buildGeneralPayload({
+  values,
+  cadenceDirty,
+  stagesDirty = false,
+}: BuildPayloadInput): ProjectUpdateInput {
   const payload: ProjectUpdateInput = {
     name: values.name,
     identifier: values.identifier,
@@ -270,7 +314,6 @@ export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput)
     timezone: values.timezone,
     base_branch: values.baseBranch,
     logo_props: values.logoProps,
-    default_agent_executor: values.executor,
     agent_ticking_enabled: values.ticking,
     agent_default_max_ticks: budgetOnSave(values),
   };
@@ -281,6 +324,11 @@ export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput)
     payload.agent_default_interval_seconds = seconds;
     payload.agent_review_default_interval_seconds = seconds;
     payload.agent_test_default_interval_seconds = seconds;
+  }
+  if (stagesDirty) {
+    payload.settings = {
+      agent_stages: { mode: values.stagesMode, review: values.reviewStage, test: values.testStage },
+    };
   }
   return payload;
 }
@@ -349,14 +397,6 @@ export function repositoryBoundState(
   return canonical !== "" && trimmed === canonical ? "bound" : "bind";
 }
 
-/** Executor choices with availability; the local runner is always enabled. */
-export function executorChoices(
-  options: ReadonlyArray<{ kind: string; available: boolean }>
-): Array<{ kind: string; label: string; disabled: boolean }> {
-  return EXECUTOR_OPTIONS.map((option) => ({
-    kind: option.kind,
-    label: option.label,
-    disabled:
-      option.kind === "local_runner" ? false : !options.some((row) => row.kind === option.kind && row.available),
-  }));
-}
+/** What the Execution section says in place of the old executor picker. */
+export const EXECUTION_TARGET_NOTE =
+  "Work in this project runs on runners. The project's default pod decides who runs new work; pick a pod or a specific runner on each work item to change it.";

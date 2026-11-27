@@ -1,7 +1,8 @@
 # Rust API image (PIDASHCONV-813, D-37): translates apps/api/Dockerfile.api.
 # Multi-stage: cargo build in a Rust builder, then a minimal Debian runtime
 # (binary + entrypoints + data; no toolchain, no Python). Build from the
-# repo root so both trees are in context:
+# repo root (the runtime stage still copies seeds + package.json fallbacks
+# from apps/api until NEWPIDASH-377 lands):
 #   docker build -f rust-api/Dockerfile.api -t pidash-api:test .
 #
 # The migrator entrypoint still shells to `python manage.py migrate`
@@ -12,10 +13,11 @@ FROM rust:bookworm AS builder
 
 WORKDIR /app
 
-# Both trees: the binary embeds files from apps/api at compile time
-# (email templates, prompting fragments), so the builder needs them.
+# The binary embeds its email templates and prompting fragments from
+# inside rust-api/ at compile time (NEWPIDASH-376 vendored
+# rust-api/templates/emails/), so the builder needs only the Rust tree —
+# apps/api is frozen and never enters the build context.
 COPY rust-api ./rust-api
-COPY apps/api ./apps/api
 
 # Cache mounts keep rebuilds incremental; a clean checkout builds cold.
 # The target dir lives in the mount, so the binary is copied out to keep it.

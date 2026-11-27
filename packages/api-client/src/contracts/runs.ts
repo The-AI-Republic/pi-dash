@@ -8,7 +8,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
+import { CapacityWait, DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
 import { PodMini } from "./pods.js";
 
 export const RUN_STATUSES = [
@@ -103,6 +103,7 @@ export const AgentRun = z.object({
   pinned_runner_name: z.optional(z.nullable(z.string())),
   pin_kind: z.optional(z.string()),
   dispatch_wait: z.optional(z.nullable(DispatchWait)),
+  capacity_wait: z.optional(z.nullable(CapacityWait)),
   scheduler_binding: nullableUuid(),
   scheduler_binding_detail: z.nullable(RunSchedulerBinding),
   pod: uuid(),
@@ -111,7 +112,9 @@ export const AgentRun = z.object({
   owner: nullableUuid(),
   created_at: dateTime(),
   assigned_at: nullableDateTime(),
-  queue_position: z.nullable(z.number()),
+  // Dropped with the worktree-pool columns (PDASHOSS01-156): current
+  // servers omit it, older ones still send it.
+  queue_position: z.optional(z.nullable(z.number())),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
   done_payload: z.nullable(z.record(z.string(), z.unknown())),

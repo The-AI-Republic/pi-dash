@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri::utils::config::BundleType;
+use tauri::utils::platform::bundle_type;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -38,11 +40,13 @@ const JITTER_SECS: u64 = 15 * 60;
 /// laptop wakes. Short naps re-read the wall clock instead.
 const MAX_NAP: Duration = Duration::from_secs(10 * 60);
 
-/// The versions the sidebar button shows. [`Update`] can only be built by
-/// the updater plugin, so the state below is generic over this for tests.
+/// The versions the sidebar button shows, plus the manifest's release
+/// notes. [`Update`] can only be built by the updater plugin, so the state
+/// below is generic over this for tests.
 trait Versions {
     fn version(&self) -> &str;
     fn current_version(&self) -> &str;
+    fn body(&self) -> Option<&str>;
 }
 
 impl Versions for Update {
@@ -52,6 +56,10 @@ impl Versions for Update {
 
     fn current_version(&self) -> &str {
         &self.current_version
+    }
+
+    fn body(&self) -> Option<&str> {
+        self.body.as_deref()
     }
 }
 
@@ -77,6 +85,10 @@ impl<U> Default for UpdateState<U> {
 pub struct PendingUpdate {
     version: String,
     current_version: String,
+    /// The manifest's release notes when the release carried any; absent
+    /// otherwise so older payloads stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
     /// Whether this update is downloading right now. The sidebar button
     /// remounts (collapse, and routes that drop the sidebar entirely), so
     /// it can't keep that in React state — it reads it from here.
@@ -88,24 +100,113 @@ impl PendingUpdate {
         Self {
             version: update.version().to_owned(),
             current_version: update.current_version().to_owned(),
+            notes: update
+                .body()
+                .map(str::trim)
+                .filter(|notes| !notes.is_empty())
+                .map(str::to_owned),
             installing,
         }
     }
 }
 
-async fn check(handle: &AppHandle) -> Option<Update> {
+/// The manifest arch token the updater plugin keys entries by (`x86_64`,
+/// …), from the build's target arch. Mirrors the plugin's own mapping so a
+/// manifest entry the binary would resolve to stays resolvable here.
+fn updater_arch_for(build_arch: &str) -> Option<&'static str> {
+    match build_arch {
+        "x86" => Some("i686"),
+        "x86_64" => Some("x86_64"),
+        "arm" => Some("armv7"),
+        "aarch64" => Some("aarch64"),
+        "riscv64" => Some("riscv64"),
+        _ => None,
+    }
+}
+
+/// The install-type-specific manifest key this binary prefers
+/// (`linux-x86_64-deb`, `windows-x86_64-msi`, …), or `None` when the bundle
+/// type is not one of the shipped Linux/Windows ones (macOS bundles,
+/// unstamped dev builds) and the manifest gate should not apply.
+fn specific_platform_key(bundle: Option<BundleType>, arch: Option<&str>) -> Option<String> {
+    let arch = arch?;
+    match bundle? {
+        BundleType::Deb => Some(format!("linux-{arch}-deb")),
+        BundleType::AppImage => Some(format!("linux-{arch}-appimage")),
+        BundleType::Msi => Some(format!("windows-{arch}-msi")),
+        BundleType::Nsis => Some(format!("windows-{arch}-nsis")),
+        _ => None,
+    }
+}
+
+/// Whether the fetched manifest may serve this install type.
+///
+/// The plugin resolves `{os}-{arch}-{installer}` first and falls back to
+/// `{os}-{arch}`. When a catalog only carries the generic key, a deb binary
+/// is handed AppImage bytes (rejected by `install_deb`) and an MSI binary
+/// is handed the NSIS installer (executed as NSIS, which silently converts
+/// the install). In both cases the right behavior is to offer nothing: the
+/// generic entry belongs to the other installer, not to this one. AppImage
+/// and NSIS binaries keep falling back to the generic entry, as today.
+///
+/// Only static manifests (a `platforms` map) are gated: dynamic
+/// (single-URL) endpoints and shapes this gate does not understand keep
+/// today's behavior.
+fn manifest_may_serve(
+    bundle: Option<BundleType>,
+    arch: Option<&str>,
+    manifest: &serde_json::Value,
+) -> bool {
+    let Some(specific) = specific_platform_key(bundle.clone(), arch) else {
+        return true;
+    };
+    let Some(platforms) = manifest.get("platforms").and_then(|p| p.as_object()) else {
+        return true;
+    };
+    if platforms.contains_key(&specific) {
+        return true;
+    }
+    // AppImage and NSIS installs resolve through the generic entry today
+    // (`linux-x86_64`, `windows-x86_64`); the deb and MSI installs must not.
+    // `arch` is `Some` here: without it `specific_platform_key` returned `None`.
+    let arch = arch.unwrap_or_default();
+    match bundle {
+        Some(BundleType::AppImage) => platforms.contains_key(&format!("linux-{arch}")),
+        Some(BundleType::Nsis) => platforms.contains_key(&format!("windows-{arch}")),
+        _ => false,
+    }
+}
+
+/// Ask the update service what is offered. `Ok(None)` means the check
+/// succeeded and nothing is offered (the app is current, the release
+/// was withdrawn, or the manifest has no entry for this install type);
+/// `Err(())` means the check failed (network down, malformed manifest,
+/// signature mismatch), in which case the caller must leave the pending
+/// update alone — a failed check proves nothing.
+async fn check(handle: &AppHandle) -> Result<Option<Update>, ()> {
     let updater = match handle.updater() {
         Ok(u) => u,
         Err(e) => {
             eprintln!("updater: construction failed: {e}");
-            return None;
+            return Err(());
         }
     };
     match updater.check().await {
-        Ok(update) => update,
+        Ok(Some(update)) => {
+            let bundle = bundle_type();
+            let arch = updater_arch_for(std::env::consts::ARCH);
+            if !manifest_may_serve(bundle.clone(), arch, &update.raw_json) {
+                eprintln!(
+                    "updater: skipping update for {bundle:?} install; the manifest has no entry of its own type"
+                );
+                return Ok(None);
+            }
+            Ok(Some(update))
+        }
+        Ok(None) => Ok(None),
         Err(e) => {
             eprintln!("updater: check failed: {e}");
-            None
+            Err(())
         }
     }
 }
@@ -143,42 +244,121 @@ fn remember(handle: &AppHandle, update: Update) {
     announce(handle);
 }
 
+/// Drop the pending update and tell the web UI, which hides the sidebar
+/// button: the daily check confirmed the service offers nothing (the
+/// release was withdrawn). The announcement carries `null`, which the web
+/// UI reads as "no update waits".
+fn forget(handle: &AppHandle) {
+    *handle
+        .state::<UpdateState>()
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    if let Err(e) = handle.emit(UPDATE_AVAILABLE_EVENT, Option::<PendingUpdate>::None) {
+        eprintln!("updater: announcing withdrawal failed: {e}");
+    }
+}
+
+/// What the daily check decided about the pending update.
+///
+/// The caller announces `Remembered` and `Withdrawn` to the web UI;
+/// `Kept` means the check failed and nothing changed.
+enum DailyApply {
+    Remembered,
+    Withdrawn,
+    Kept,
+}
+
+/// Apply one daily-check result to the pending update. A confirmed "no
+/// update offered" clears the pending update — without that, a withdrawn
+/// release would stay installable until the app restarts. A failed check
+/// leaves the pending update alone.
+fn apply_daily_result<U>(state: &UpdateState<U>, result: Result<Option<U>, ()>) -> DailyApply {
+    match result {
+        Ok(Some(update)) => {
+            *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+            DailyApply::Remembered
+        }
+        Ok(None) => {
+            *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            DailyApply::Withdrawn
+        }
+        Err(()) => DailyApply::Kept,
+    }
+}
+
 /// Mark the update accepted in the launch prompt as installing. It is kept
 /// as the pending update too: the sidebar button only shows for a pending
 /// update, and without it the download would run with no sign of progress.
-fn begin_launch_install<U>(state: &UpdateState<U>, update: U) {
-    state.installing.store(true, Ordering::SeqCst);
+///
+/// Returns `false` when an install is already running — the caller must
+/// not start a second download. Like [`desktop_install_update`], the flag
+/// is claimed with `swap` so two installs can never run at once.
+fn begin_launch_install<U>(state: &UpdateState<U>, update: U) -> bool {
+    if state.installing.swap(true, Ordering::SeqCst) {
+        return false;
+    }
     *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+    true
+}
+
+/// The launch-dialog message: both versions, plus the release notes when
+/// the release carried any. Notes are trimmed; empty notes read as absent.
+fn launch_dialog_message(update: &impl Versions) -> String {
+    let notes = update
+        .body()
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty());
+    match notes {
+        Some(notes) => format!(
+            "Pi Dash {new} is available (you have {current}).\n\n{notes}\n\n\
+             Install now? The app will restart automatically.",
+            new = update.version(),
+            current = update.current_version(),
+        ),
+        None => format!(
+            "Pi Dash {new} is available (you have {current}).\n\n\
+             Install now? The app will restart automatically.",
+            new = update.version(),
+            current = update.current_version(),
+        ),
+    }
 }
 
 /// Check at startup. If a newer version is available, ask the user via a
 /// native dialog; install + restart on confirmation. "Later" keeps the
 /// update for the sidebar button.
 pub async fn prompt_at_launch(handle: AppHandle) {
-    let Some(update) = check(&handle).await else {
+    let Ok(Some(update)) = check(&handle).await else {
         return;
     };
-    let install = handle
+    let message = launch_dialog_message(&update);
+    let dialog = handle
         .dialog()
-        .message(format!(
-            "Pi Dash {new} is available (you have {current}).\n\n\
-             Install now? The app will restart automatically.",
-            new = update.version,
-            current = update.current_version,
-        ))
+        .message(message)
         .title("Update available")
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Install".into(),
             "Later".into(),
-        ))
-        .blocking_show();
+        ));
+    // `blocking_show` parks the thread until the user answers. Run it on
+    // the blocking pool: parking an async-runtime worker would stall every
+    // other async command on a single-CPU machine.
+    let install = tauri::async_runtime::spawn_blocking(move || dialog.blocking_show())
+        .await
+        .unwrap_or(false);
     if !install {
         remember(&handle, update);
         return;
     }
     let state = handle.state::<UpdateState>();
-    begin_launch_install(&state, update.clone());
+    if !begin_launch_install(&state, update.clone()) {
+        // A sidebar install for this update is already running; its
+        // completion restarts the app, so the launch "Install" must not
+        // start a second download alongside it.
+        return;
+    }
     announce(&handle);
     if let Err(e) = update
         .download_and_install(|_chunk, _total| {}, || {})
@@ -236,8 +416,10 @@ pub async fn run_daily_checks(handle: AppHandle) {
         {
             continue;
         }
-        if let Some(update) = check(&handle).await {
-            remember(&handle, update);
+        match apply_daily_result(&handle.state::<UpdateState>(), check(&handle).await) {
+            DailyApply::Remembered => announce(&handle),
+            DailyApply::Withdrawn => forget(&handle),
+            DailyApply::Kept => {}
         }
     }
 }
@@ -286,27 +468,141 @@ mod tests {
     // 2026-09-21T00:00:00Z
     const NEXT_MIDNIGHT: u64 = 1_789_948_800;
 
-    struct FakeUpdate;
+    struct FakeUpdate {
+        version: &'static str,
+        notes: Option<&'static str>,
+    }
 
     impl Versions for FakeUpdate {
         fn version(&self) -> &str {
-            "0.4.0"
+            self.version
         }
 
         fn current_version(&self) -> &str {
             "0.3.3"
+        }
+
+        fn body(&self) -> Option<&str> {
+            self.notes
+        }
+    }
+
+    fn fake(version: &'static str) -> FakeUpdate {
+        FakeUpdate {
+            version,
+            notes: None,
+        }
+    }
+
+    fn fake_with_notes(version: &'static str, notes: &'static str) -> FakeUpdate {
+        FakeUpdate {
+            version,
+            notes: Some(notes),
         }
     }
 
     #[test]
     fn an_update_accepted_at_launch_is_pending_and_installing() {
         let state = UpdateState::<FakeUpdate>::default();
-        begin_launch_install(&state, FakeUpdate);
+        assert!(begin_launch_install(&state, fake("0.4.0")));
         let pending =
             pending_update(&state).expect("the sidebar button needs the update while it downloads");
         assert!(pending.installing);
         assert_eq!(pending.version, "0.4.0");
         assert_eq!(pending.current_version, "0.3.3");
+    }
+
+    #[test]
+    fn a_launch_install_arriving_during_a_running_install_does_not_clobber_it() {
+        let state = UpdateState::<FakeUpdate>::default();
+        // The sidebar install is already running: it holds the flag and the
+        // pending update (`desktop_install_update` guards the same way).
+        state.installing.store(true, Ordering::SeqCst);
+        *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(fake("0.4.0"));
+        // The still-open launch dialog is answered with "Install" anyway.
+        assert!(!begin_launch_install(&state, fake("0.4.1")));
+        let pending = pending_update(&state).expect("the running install stays pending");
+        assert_eq!(pending.version, "0.4.0");
+        assert!(pending.installing);
+    }
+
+    #[test]
+    fn a_confirmed_withdrawal_clears_the_pending_update() {
+        let state = UpdateState::<FakeUpdate>::default();
+        *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(fake("0.4.0"));
+        assert!(matches!(
+            apply_daily_result(&state, Ok(None)),
+            DailyApply::Withdrawn
+        ));
+        assert!(pending_update(&state).is_none());
+    }
+
+    #[test]
+    fn a_failed_check_keeps_the_pending_update() {
+        let state = UpdateState::<FakeUpdate>::default();
+        *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(fake("0.4.0"));
+        assert!(matches!(
+            apply_daily_result::<FakeUpdate>(&state, Err(())),
+            DailyApply::Kept
+        ));
+        assert_eq!(
+            pending_update(&state)
+                .expect("pending survives a failed check")
+                .version,
+            "0.4.0"
+        );
+    }
+
+    #[test]
+    fn a_found_update_becomes_pending() {
+        let state = UpdateState::<FakeUpdate>::default();
+        assert!(matches!(
+            apply_daily_result(&state, Ok(Some(fake("0.4.0")))),
+            DailyApply::Remembered
+        ));
+        assert_eq!(
+            pending_update(&state)
+                .expect("the found update waits")
+                .version,
+            "0.4.0"
+        );
+    }
+
+    #[test]
+    fn the_pending_payload_carries_release_notes() {
+        let state = UpdateState::<FakeUpdate>::default();
+        *state.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(fake_with_notes("0.4.0", "Fixes the sync race."));
+        let pending = pending_update(&state).expect("pending");
+        assert_eq!(pending.notes.as_deref(), Some("Fixes the sync race."));
+    }
+
+    #[test]
+    fn the_pending_payload_omits_empty_release_notes() {
+        let state = UpdateState::<FakeUpdate>::default();
+        *state.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(fake_with_notes("0.4.0", "   "));
+        assert!(pending_update(&state).expect("pending").notes.is_none());
+    }
+
+    #[test]
+    fn the_launch_dialog_names_both_versions_without_notes() {
+        let message = launch_dialog_message(&fake("0.4.0"));
+        assert_eq!(
+            message,
+            "Pi Dash 0.4.0 is available (you have 0.3.3).\n\n\
+             Install now? The app will restart automatically."
+        );
+    }
+
+    #[test]
+    fn the_launch_dialog_includes_release_notes() {
+        let message = launch_dialog_message(&fake_with_notes("0.4.0", "Fixes the sync race."));
+        assert_eq!(
+            message,
+            "Pi Dash 0.4.0 is available (you have 0.3.3).\n\nFixes the sync race.\n\n\
+             Install now? The app will restart automatically."
+        );
     }
 
     #[test]
@@ -327,5 +623,102 @@ mod tests {
     fn waking_days_later_schedules_the_next_midnight_after_waking() {
         let woke = NEXT_MIDNIGHT + 3 * DAY_SECS + 60;
         assert_eq!(next_check_secs(woke, 0), NEXT_MIDNIGHT + 4 * DAY_SECS);
+    }
+
+    /// A static-manifest body carrying exactly these platform keys.
+    fn manifest_with(keys: &[&str]) -> serde_json::Value {
+        let platforms: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|k| {
+                (
+                    (*k).to_string(),
+                    serde_json::json!({"url": "https://dl.example.com/x", "signature": "s"}),
+                )
+            })
+            .collect();
+        serde_json::json!({"version": "0.4.0", "platforms": platforms})
+    }
+
+    #[test]
+    fn deb_install_is_not_served_by_the_generic_appimage_entry() {
+        // PIDESKAPP-59: the only Linux entry is the AppImage payload.
+        let manifest = manifest_with(&["linux-x86_64"]);
+        assert!(!manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn deb_install_is_served_by_its_own_entry() {
+        let manifest = manifest_with(&["linux-x86_64", "linux-x86_64-deb"]);
+        assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn msi_install_is_not_served_by_the_generic_nsis_entry() {
+        // PIDESKAPP-91: the only Windows entry is the NSIS payload.
+        let manifest = manifest_with(&["windows-x86_64"]);
+        assert!(!manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn msi_install_is_served_by_its_own_entry() {
+        let manifest = manifest_with(&["windows-x86_64", "windows-x86_64-msi"]);
+        assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn appimage_install_keeps_working_via_the_generic_entry() {
+        let manifest = manifest_with(&["linux-x86_64"]);
+        assert!(manifest_may_serve(
+            Some(BundleType::AppImage),
+            Some("x86_64"),
+            &manifest
+        ));
+    }
+
+    #[test]
+    fn nsis_install_keeps_working_via_the_generic_entry() {
+        let manifest = manifest_with(&["windows-x86_64"]);
+        assert!(manifest_may_serve(Some(BundleType::Nsis), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn a_specific_entry_alone_suffices() {
+        for (bundle, key) in [
+            (BundleType::Deb, "linux-x86_64-deb"),
+            (BundleType::AppImage, "linux-x86_64-appimage"),
+            (BundleType::Msi, "windows-x86_64-msi"),
+            (BundleType::Nsis, "windows-x86_64-nsis"),
+        ] {
+            let manifest = manifest_with(&[key]);
+            assert!(
+                manifest_may_serve(Some(bundle.clone()), Some("x86_64"), &manifest),
+                "{bundle:?} should be served by {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_manifests_and_other_bundles_are_not_gated() {
+        // Single-URL (dynamic) manifests have no `platforms` map.
+        for manifest in [
+            serde_json::json!({"version": "0.4.0"}),
+            serde_json::json!({"version": "0.4.0", "url": "https://dl.example.com/x", "signature": "s"}),
+        ] {
+            assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+            assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+        }
+        // macOS bundles and unstamped dev builds keep today's behavior.
+        let manifest = manifest_with(&["linux-x86_64"]);
+        for bundle in [None, Some(BundleType::App), Some(BundleType::Dmg)] {
+            assert!(manifest_may_serve(bundle, Some("x86_64"), &manifest));
+        }
+    }
+
+    #[test]
+    fn arch_mapping_matches_the_plugin() {
+        assert_eq!(updater_arch_for("x86"), Some("i686"));
+        assert_eq!(updater_arch_for("x86_64"), Some("x86_64"));
+        assert_eq!(updater_arch_for("aarch64"), Some("aarch64"));
+        assert_eq!(updater_arch_for("powerpc64"), None);
     }
 }

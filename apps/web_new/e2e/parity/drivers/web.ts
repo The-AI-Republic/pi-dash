@@ -277,6 +277,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -286,6 +287,18 @@ import type {
 // Placeholder of the command-palette input at root (each sub-page swaps in
 // its own); the open chord settles on it to ride out the 200ms close-reset.
 const PALETTE_ROOT_PLACEHOLDER = "Type a command or search";
+
+/**
+ * The drafts row-menu catalog ids as the labels both apps render
+ * (drafts spec §3.1, DRAFT-009; the old app translates them since
+ * main#532). Scenarios name entries by the stable ids.
+ */
+const WEB_DRAFT_MENU_LABELS: Readonly<Record<string, string>> = {
+  edit: "Edit",
+  make_a_copy: "Make a copy",
+  move_to_project: "Move to project",
+  delete: "Delete",
+};
 
 /** Escape a literal for embedding in a `new RegExp` (NEWFRONT-450 pill match). */
 function escapeRegExp(literal: string): string {
@@ -4976,6 +4989,12 @@ export class WebDriver implements ParityDriver {
     await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.getByRole("button", { name }).first();
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await button.isDisabled()) as boolean;
+  }
+
   async typeComment(text: string): Promise<void> {
     const editor = this.page.locator("[contenteditable='true']").last();
     await editor.click({ timeout: WebDriver.OPEN_MS });
@@ -7634,6 +7653,35 @@ export class WebDriver implements ParityDriver {
     await row.hover({ timeout: 15_000 });
     await row.getByRole("button").first().click({ force: true, timeout: 15_000 });
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, { timeout: 30_000 });
+  }
+
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    // Old app rows carry the detach as the row's button (TrashIcon inside a tooltip),
+    // as a sibling of the row link inside the row div; the Collapsible toggle
+    // and the attach form are section-level, so scope to the row element.
+    return this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Code reviews"
+      );
+      if (!heading) return false;
+      let container: Element | null = heading.parentElement;
+      while (container && container.querySelectorAll('a[target="_blank"]').length === 0)
+        container = container.parentElement;
+      if (!container) return false;
+      const links = container.querySelectorAll('a[target="_blank"]');
+      for (const link of links) {
+        const row = link.parentElement;
+        if (row && row.querySelector("button")) return true;
+      }
+      return false;
+    });
   }
 
   async worklogCreateVisible(): Promise<boolean> {
@@ -17502,6 +17550,16 @@ export class WebDriver implements ParityDriver {
     return out;
   }
 
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The List tab link sits directly in the tab row, so its parent is the row.
+    const row = this.page.getByRole("link", { name: "List", exact: true }).locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
+  }
+
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
     await this.page.getByRole("link", { name: tab, exact: true }).click();
     if (tab === "List") {
@@ -21272,6 +21330,11 @@ export class WebDriver implements ParityDriver {
     await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    await this.archivesCyclesRowLink(name).click();
+    await this.page.locator("div.fixed.right-0 h4", { hasText: name }).waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
     await this.page.waitForLoadState("domcontentloaded");
@@ -23956,6 +24019,58 @@ export class WebDriver implements ParityDriver {
     return text.includes(name);
   }
 
+  private viewsDetailMenuTrigger(): Locator {
+    // The detail header's overflow buttons: the ViewQuickActions
+    // MoreHorizontal trigger (last header control) and the headless
+    // Display dropdown's trigger. Lucide 0.469 aliases MoreHorizontal
+    // to the ellipsis icon, so match both class names; the caller
+    // resolves to the last match (see viewsDetailMenuOpen).
+    return this.viewsDetailHeader().locator("button:has(svg.lucide-ellipsis), button:has(svg.lucide-more-horizontal)");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    // Two header buttons carry an ellipsis glyph (the headless Display
+    // dropdown's trigger and the quick-actions trigger); the quick-actions
+    // trigger is the last header control, so resolve to the last match.
+    const trigger = this.viewsDetailMenuTrigger().last();
+    await trigger.waitFor({ state: "visible", timeout: 30_000 });
+    await trigger.click({ timeout: 30_000 });
+    await this.viewsOpenMenu().getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.viewsOpenMenu();
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: 30_000 });
+    await menu.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect.poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.viewsOpenMenu();
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
   private viewsDetailLayoutButtons(): Locator {
     // Five icon-only buttons (list, board, calendar, table, timeline);
     // the active one carries the primary marker class. Visible-only: the
@@ -24683,6 +24798,67 @@ export class WebDriver implements ParityDriver {
       await panel.locator("button").first().click({ timeout: WebDriver.WAIT_MS });
     }
     await expect.poll(() => this.archivesPeekParam(), { timeout: WebDriver.WAIT_MS }).toBeNull();
+  }
+
+  /** The peek header `…` trigger on the archived issues tab. */
+  private archivesIssuePeekMenuTrigger() {
+    const portalTrigger = this.page
+      .locator("#full-screen-portal")
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    const dockedTrigger = this.archivesIssuePeekDockedPanel()
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    return { portalTrigger, dockedTrigger };
+  }
+
+  async archivesPeekQuickActionNames(): Promise<string[]> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const entries = await this.archivesRowMenuEntries();
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return entries;
+  }
+
+  async archivesPeekChoose(entry: string): Promise<void> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesPeekCopyLink(): Promise<void> {
+    // The archived peek header copy control is the same unnamed icon
+    // button as the live peek (header.tsx serves both; the archived
+    // header only hides subscribe and retargets the link to the archived
+    // address). Scope to whichever container holds the peek header — the
+    // portal, else the docked panel — the same split the peek menu
+    // trigger uses. The layout toggle nests an inner plain button holding
+    // the mode icon, which matches the same shape, so skip any candidate
+    // inside the listbox toggle.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const { portalTrigger } = this.archivesIssuePeekMenuTrigger();
+    const header =
+      (await portalTrigger.count()) > 0
+        ? this.page.locator("#full-screen-portal")
+        : this.archivesIssuePeekDockedPanel();
+    const candidates = header.locator("button:not([aria-haspopup]):has(svg:not([class*='lucide']))");
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      const nested = await candidate
+        .evaluate((node) => node.closest('[aria-haspopup="listbox"]') !== null)
+        .catch(() => true);
+      if (!nested) {
+        await candidate.click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] no archived peek copy-link control.");
   }
 
   async archivesDetailBannerText(): Promise<string | null> {
@@ -25596,7 +25772,14 @@ export class WebDriver implements ParityDriver {
   async draftRowMenuClick(name: string, entry: string): Promise<void> {
     await this.draftOpenQuickMenu(name);
     const menu = this.draftOpenQuickMenuScope(name);
-    await menu.getByRole("button", { name: entry, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+    // Scenarios name entries by their catalog ids (edit, make_a_copy, ...);
+    // the old app renders the translated labels since main#532 (an English
+    // catalog, so its keys and labels agree). Translate here, and let an
+    // already-labelled call pass through.
+    await menu
+      .getByRole("button", { name: WEB_DRAFT_MENU_LABELS[entry] ?? entry, exact: true })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
   }
 
   async draftRowQuickActionVisible(name: string): Promise<boolean> {
@@ -35303,6 +35486,14 @@ export class WebDriver implements ParityDriver {
     const row = this.cyclesHeroActiveBreakdownPanel().locator("div.cursor-pointer").nth(index);
     await row.click({ timeout: WebDriver.OPEN_MS });
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row renders without the
+    // pointer cursor and carries no click action, so the scenario
+    // asserts the address stays on the list.
+    const row = this.cyclesHeroActiveBreakdownPanel().locator("div").filter({ hasText: entryText }).first();
+    await row.click({ timeout: WebDriver.OPEN_MS });
   }
 
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
@@ -56024,26 +56215,11 @@ export class WebDriver implements ParityDriver {
     return ((await line.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
   }
 
-  private generalExecutorSelect() {
-    return this.generalForm().locator('select[aria-label="Default AI execution target"]');
-  }
-
-  async settingsGeneralExecutorValue(): Promise<string> {
-    const select = this.generalExecutorSelect();
-    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
-    return await select.inputValue({ timeout: WebDriver.OPEN_MS });
-  }
-
-  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
-    const option = this.generalExecutorSelect().locator(`option[value="${value}"]`);
-    await option.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
-    return await option.isDisabled();
-  }
-
-  async settingsGeneralSetExecutor(value: string): Promise<void> {
-    const select = this.generalExecutorSelect();
-    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
-    await select.selectOption(value, { timeout: WebDriver.OPEN_MS });
+  async settingsGeneralExecutorPresent(): Promise<boolean> {
+    // The ticking switch renders with the form, so once it shows, the old
+    // executor select would have rendered too.
+    await this.generalTickingSwitch().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await this.generalForm().locator('select[aria-label="Default AI execution target"]').count()) > 0;
   }
 
   private generalTickingSwitch() {
@@ -58781,6 +58957,15 @@ export class WebDriver implements ParityDriver {
     if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
     const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
     return text === "" ? null : text;
+  }
+
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the old
+  // --- app has no free-quota picker (new-system-only feature).
+  private cloudAssistantModelBudgetMissing(): never {
+    throw new Error("[parity] the old app has no free-quota model budget (new-system-only NEWPIDASH-150).");
+  }
+  async cloudAssistantModelBudget(_title: string): Promise<CloudAssistantModelBudgetFacts> {
+    this.cloudAssistantModelBudgetMissing();
   }
 
   private cloudProfileTabLabels(): string[] {

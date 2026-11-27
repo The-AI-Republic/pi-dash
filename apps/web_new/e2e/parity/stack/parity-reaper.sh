@@ -6,11 +6,17 @@
 #   parity-reaper.sh arm            called by parity-up.sh
 #   parity-reaper.sh watch <pid>    the detached watcher `arm` starts
 #
-# `arm` finds the agent process of the current run (the ancestor started by
-# the `pidash` runner daemon) and starts one watcher per stack and run. The
-# watcher waits for that process to exit, then runs parity-down.sh. Outside a
-# Pi Dash run (a person's shell, CI) there is no such ancestor and `arm` does
-# nothing. Set PARITY_KEEP_STACK=1 to opt out.
+# Two teardown paths, by context. In a contained Pi Dash run
+# (NEWPIDASH-255) the runner executes `<workspace>/.pidash/run-end-hook`
+# — written by `arm` below — after the run's processes are stopped, and
+# the daemon-start sweep runs it if the daemon crashed; `setsid` no
+# longer escapes the run cgroup, so the watcher is not the path there.
+# For a person's shell or CI (no containment), `arm` finds the agent
+# process of the current run (the ancestor started by the `pidash`
+# runner daemon) and starts one watcher per stack and run, which waits
+# for that process to exit, then runs parity-down.sh. Outside a Pi Dash
+# run there is no such ancestor and `arm` does nothing.
+# Set PARITY_KEEP_STACK=1 to opt out.
 set -u
 
 export STACK_DIR
@@ -52,6 +58,21 @@ case "${1:-}" in
     MARK="${TMPDIR:-/tmp}/parity-reaper.$PARITY_PROJECT.$AGENT.pid"
     if [ -f "$MARK" ] && kill -0 "$(cat "$MARK")" 2>/dev/null; then
       exit 0
+    fi
+    # NEWPIDASH-255: inside a contained Pi Dash run, the runner itself
+    # tears the stack down at run end via the run-end hook it executes
+    # outside the run cgroup — setsid no longer escapes containment, so
+    # the standalone watcher below (for manual/CI use, where no cgroup
+    # exists) is no longer the teardown path in runs. Register the hook
+    # now: the runner runs it after the run ends, and the daemon-start
+    # sweep runs it if the daemon crashed first. The hook path is
+    # <workspace>/.pidash/run-end-hook, matching the runner; PWD is the
+    # workspace the agent runs in.
+    if [ "${PIDASH_CONTAINMENT:-auto}" != "off" ]; then
+      mkdir -p "$PWD/.pidash" 2>/dev/null || true
+      printf 'PARITY_PROJECT=%q PARITY_NS=%q %q %q\n' \
+        "$PARITY_PROJECT" "${PARITY_NS:-}" "$STACK_DIR/parity-down.sh" "$PARITY_PROJECT" \
+        > "$PWD/.pidash/run-end-hook" 2>/dev/null || true
     fi
     # Own session and cwd /, so the watcher outlives the agent's process group
     # and never looks like work in progress inside the checkout. setsid --fork

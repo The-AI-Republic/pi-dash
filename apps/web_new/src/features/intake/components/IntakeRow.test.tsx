@@ -10,6 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 import { INTAKE_IDENTITY_EMAIL } from "../lib/identity.js";
 import { IntakeRow } from "./IntakeRow.js";
 
+// Pinned so the local-day assertions read the same day on any machine
+// running the suite.
+process.env.TZ = "America/Los_Angeles";
+
 function row(overrides: Partial<IntakeIssueRow> = {}, issueOverrides = {}): IntakeIssueRow {
   return {
     id: "intake-i-1",
@@ -24,7 +28,7 @@ function row(overrides: Partial<IntakeIssueRow> = {}, issueOverrides = {}): Inta
       priority: "urgent",
       sequence_id: 7,
       project_id: "223e4567-e89b-12d3-a456-426614174001",
-      created_at: "2026-10-01T00:00:00Z",
+      created_at: "2026-10-01T12:00:00Z",
       label_ids: [],
       created_by: null,
       ...issueOverrides,
@@ -79,6 +83,12 @@ describe("IntakeRow (INT-006)", () => {
     expect(title).toHaveTextContent("Fix the intake list");
     expect(title).toHaveAttribute("title", "Fix the intake list");
     expect(screen.getByTestId("intake-row-date")).toHaveTextContent("Oct 1, 2026");
+  });
+
+  it("renders the created day in the viewer's local timezone", () => {
+    // 01:00 UTC on the 18th is still the 17th in Los Angeles.
+    render(<IntakeRow {...BASE} row={row({}, { created_at: "2026-11-18T01:00:00Z" })} />);
+    expect(screen.getByTestId("intake-row-date")).toHaveTextContent("Nov 17, 2026");
   });
 
   it("names the row by identifier, title and status", () => {

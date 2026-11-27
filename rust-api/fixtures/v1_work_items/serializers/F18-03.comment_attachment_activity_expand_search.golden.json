@@ -283,6 +283,7 @@
         "git_work_branch",
         "created_via",
         "agent_executor",
+        "work_type",
         "created_by",
         "updated_by",
         "project",
@@ -292,12 +293,8 @@
         "type",
         "assigned_pod"
       ],
-      "labels_plain": [
-        "c833c492-fa3d-49f5-85a4-0ef810642731"
-      ],
-      "assignees_plain": [
-        "79c81d76-5a93-4d3d-894d-5935576834b6"
-      ],
+      "labels_plain": ["c833c492-fa3d-49f5-85a4-0ef810642731"],
+      "assignees_plain": ["79c81d76-5a93-4d3d-894d-5935576834b6"],
       "cycle_unlinked": "<KEY ABSENT>",
       "module_unlinked": "<KEY ABSENT>",
       "note_unlinked": "With no CycleIssue/ModuleIssue row, the cycle/module keys are absent from the payload (DRF drops failed source traversals).",
@@ -332,13 +329,8 @@
     },
     "CycleIssueSerializer": {
       "source": "serializers/issue.py:1033-1045",
-      "declared_fields": [
-        "id",
-        "cycle"
-      ],
-      "meta_fields": [
-        "cycle"
-      ],
+      "declared_fields": ["id", "cycle"],
+      "meta_fields": ["cycle"],
       "has_meta_model": false,
       "live_bug": {
         "raises": "AssertionError: Class CycleIssueSerializer missing \"Meta.model\" attribute"
@@ -371,13 +363,8 @@
     },
     "ModuleIssueSerializer": {
       "source": "serializers/issue.py:1047-1059",
-      "declared_fields": [
-        "id",
-        "module"
-      ],
-      "meta_fields": [
-        "module"
-      ],
+      "declared_fields": ["id", "module"],
+      "meta_fields": ["module"],
       "has_meta_model": false,
       "live_bug": {
         "raises": "AssertionError: Class ModuleIssueSerializer missing \"Meta.model\" attribute"
@@ -410,11 +397,7 @@
     },
     "LabelLiteSerializer": {
       "source": "serializers/issue.py:1061-1072 (consumed by PIDASHCONV-661)",
-      "render_keys": [
-        "id",
-        "name",
-        "color"
-      ],
+      "render_keys": ["id", "name", "color"],
       "render": {
         "id": "c833c492-fa3d-49f5-85a4-0ef810642731",
         "name": "bug",

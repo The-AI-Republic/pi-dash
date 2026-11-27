@@ -74,67 +74,73 @@ pub fn resolve_model_for_user(
 }
 
 /// How the desktop agent engine should reach a model for one user
-/// (`AgentModelProfile`, `model_provider.py:26-48`).
+/// (`PidashAgentProfile`, `model_provider.py:26-48`).
 ///
 /// The credential itself is never part of this object (see
-/// [`agent_model_credential_for_user`]). `reason_code` is a
-/// `ManagedRunnerReason` value and is empty exactly when `available` is
+/// [`pidash_agent_credential_for_user`]). `reason_code` is a
+/// `PidashAgentReason` value and is empty exactly when `available` is
 /// true; CE never serves the desktop, so `available` is always false here.
 /// `top_up_url` is where a user adds credit for this lane; empty means
 /// there is nowhere to send them (CE has no credit lane, so always empty
 /// here).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentModelProfile {
+pub struct PidashAgentProfile {
     pub available: bool,
     pub lane: String,
     pub base_url: String,
     pub model: String,
     pub reason_code: String,
     pub top_up_url: String,
+    pub context_window: Option<u32>,
 }
 
-/// Describe the model endpoint the desktop engine may call
-/// (`agent_model_profile_for_user`, `model_provider.py:71-89`).
+/// Describe the model endpoint the Pi Dash Agent may call
+/// (`pidash_agent_profile_for_user`, `model_provider.py:71-89`).
 ///
-/// CE has exactly one lane, BYOK, and the desktop engine deliberately does
+/// CE has exactly one lane, BYOK, and the Pi Dash Agent deliberately does
 /// not serve it: the stored key is decrypted only inside a server process
 /// at the moment of use and the API has no read path for it, so honouring
 /// BYOK on the desktop would add the first endpoint returning a stored key
 /// to a client. Matrix: key held → `{available: false, lane: "byok",
 /// reason: byok_unsupported}`; no key → `{available: false, lane: "",
 /// reason: llm_config_missing}`.
-pub fn agent_model_profile_for_user(has_api_key: bool) -> AgentModelProfile {
+pub fn pidash_agent_profile_for_user(has_api_key: bool) -> PidashAgentProfile {
     if has_api_key {
-        AgentModelProfile {
+        PidashAgentProfile {
             available: false,
             lane: "byok".to_owned(),
             base_url: String::new(),
             model: String::new(),
             reason_code: REASON_BYOK_UNSUPPORTED.to_owned(),
             top_up_url: String::new(),
+            // CE leaves it empty: the OSS build has no OpenHub catalog to fill
+            // it from. Known models use the engine's built-in catalog; unknown
+            // models are refused at turn time by the fallback check.
+            context_window: None,
         }
     } else {
-        AgentModelProfile {
+        PidashAgentProfile {
             available: false,
             lane: String::new(),
             base_url: String::new(),
             model: String::new(),
             reason_code: REASON_LLM_CONFIG_MISSING.to_owned(),
             top_up_url: String::new(),
+            context_window: None,
         }
     }
 }
 
 /// Refusal when a managed run cannot be admitted
-/// (`ManagedRunnerUnavailable`, `managed_runner/errors.py:36-46`):
+/// (`PidashAgentUnavailable`, `managed_runner/errors.py:36-46`):
 /// `code` is the reason, `str(exc)` the detail (or the code when empty).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedRunnerUnavailable {
+pub struct PidashAgentUnavailable {
     pub code: String,
     pub detail: String,
 }
 
-impl ManagedRunnerUnavailable {
+impl PidashAgentUnavailable {
     pub fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -143,7 +149,7 @@ impl ManagedRunnerUnavailable {
     }
 }
 
-impl std::fmt::Display for ManagedRunnerUnavailable {
+impl std::fmt::Display for PidashAgentUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.detail.is_empty() {
             write!(f, "{}", self.code)
@@ -153,18 +159,18 @@ impl std::fmt::Display for ManagedRunnerUnavailable {
     }
 }
 
-impl std::error::Error for ManagedRunnerUnavailable {}
+impl std::error::Error for PidashAgentUnavailable {}
 
-/// Return the desktop engine's model credential
-/// (`agent_model_credential_for_user`, `model_provider.py:92-108`).
+/// Return the Pi Dash Agent's model credential
+/// (`pidash_agent_credential_for_user`, `model_provider.py:92-108`).
 ///
 /// CE has no lane the desktop can use, so there is nothing to hand out.
 /// Raising rather than returning empty keeps the failure loud: a caller
-/// that ignored [`agent_model_profile_for_user`] must not silently receive
+/// that ignored [`pidash_agent_profile_for_user`] must not silently receive
 /// a blank credential and produce a 401 deep inside a run. The `Ok` shape
 /// is `(token, expires_at)`, which only the cloud overlay ever returns.
-pub fn agent_model_credential_for_user() -> Result<(String, String), ManagedRunnerUnavailable> {
-    Err(ManagedRunnerUnavailable::new(
+pub fn pidash_agent_credential_for_user() -> Result<(String, String), PidashAgentUnavailable> {
+    Err(PidashAgentUnavailable::new(
         REASON_BYOK_UNSUPPORTED,
         MSG_NO_DESKTOP_LANE,
     ))
@@ -292,7 +298,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(matrix.len(), 2);
-        let with_key = agent_model_profile_for_user(true);
+        let with_key = pidash_agent_profile_for_user(true);
         assert!(!with_key.available);
         assert_eq!(with_key.lane, "byok");
         assert_eq!(with_key.base_url, "");
@@ -300,7 +306,7 @@ mod tests {
         assert_eq!(with_key.reason_code, REASON_BYOK_UNSUPPORTED);
         assert_eq!(with_key.reason_code, "byok_not_supported_on_desktop");
         assert!(with_key.top_up_url.is_empty());
-        let without_key = agent_model_profile_for_user(false);
+        let without_key = pidash_agent_profile_for_user(false);
         assert!(!without_key.available);
         assert_eq!(without_key.lane, "");
         assert_eq!(without_key.reason_code, REASON_LLM_CONFIG_MISSING);
@@ -317,7 +323,7 @@ mod tests {
                 .unwrap()
                 .contains("always raises")
         );
-        let err = agent_model_credential_for_user().expect_err("CE never hands out");
+        let err = pidash_agent_credential_for_user().expect_err("CE never hands out");
         assert_eq!(err.code, REASON_BYOK_UNSUPPORTED);
         assert_eq!(err.detail, MSG_NO_DESKTOP_LANE);
         assert_eq!(
@@ -325,7 +331,7 @@ mod tests {
             "This build has no model lane the desktop agent can use."
         );
         // Empty-detail Display falls back to the code (the ValueError init).
-        let bare = ManagedRunnerUnavailable::new("llm_config_missing", "");
+        let bare = PidashAgentUnavailable::new("llm_config_missing", "");
         assert_eq!(bare.to_string(), "llm_config_missing");
     }
 

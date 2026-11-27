@@ -821,7 +821,7 @@ def test_deleted_project_is_404(clients, seed, db_conn):
     with db_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO projects (%s) VALUES (%s)" % (
-                PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+                PROJECT_COLUMNS, ",".join(["%s"] * 31)),
             _project_row(tpid, _unique("Bulk gone"),
                          f"BG{uuid.uuid4().hex[:6]}", seed["ws"], True),
         )

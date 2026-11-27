@@ -50,15 +50,21 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, Keyword, Query, SimpleExpr};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_services::runner_sessions::live_drains;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
 };
@@ -71,6 +77,28 @@ use super::{
 use crate::state::AppState;
 use pidash_compat::db::is_unique_violation;
 use pidash_compat::py::py_str;
+
+/// `agent_run` status flip shared by `accept`, `approvals`,
+/// `awaiting-reauth` and `resumed` (`run.save(update_fields=["status"])`).
+fn run_status_update(
+    status: AgentRunStatus,
+    run_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(status.value()))
+        .filter(Column::Id.eq(run_id))
+}
+
+/// `expires_at` as the daemon sent it: a string binds as text and lets
+/// Postgres parse it (`::timestamptz`, the same strings psycopg sends),
+/// a missing value writes `NULL`.
+fn expires_at_expr(expires_at: Option<&str>) -> SimpleExpr {
+    match expires_at {
+        Some(text) => Expr::val(text.to_owned()).cast_as(Alias::new("timestamptz")),
+        None => SimpleExpr::Keyword(Keyword::Null),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pure frame helpers (unit-tested against FX-RUN-09)
@@ -333,12 +361,15 @@ pub async fn resolve_run(
     run_id: Uuid,
     runner: Option<&DaemonRunner>,
 ) -> Result<ResolvedRun, Response> {
-    let row: Option<(Uuid, Option<Uuid>, String)> =
-        sqlx::query_as(r#"SELECT "id", "runner_id", "status" FROM "agent_run" WHERE "id" = $1"#)
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    use orm::agent_run::{Column, Entity};
+    let row = Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::RunnerId, Column::Status])
+        .filter(Column::Id.eq(run_id))
+        .into_tuple::<(Uuid, Option<Uuid>, String)>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
     let Some((id, runner_id, status)) = row else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
@@ -358,28 +389,7 @@ pub async fn resolve_run(
     })
 }
 
-type LockedRunRow = (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String);
-
-/// The effects-lock fetch: status, config, error, refusal category,
-/// scheduler binding, hooks marker.
-type EffectsLockRow = (
-    String,
-    Value,
-    String,
-    String,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-);
-
-/// The capacity re-read: release marker, executor, runner, pod,
-/// workspace.
-type CapacityRow = (
-    Option<DateTime<Utc>>,
-    String,
-    Option<Uuid>,
-    Option<Uuid>,
-    Uuid,
-);
+type LockedRunRow = (Uuid, Option<Uuid>, Uuid, Option<Uuid>, String, String);
 
 /// The `_lock_non_terminal` fetch (`run_endpoints.py:93-99`): the
 /// locked row's identity, status, and the requeue facts.
@@ -389,6 +399,7 @@ pub struct LockedRun {
     pub pod_id: Option<Uuid>,
     pub parent_run_id: Option<Uuid>,
     pub status: String,
+    pub pin_kind: String,
 }
 
 /// `_lock_non_terminal`: re-read under `FOR UPDATE`, answering
@@ -398,15 +409,25 @@ pub async fn lock_non_terminal(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: Uuid,
 ) -> Result<LockedRun, Response> {
-    let row: Option<LockedRunRow> = sqlx::query_as(
-        r#"SELECT "id", "runner_id", "pod_id", "parent_run_id", "status"
-           FROM "agent_run" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(run_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((id, runner_id, pod_id, parent_run_id, status)) = row else {
+    use orm::agent_run::{Column, Entity};
+    let row: Option<LockedRunRow> = Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::RunnerId,
+            Column::PodId,
+            Column::ParentRunId,
+            Column::Status,
+            Column::PinKind,
+        ])
+        .filter(Column::Id.eq(run_id))
+        .limit(1)
+        .lock_exclusive()
+        .into_tuple::<LockedRunRow>()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    let Some((id, runner_id, pod_id, parent_run_id, status, pin_kind)) = row else {
         return Err(json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"run_not_found"}"#.to_owned(),
@@ -421,9 +442,10 @@ pub async fn lock_non_terminal(
     Ok(LockedRun {
         id,
         runner_id,
-        pod_id,
+        pod_id: Some(pod_id),
         parent_run_id,
         status,
+        pin_kind,
     })
 }
 
@@ -453,37 +475,25 @@ pub async fn record_dedupe(
         return Ok(true);
     }
     let key = truncate_chars(message_id, 128);
-    sqlx::query("SAVEPOINT run_message_dedupe")
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    let inserted = sqlx::query(
-        r#"INSERT INTO "run_message_dedupe" ("run_id", "message_id", "created_at")
-           VALUES ($1, $2, $3)"#,
-    )
-    .bind(run_id)
-    .bind(&key)
-    .bind(Utc::now())
-    .execute(&mut **tx)
+    // The savepoint is an sqlx nested transaction: a duplicate aborts
+    // only it, and the outer transaction stays valid.
+    let mut savepoint = tx.begin().await.map_err(|_| server_error())?;
+    let inserted = orm::run_message_dedupe::Entity::insert(orm::run_message_dedupe::ActiveModel {
+        id: sea_orm::NotSet,
+        run_id: Set(run_id),
+        message_id: Set(key),
+        created_at: Set(Utc::now().into()),
+    })
+    .exec(&TxConn::new(&mut savepoint))
     .await;
     match inserted {
         Ok(_) => {
-            sqlx::query("RELEASE SAVEPOINT run_message_dedupe")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
+            savepoint.commit().await.map_err(|_| server_error())?;
             Ok(true)
         }
         Err(error) => {
-            let unique_violation = is_unique_violation(&error);
-            sqlx::query("ROLLBACK TO SAVEPOINT run_message_dedupe")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
-            sqlx::query("RELEASE SAVEPOINT run_message_dedupe")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
+            let unique_violation = is_unique_violation(&pidash_db::orm_tx::into_sqlx(error));
+            savepoint.rollback().await.map_err(|_| server_error())?;
             if unique_violation {
                 Ok(false)
             } else {
@@ -542,9 +552,14 @@ pub async fn insert_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
-    comment_domain::insert_description_row(&mut **tx, &rows).await?;
-    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(tx), &rows).await?;
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(tx), &rows).await?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await?;
     Ok(())
 }
 
@@ -577,39 +592,14 @@ async fn live_state_facts(
     runner_id: Uuid,
     run_id: Uuid,
 ) -> Result<Option<LiveStateUsageFacts>, Response> {
-    let row: Option<(Value, Option<String>)> = sqlx::query_as(
-        r#"SELECT "usage", "llm_model" FROM "runner_live_state"
-           WHERE ("observed_run_id" = $1 AND "runner_id" = $2) LIMIT 1"#,
-    )
-    .bind(run_id)
-    .bind(runner_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(row.map(|(usage, llm_model)| LiveStateUsageFacts { usage, llm_model }))
-}
-
-/// Bind one finalize `SET` clause, in values order. `Now` is the
-/// statement's single timestamp; `Null` binds the column's typed
-/// null (the only nulls the terminal path writes are the two
-/// markers).
-fn bind_finalize_value<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    column: &str,
-    value: &pidash_services::runner_runs::SetValue,
-    now: &DateTime<Utc>,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    use pidash_services::runner_runs::SetValue;
-    match (column, value) {
-        (_, SetValue::Now) => query.bind(*now),
-        (_, SetValue::Text(text)) => query.bind(text.clone()),
-        (_, SetValue::Json(payload)) => query.bind(payload.clone()),
-        (_, SetValue::Null) => query.bind(None::<DateTime<Utc>>),
-    }
+    lifecycle_kernel::live_state_usage_facts(&TxConn::new(tx), runner_id, run_id)
+        .await
+        .map_err(|_| server_error())
 }
 
 /// `finalize_run_terminal` (`run_lifecycle.py:402-463`) inside the
-/// endpoint transaction: plan, first-writer-wins lock, merge,
+/// endpoint transaction (`runner_failure_reason` is the `RunFailed`
+/// frame's `reason`, `Null` elsewhere): plan, first-writer-wins lock, merge,
 /// update, cloud-only terminal event. Returns the post-commit
 /// effects (`_publish_effects`); a lost race logs and returns none.
 #[allow(clippy::too_many_arguments)]
@@ -623,6 +613,7 @@ pub async fn execute_finalize_terminal(
     refusal_category: &Value,
     tokens: &Value,
     model: &Value,
+    runner_failure_reason: &Value,
 ) -> Result<Vec<LifecycleEffect>, Response> {
     let live = live_state_facts(tx, runner.id, run_id).await?;
     let info = runner_info(runner);
@@ -630,6 +621,7 @@ pub async fn execute_finalize_terminal(
         status,
         done_payload,
         error_detail,
+        runner_failure_reason,
         refusal_category,
         tokens,
         model,
@@ -638,26 +630,13 @@ pub async fn execute_finalize_terminal(
     };
     let mut values =
         lifecycle_kernel::plan_terminal_finalize(&inputs).map_err(|_| server_error())?;
-    // `lock_run_for_finalize_sql(true, false)`: same predicates and
-    // lock, targeted columns (id, executor, stored payload).
-    let locked: Option<(Uuid, String, Option<Value>)> = sqlx::query_as(
-        r#"SELECT "id", "executor_kind", "done_payload" FROM "agent_run"
-           WHERE ("agent_run"."id" = $1
-             AND NOT ("agent_run"."status" IN ($2, $3, $4, $5, $6))
-             AND "agent_run"."runner_id" = $7)
-           ORDER BY "agent_run"."created_at" DESC LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(run_id)
-    .bind(TERMINAL_RUN_STATUSES[0].value())
-    .bind(TERMINAL_RUN_STATUSES[1].value())
-    .bind(TERMINAL_RUN_STATUSES[2].value())
-    .bind(TERMINAL_RUN_STATUSES[3].value())
-    .bind(TERMINAL_RUN_STATUSES[4].value())
-    .bind(runner.id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((locked_id, executor_kind, stored_payload)) = locked else {
+    let conn = TxConn::new(tx);
+    // `lock_run_for_finalize(expected_runner_id=runner.id)`: the
+    // first-writer-wins lock; the stored payload merges before the write.
+    let Some(locked) = finalize_kernel::lock_run_for_finalize(&conn, run_id, Some(runner.id), None)
+        .await
+        .map_err(|_| server_error())?
+    else {
         tracing::info!(
             run_id = %run_id,
             "run_lifecycle: ignoring late terminal transition for closed run"
@@ -666,50 +645,12 @@ pub async fn execute_finalize_terminal(
     };
     finalize_kernel::apply_done_payload_merge(
         &mut values,
-        stored_payload.as_ref().unwrap_or(&Value::Null),
+        locked.done_payload.as_ref().unwrap_or(&Value::Null),
     );
     let now = Utc::now();
-    let update_sql = finalize_kernel::finalize_update_sql(&values);
-    let mut update = sqlx::query(&update_sql);
-    for clause in &values.clauses {
-        update = bind_finalize_value(update, clause.column, &clause.value, &now);
-    }
-    update
-        .bind(locked_id)
-        .execute(&mut **tx)
+    finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if executor_kind == AgentExecutorKind::CloudAgent.value() {
-        let exists: Option<i32> = sqlx::query_scalar(finalize_kernel::terminal_event_exists_sql())
-            .bind(run_id)
-            .bind("terminal")
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
-        if exists.is_none() {
-            let max_seq: Option<i32> =
-                sqlx::query_scalar(finalize_kernel::terminal_event_max_seq_sql())
-                    .bind(run_id)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|_| server_error())?
-                    .flatten();
-            let event = finalize_kernel::plan_terminal_event(
-                max_seq,
-                status,
-                &finalize_kernel::finalize_error_code(&values),
-            );
-            sqlx::query(&finalize_kernel::terminal_event_insert_sql())
-                .bind(run_id)
-                .bind(event.seq)
-                .bind("terminal")
-                .bind(&event.payload)
-                .bind(Utc::now())
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
-        }
-    }
     Ok(finalize_kernel::plan_publish_effects(run_id).to_vec())
 }
 
@@ -728,26 +669,11 @@ pub async fn execute_apply_paused(
     model: &Value,
 ) -> Result<Vec<LifecycleEffect>, Response> {
     let live = live_state_facts(tx, runner.id, run_id).await?;
-    // `lock_run_for_pause_sql`: same predicates and lock, targeted
-    // columns (id, stored payload).
-    let pausing: Option<(Uuid, Option<Value>)> = sqlx::query_as(
-        r#"SELECT "id", "done_payload" FROM "agent_run"
-           WHERE ("agent_run"."id" = $1 AND "agent_run"."runner_id" = $2
-             AND NOT ("agent_run"."status" IN ($3, $4, $5, $6, $7))
-             AND NOT ("agent_run"."status" = $8))
-           ORDER BY "agent_run"."created_at" DESC LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(run_id)
-    .bind(runner.id)
-    .bind(TERMINAL_RUN_STATUSES[0].value())
-    .bind(TERMINAL_RUN_STATUSES[1].value())
-    .bind(TERMINAL_RUN_STATUSES[2].value())
-    .bind(TERMINAL_RUN_STATUSES[3].value())
-    .bind(TERMINAL_RUN_STATUSES[4].value())
-    .bind(AgentRunStatus::CancelRequested.value())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?;
+    let conn = TxConn::new(tx);
+    // `lock_run_for_pause`: the id and the stored payload under the lock.
+    let pausing = lifecycle_kernel::lock_run_for_pause(&conn, run_id, runner.id)
+        .await
+        .map_err(|_| server_error())?;
     let Some((pausing_id, stored_payload)) = pausing else {
         return Ok(Vec::new());
     };
@@ -758,29 +684,19 @@ pub async fn execute_apply_paused(
         model,
         live.as_ref(),
     );
-    let pause_sql = lifecycle_kernel::pause_update_sql(&plan);
-    let mut update = sqlx::query(&pause_sql)
-        .bind(AgentRunStatus::PausedAwaitingInput.value())
-        .bind(&plan.done_payload);
-    if let Some(usage) = &plan.usage {
-        update = update.bind(usage);
-    }
-    if let Some(model) = &plan.llm_model {
-        update = update.bind(model);
-    }
-    update
-        .bind(pausing_id)
-        .execute(&mut **tx)
+    lifecycle_kernel::pause_update(&conn, &plan, pausing_id)
         .await
         .map_err(|_| server_error())?;
     // Phase-2 re-read (`pause_reread_sql`): a missing row returns
     // before the `on_commit` registration — no comment, no drain.
-    let work_item: Option<Option<Uuid>> =
-        sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "agent_run"."id" = $1"#)
-            .bind(run_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
+    let work_item: Option<Option<Uuid>> = orm::agent_run::Entity::find()
+        .select_only()
+        .column(orm::agent_run::Column::WorkItemId)
+        .filter(orm::agent_run::Column::Id.eq(run_id))
+        .into_tuple::<Option<Uuid>>()
+        .one(&conn)
+        .await
+        .map_err(|_| server_error())?;
     let Some(work_item_id) = work_item else {
         return Ok(Vec::new());
     };
@@ -790,13 +706,17 @@ pub async fn execute_apply_paused(
             // `run.work_item.project` / `.workspace` through the
             // `select_related` join: a dangling issue is the source's
             // `AttributeError` on `None` (500).
-            let issue: Option<(Uuid, Uuid)> = sqlx::query_as(
-                r#"SELECT "project_id", "workspace_id" FROM "issues" WHERE "id" = $1"#,
-            )
-            .bind(issue_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
+            let issue = orm::issues::Entity::find()
+                .select_only()
+                .columns([
+                    orm::issues::Column::ProjectId,
+                    orm::issues::Column::WorkspaceId,
+                ])
+                .filter(orm::issues::Column::Id.eq(issue_id))
+                .into_tuple::<(Uuid, Uuid)>()
+                .one(&conn)
+                .await
+                .map_err(|_| server_error())?;
             let Some((project_id, workspace_id)) = issue else {
                 return Err(server_error());
             };
@@ -843,14 +763,16 @@ pub async fn execute_requeue(
         Some(parent_id) => {
             // `run.parent_run.thread_id`: a dangling parent id is the
             // source's `DoesNotExist` (500); impossible under the FK.
-            let thread: Option<Option<String>> =
-                sqlx::query_scalar(r#"SELECT "thread_id" FROM "agent_run" WHERE "id" = $1"#)
-                    .bind(parent_id)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|_| server_error())?;
+            let thread: Option<String> = orm::agent_run::Entity::find()
+                .select_only()
+                .column(orm::agent_run::Column::ThreadId)
+                .filter(orm::agent_run::Column::Id.eq(parent_id))
+                .into_tuple::<String>()
+                .one(&TxConn::new(tx))
+                .await
+                .map_err(|_| server_error())?;
             match thread {
-                Some(thread) => thread,
+                Some(thread) => Some(thread),
                 None => return Err(server_error()),
             }
         }
@@ -861,31 +783,31 @@ pub async fn execute_requeue(
         pod_id: locked.pod_id,
         parent_run_id: locked.parent_run_id,
         parent_thread_id,
+        pin_kind: locked.pin_kind.clone(),
     });
     // The parent thread clears *before* the run row, in the same
     // transaction (`run_lifecycle.py:279-290`).
+    let conn = TxConn::new(tx);
     if let Some(parent_id) = plan.parent_thread_clear {
-        let cleared = sqlx::query(lifecycle_kernel::parent_thread_clear_sql())
-            .bind("")
-            .bind(parent_id)
-            .execute(&mut **tx)
+        let cleared = lifecycle_kernel::parent_thread_clear(&conn, parent_id)
             .await
             .map_err(|_| server_error())?;
-        if cleared.rows_affected() == 0 {
+        if cleared == 0 {
             // `save()` on a vanished row is `DatabaseError` (500).
             return Err(server_error());
         }
     }
-    let updated = sqlx::query(lifecycle_kernel::requeue_update_sql())
-        .bind(AgentRunStatus::Queued.value())
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(locked.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    if updated.rows_affected() == 0 {
+    // A dedicated pin is kept (§9.3); a locality pin is dropped.
+    let updated = if plan.keep_pin {
+        lifecycle_kernel::requeue_update_keep_pin(&conn, locked.id)
+            .await
+            .map_err(|_| server_error())?
+    } else {
+        lifecycle_kernel::requeue_update(&conn, locked.id)
+            .await
+            .map_err(|_| server_error())?
+    };
+    if updated == 0 {
         return Err(server_error());
     }
     Ok(plan.after_commit.into_iter().collect())
@@ -899,13 +821,39 @@ pub async fn execute_assign_rejected_busy(
     runner_id: Uuid,
     locked: &LockedRun,
 ) -> Result<Vec<LifecycleEffect>, Response> {
-    sqlx::query(lifecycle_kernel::runner_busy_update_sql())
-        .bind("busy")
-        .bind(runner_id)
-        .execute(&mut **tx)
+    lifecycle_kernel::runner_busy_update(&TxConn::new(tx), runner_id)
         .await
         .map_err(|_| server_error())?;
     execute_requeue(tx, locked).await
+}
+
+/// `apply_agent_auth_missing` (`run_lifecycle.py` recent): same DB effect as
+/// `execute_assign_rejected_busy` (BUSY flip + requeue) for
+/// `agent_auth_missing` NACKs, distinguished by wire name, plus the failure
+/// comment with agent/runner/machine/fix so a credential-less pod is not
+/// silent. The comment is posted synchronously inside the endpoint
+/// transaction (like Django's `_post_failure_comment` inside
+/// `apply_agent_auth_missing`); effects are only the post-commit pod drain.
+pub async fn execute_agent_auth_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    locked: &LockedRun,
+    ports: &LivePorts,
+    detail: &str,
+    created_by: Option<Uuid>,
+) -> Result<Vec<LifecycleEffect>, Response> {
+    lifecycle_kernel::runner_busy_update(&TxConn::new(tx), runner_id)
+        .await
+        .map_err(|_| server_error())?;
+    let effects = execute_requeue(tx, locked).await?;
+    if !detail.is_empty() {
+        // Posting the failure comment is best-effort here: the run is
+        // already requeued, so a comment failure must not fail the
+        // endpoint's reschedule. Log via the existing terminal-error
+        // path would over-report; instead swallow and continue.
+        let _ = post_failure_comment(tx, ports, locked.id, detail, created_by).await;
+    }
+    Ok(effects)
 }
 
 // ---------------------------------------------------------------------------
@@ -940,80 +888,53 @@ pub async fn execute_terminal_effects(
     created_by: Option<Uuid>,
 ) -> Result<bool, TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
+    let orm_err = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
     let mut hooks = pidash_db::tx::Transaction::begin(pool).await.map_err(db)?;
     // Lock order: issue → run (`finalization.py:115-125`).
-    let work_item_id: Option<Uuid> =
-        sqlx::query_scalar(finalize_kernel::select_run_work_item_id_sql())
-            .bind(run_id)
-            .fetch_optional(&mut **hooks.inner())
+    let (_work_item_id, locked) = {
+        let conn = TxConn::new(hooks.inner());
+        let work_item_id: Option<Uuid> = finalize_kernel::select_run_work_item_id(&conn, run_id)
             .await
-            .map_err(db)?
+            .map_err(orm_err)?
             .flatten();
-    if let Some(issue_id) = work_item_id {
-        sqlx::query(
-            r#"SELECT 1 AS "a" FROM "issues" WHERE "issues"."id" = $1
-               ORDER BY "issues"."created_at" DESC LIMIT 1 FOR UPDATE OF "issues""#,
+        if let Some(issue_id) = work_item_id {
+            finalize_kernel::lock_issue(&conn, issue_id)
+                .await
+                .map_err(orm_err)?;
+        }
+        // `lock_run_for_effects`: the terminal row's hook facts under
+        // `FOR UPDATE OF "agent_run"`.
+        (
+            work_item_id,
+            finalize_kernel::lock_run_for_effects(&conn, run_id)
+                .await
+                .map_err(orm_err)?,
         )
-        .bind(issue_id)
-        .fetch_optional(&mut **hooks.inner())
-        .await
-        .map_err(db)?;
-    }
-    // `lock_run_for_effects_sql`: same predicates and lock, targeted
-    // columns (status, config, error, category, binding, marker).
-    let locked: Option<EffectsLockRow> = sqlx::query_as(
-        r#"SELECT "status", "run_config",
-                  COALESCE("agent_run"."error_details" ->> 'message', '') AS "error",
-                  "refusal_category",
-                  "scheduler_binding_id", "terminal_hooks_applied_at"
-               FROM "agent_run"
-               WHERE ("agent_run"."id" = $1 AND "agent_run"."status" IN ($2, $3, $4, $5, $6))
-               ORDER BY "agent_run"."created_at" DESC LIMIT 1 FOR UPDATE OF "agent_run""#,
-    )
-    .bind(run_id)
-    .bind(TERMINAL_RUN_STATUSES[0].value())
-    .bind(TERMINAL_RUN_STATUSES[1].value())
-    .bind(TERMINAL_RUN_STATUSES[2].value())
-    .bind(TERMINAL_RUN_STATUSES[3].value())
-    .bind(TERMINAL_RUN_STATUSES[4].value())
-    .fetch_optional(&mut **hooks.inner())
-    .await
-    .map_err(db)?;
-    let Some((status, run_config, error, refusal_category, binding_id, hooks_applied_at)) = locked
-    else {
+    };
+    let Some(locked) = locked else {
         return Ok(false);
     };
-    let status = AgentRunStatus::from_value(&status)
+    let status = AgentRunStatus::from_value(&locked.status)
         .ok_or_else(|| TerminalEffectsError::Database("unknown terminal status".to_owned()))?;
+    let error = locked.error().to_owned();
+    let refusal_category = locked.refusal_category().to_owned();
+    let binding_id = locked.scheduler_binding_id;
     let mut pending_handoff = false;
-    if hooks_applied_at.is_none() {
-        let handoff = lifecycle_kernel::has_project_move_handoff(&run_config);
+    if locked.terminal_hooks_applied_at.is_none() {
+        let handoff = lifecycle_kernel::has_project_move_handoff(&locked.run_config);
         if status == AgentRunStatus::Failed && !handoff {
-            // Best-effort comment behind a savepoint: a comment
-            // database failure must not poison the hooks
-            // transaction or strand terminal capacity.
-            sqlx::query("SAVEPOINT failure_comment")
-                .execute(&mut **hooks.inner())
-                .await
-                .map_err(db)?;
+            // Best-effort comment behind a savepoint (an sqlx nested
+            // transaction): a comment database failure must not poison
+            // the hooks transaction or strand terminal capacity.
+            let mut savepoint = hooks.inner().begin().await.map_err(db)?;
             let commented =
-                post_failure_comment(hooks.inner(), ports, run_id, &error, created_by).await;
+                post_failure_comment(&mut savepoint, ports, run_id, &error, created_by).await;
             match commented {
                 Ok(()) => {
-                    sqlx::query("RELEASE SAVEPOINT failure_comment")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
+                    savepoint.commit().await.map_err(db)?;
                 }
                 Err(error) => {
-                    sqlx::query("ROLLBACK TO SAVEPOINT failure_comment")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
-                    sqlx::query("RELEASE SAVEPOINT failure_comment")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
+                    savepoint.rollback().await.map_err(db)?;
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
@@ -1040,29 +961,21 @@ pub async fn execute_terminal_effects(
         if let Some(binding_id) = binding_id {
             // The savepoint pair always runs around the hook call;
             // the `UPDATE` only when the hook rewrites `last_error`.
-            sqlx::query("SAVEPOINT scheduler_hook")
-                .execute(&mut **hooks.inner())
-                .await
-                .map_err(db)?;
-            let hooked =
-                apply_scheduler_hook(hooks.inner(), binding_id, status, &refusal_category, &error)
-                    .await;
+            let mut savepoint = hooks.inner().begin().await.map_err(db)?;
+            let hooked = apply_scheduler_hook(
+                &mut savepoint,
+                binding_id,
+                status,
+                &refusal_category,
+                &error,
+            )
+            .await;
             match hooked {
                 Ok(()) => {
-                    sqlx::query("RELEASE SAVEPOINT scheduler_hook")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
+                    savepoint.commit().await.map_err(db)?;
                 }
                 Err(error) => {
-                    sqlx::query("ROLLBACK TO SAVEPOINT scheduler_hook")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
-                    sqlx::query("RELEASE SAVEPOINT scheduler_hook")
-                        .execute(&mut **hooks.inner())
-                        .await
-                        .map_err(db)?;
+                    savepoint.rollback().await.map_err(db)?;
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
@@ -1071,13 +984,11 @@ pub async fn execute_terminal_effects(
                 }
             }
         }
-        let marked = sqlx::query(finalize_kernel::update_hooks_marker_sql())
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut **hooks.inner())
-            .await
-            .map_err(db)?;
-        if marked.rows_affected() == 0 {
+        let marked =
+            finalize_kernel::update_hooks_marker(&TxConn::new(hooks.inner()), run_id, Utc::now())
+                .await
+                .map_err(orm_err)?;
+        if marked == 0 {
             // `save()` on a vanished row is `DatabaseError`.
             return Err(TerminalEffectsError::Database(
                 "hooks marker matched no row".to_owned(),
@@ -1104,51 +1015,42 @@ pub async fn execute_terminal_effects(
         }
     }
 
-    // Capacity re-read (`select_run_for_capacity_sql`, a `.get()` —
-    // a missing row raises, unguarded in the source).
-    let capacity: Option<CapacityRow> = sqlx::query_as(
-        r#"SELECT "terminal_capacity_released_at", "executor_kind",
-                  "runner_id", "pod_id", "workspace_id"
-               FROM "agent_run" WHERE "agent_run"."id" = $1"#,
-    )
-    .bind(run_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db)?;
-    let Some((released_at, executor_kind, runner_id, pod_id, workspace_id)) = capacity else {
+    // Capacity re-read (`select_run_for_capacity`, a `.get()` — a
+    // missing row raises, unguarded in the source).
+    let orm_pool = sea_orm_connection(pool);
+    let capacity = finalize_kernel::select_run_for_capacity(&orm_pool, run_id)
+        .await
+        .map_err(orm_err)?;
+    let Some(capacity) = capacity else {
         return Err(TerminalEffectsError::Database(
             "capacity re-read found no row".to_owned(),
         ));
     };
-    if released_at.is_none() {
-        // Drains and dispatch run *before* the marker write,
-        // unisolated — a failure leaves the marker unset for the
-        // reconciler.
-        if executor_kind == AgentExecutorKind::CloudAgent.value() {
-            ports
-                .dispatch_waiting(workspace_id)
-                .await
-                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
-        } else {
-            if let Some(runner_id) = runner_id {
+    if capacity.terminal_capacity_released_at.is_none() {
+        // Drains run *before* the marker write, unisolated — a
+        // failure leaves the marker unset for the reconciler.
+        // (P4: the cloud dispatch arm died with dispatch_waiting.)
+        {
+            if let Some(runner_id) = capacity.runner_id {
+                // `release_runner_if_idle` (PDASHOSS01-231): every
+                // finalization path frees a stale `busy` runner before
+                // the drains, or they can never assign it.
+                live_drains::release_runner_if_idle(&orm_pool, runner_id)
+                    .await
+                    .map_err(orm_err)?;
                 ports
                     .drain_for_runner_by_id(runner_id)
                     .await
                     .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
             }
-            if let Some(pod_id) = pod_id {
-                ports
-                    .drain_pod_by_id(pod_id)
-                    .await
-                    .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
-            }
+            ports
+                .drain_pod_by_id(capacity.pod_id)
+                .await
+                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
         }
-        sqlx::query(finalize_kernel::update_capacity_marker_sql())
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(pool)
+        finalize_kernel::update_capacity_marker(&orm_pool, run_id, Utc::now())
             .await
-            .map_err(db)?;
+            .map_err(orm_err)?;
     }
     Ok(true)
 }
@@ -1167,36 +1069,58 @@ async fn post_failure_comment(
     created_by: Option<Uuid>,
 ) -> Result<(), TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
-    // Suppression returns before any SQL (`finalization.py:136-147`).
-    let Some(plan) = lifecycle_kernel::plan_failure_comment(error, run_id) else {
-        return Ok(());
-    };
-    // `failure_reread_sql`: run + work item + project, first row.
-    let reread: Option<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT "agent_run"."work_item_id", "issues"."project_id", "issues"."workspace_id"
-           FROM "agent_run" LEFT OUTER JOIN "issues"
-             ON ("agent_run"."work_item_id" = "issues"."id")
-           WHERE "agent_run"."id" = $1
-           ORDER BY "agent_run"."created_at" DESC LIMIT 1"#,
-    )
-    .bind(run_id)
-    .fetch_optional(&mut **hooks)
-    .await
-    .map_err(db)?;
-    let (work_item_id, project_id, workspace_id) = match reread {
-        Some((Some(work_item), Some(project), Some(workspace))) => (work_item, project, workspace),
-        _ => return Ok(()),
-    };
-    let dupe: Option<i32> = sqlx::query_scalar(lifecycle_kernel::comment_dedupe_exists_sql())
-        .bind(work_item_id)
-        .bind(run_id)
-        .bind(lifecycle_kernel::CommentSpeaker::System.value())
-        .fetch_optional(&mut **hooks)
+    let orm_err = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
+    let plan = lifecycle_kernel::plan_failure_comment(error, run_id);
+    let (work_item_id, project_id, workspace_id, failure_reason, runner_identity, clock_stopped) = {
+        let conn = TxConn::new(hooks);
+        // `failure_reread`: run + work item (+ project + runner/machine), first row.
+        let reread = lifecycle_kernel::failure_reread(&conn, run_id)
+            .await
+            .map_err(orm_err)?;
+        let Some(reread) = reread else {
+            return Ok(());
+        };
+        let (work_item, project, workspace) = match &reread {
+            lifecycle_kernel::FailureRereadRow {
+                work_item_id: Some(work_item),
+                issue_project_id: Some(project),
+                issue_workspace_id: Some(workspace),
+                ..
+            } => (*work_item, *project, *workspace),
+            _ => return Ok(()),
+        };
+        let reason = reread.failure_reason.clone();
+        let identity = reread.runner_identity();
+        // Route on the stored canonical reason (PDASHOSS01-183), predicting
+        // the `RUN_ENDED` failure policy that follows on this transaction.
+        let effect = failure_effects::failure_clock_effect(&conn, &reread)
+            .await
+            .map_err(orm_err)?;
+        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&plan, &reason, effect) {
+            lifecycle_kernel::FailureCommentGate::Suppress => return Ok(()),
+            lifecycle_kernel::FailureCommentGate::Post { clock_stopped } => clock_stopped,
+        };
+        let dupe = lifecycle_kernel::comment_dedupe_exists(
+            &conn,
+            work_item,
+            run_id,
+            lifecycle_kernel::CommentSpeaker::System,
+        )
         .await
-        .map_err(db)?;
-    if dupe.is_some() {
-        return Ok(());
-    }
+        .map_err(orm_err)?;
+        if dupe {
+            return Ok(());
+        }
+        (
+            work_item,
+            project,
+            workspace,
+            reason,
+            identity,
+            clock_stopped,
+        )
+    };
+    let rendered = plan.render(&failure_reason, clock_stopped, runner_identity.as_ref());
     let actor_id = ports
         .agent_system_user_id()
         .await
@@ -1215,11 +1139,42 @@ async fn post_failure_comment(
             actor_id: Some(actor_id),
             created_by_id: created_by,
             updated_by_id: None,
-            plan,
+            plan: rendered.comment.clone(),
         },
     )
     .await
     .map_err(db)?;
+    if rendered.clock_stopped {
+        // A stopped clock with nobody told is the failure mode the
+        // taxonomy exists to prevent: notify the issue's creator and the
+        // runner's owner. Isolated like the source's `try/except` — a
+        // notification failure is logged and never drops the comment.
+        // An sqlx nested transaction (savepoint): a notify database
+        // failure aborts only it, leaving the hooks transaction valid.
+        let mut savepoint = hooks.begin().await.map_err(db)?;
+        let notified = failure_effects::notify_clock_stopped(
+            &TxConn::new(&mut savepoint),
+            run_id,
+            work_item_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                savepoint.commit().await.map_err(db)?;
+            }
+            Err(error) => {
+                savepoint.rollback().await.map_err(db)?;
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "run_lifecycle: clock-stop notification failed"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1235,14 +1190,16 @@ async fn apply_scheduler_hook(
     error: &str,
 ) -> Result<(), TerminalEffectsError> {
     use pidash_services::runner_runs::SchedulerHookPlan;
-    let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
-    let last_error: Option<String> =
-        sqlx::query_scalar(r#"SELECT "last_error" FROM "scheduler_bindings" WHERE "id" = $1"#)
-            .bind(binding_id)
-            .fetch_optional(&mut **hooks)
-            .await
-            .map_err(db)?
-            .flatten();
+    let db = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
+    let conn = TxConn::new(hooks);
+    let last_error: Option<String> = orm::scheduler_bindings::Entity::find()
+        .select_only()
+        .column(orm::scheduler_bindings::Column::LastError)
+        .filter(orm::scheduler_bindings::Column::Id.eq(binding_id))
+        .into_tuple::<String>()
+        .one(&conn)
+        .await
+        .map_err(db)?;
     let facts = last_error.map(|last_error| pidash_services::runner_runs::BindingFacts {
         id: binding_id,
         last_error,
@@ -1258,14 +1215,15 @@ async fn apply_scheduler_hook(
         SchedulerHookPlan::ClearError { .. } => String::new(),
         SchedulerHookPlan::SetError { message, .. } => message,
     };
-    let updated = sqlx::query(pidash_services::runner_runs::scheduler_binding_update_sql())
-        .bind(&message)
-        .bind(Utc::now())
-        .bind(binding_id)
-        .execute(&mut **hooks)
-        .await
-        .map_err(db)?;
-    if updated.rows_affected() == 0 {
+    let updated = pidash_services::runner_runs::scheduler_hook::update_scheduler_binding(
+        &conn,
+        binding_id,
+        &message,
+        Utc::now(),
+    )
+    .await
+    .map_err(db)?;
+    if updated == 0 {
         return Err(TerminalEffectsError::Database(
             "scheduler binding matched no row".to_owned(),
         ));
@@ -1279,8 +1237,8 @@ async fn apply_scheduler_hook(
 ///   runner drain runs unconditionally (`_pause_and_drain`,
 ///   `run_lifecycle.py:230-238`). Both propagate — a 500 with
 ///   committed rows.
-/// * `PostRunOrchestration`, `FireTick`, `DrainRunner`, `DrainPod`,
-///   `DispatchWaiting` propagate (direct `on_commit` registrations
+/// * `PostRunOrchestration`, `FireTick`, `DrainRunner`, `DrainPod`
+///   propagate (direct `on_commit` registrations
 ///   or unisolated inline calls).
 /// * `PublishTerminalEffects` and `ApplyTerminalEffectsInline` are
 ///   isolated with `_publish_effects`' log lines; `DrainTasks`-style
@@ -1300,12 +1258,14 @@ pub async fn drain_lifecycle_effects(
     for effect in effects {
         match effect {
             LifecycleEffect::PauseAndDrain { run_id, runner_id } => {
-                let present: Option<Uuid> =
-                    sqlx::query_scalar(r#"SELECT "id" FROM "agent_run" WHERE "id" = $1"#)
-                        .bind(run_id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| server_error())?;
+                let present: Option<Uuid> = orm::agent_run::Entity::find()
+                    .select_only()
+                    .column(orm::agent_run::Column::Id)
+                    .filter(orm::agent_run::Column::Id.eq(run_id))
+                    .into_tuple::<Uuid>()
+                    .one(&sea_orm_connection(pool))
+                    .await
+                    .map_err(|_| server_error())?;
                 if present.is_some() {
                     ports
                         .post_run_orchestration(run_id)
@@ -1341,12 +1301,7 @@ pub async fn drain_lifecycle_effects(
                     .await
                     .map_err(|_| server_error())?;
             }
-            LifecycleEffect::DispatchWaiting { workspace_id } => {
-                ports
-                    .dispatch_waiting(workspace_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
+
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
                 if let Err(error) = ports
                     .complete_project_move_handoff(run_id, terminal_created_by)
@@ -1484,10 +1439,18 @@ async fn run_accept_inner(
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
+    let (pool, preamble) = match daemon_preamble(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
+    let (pool, _runner, run_id, key) = (
+        pool,
+        preamble.runner.clone(),
+        preamble.run_id,
+        preamble.key.clone(),
+    );
+    let data = preamble.data.clone();
+    // Fencing will be checked inside transaction after locking.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -1518,15 +1481,103 @@ async fn run_accept_inner(
         }
         return pending;
     }
-    if sqlx::query(
-        r#"UPDATE "agent_run" SET "status" = $1
-           WHERE "agent_run"."id" = $2"#,
-    )
-    .bind(AgentRunStatus::Running.value())
-    .bind(locked.id)
-    .execute(&mut *tx)
-    .await
-    .is_err()
+    // NEWPIDASH-241 T2: fence protocol-1 attempts (require_session=True for Accept).
+    // Session/token must match, otherwise 400/409. Legacy skips.
+    {
+        // locked is subset (id/runner/pod/status) — fetch protocol/token for fencing
+        let (protocol, stored_token) = {
+            let conn = TxConn::new(&mut tx);
+            use pidash_db::entity::agent_run;
+            use sea_orm::{ColumnTrait, QueryFilter};
+            let row = agent_run::Entity::find_by_id(locked.id)
+                .select_only()
+                .columns([
+                    agent_run::Column::AssignmentProtocol,
+                    agent_run::Column::AssignmentToken,
+                ])
+                .filter(agent_run::Column::Id.eq(locked.id))
+                .into_tuple::<(i16, Option<Uuid>)>()
+                .one(&conn)
+                .await
+                .ok()
+                .flatten();
+            match row {
+                Some((p, t)) => (p, t),
+                None => (0, None),
+            }
+        };
+        // Parse session/token from body data
+        let data_obj = data.as_object();
+        let session_id = data_obj
+            .and_then(|o| o.get("session_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                pidash_services::runner_runs::capacity::parse_uuid(&serde_json::Value::String(
+                    s.to_owned(),
+                ))
+            });
+        // Active session for runner (already locked runner row? fetch)
+        let active_session_id = {
+            let conn = TxConn::new(&mut tx);
+            use pidash_db::entity::runner_session;
+            use sea_orm::{ColumnTrait, QueryFilter};
+            runner_session::Entity::find()
+                .filter(runner_session::Column::RunnerId.eq(locked.runner_id.unwrap_or(locked.id)))
+                .filter(runner_session::Column::RevokedAt.is_null())
+                .one(&conn)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.id)
+        };
+        let provided_token = data_obj
+            .and_then(|o| o.get("assignment_token"))
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    pidash_services::runner_runs::capacity::parse_uuid(v)
+                }
+            });
+        if let Err(kind) = pidash_services::runner_runs::capacity::fence_attempt(
+            protocol,
+            session_id,
+            active_session_id,
+            provided_token,
+            stored_token,
+            true,
+        ) {
+            let code = if kind == "session_evicted" || kind == "stale_assignment" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let body = format!(r#"{{"error":"{kind}"}}"#);
+            let _ = tx.rollback().await;
+            return json_response(code, body);
+        }
+    }
+    // Clear capacity_wait on Accept (T2): the run is now executing.
+    {
+        let conn = TxConn::new(&mut tx);
+        use sea_orm::ColumnTrait;
+        let _ = orm::agent_run::Entity::update_many()
+            .col_expr(
+                orm::agent_run::Column::Status,
+                sea_orm::sea_query::Expr::val(AgentRunStatus::Running.value()).into(),
+            )
+            .col_expr(
+                orm::agent_run::Column::CapacityWait,
+                sea_orm::sea_query::Expr::val(None::<serde_json::Value>).into(),
+            )
+            .filter(orm::agent_run::Column::Id.eq(locked.id))
+            .exec(&conn)
+            .await;
+    }
+    if run_status_update(AgentRunStatus::Running, locked.id)
+        .exec(&TxConn::new(&mut tx))
+        .await
+        .is_err()
     {
         return server_error();
     }
@@ -1652,38 +1703,21 @@ async fn run_started_inner(
     metadata.insert("local_thread_id".to_owned(), Value::String(local_thread_id));
     metadata.insert("agent_kind".to_owned(), Value::String(agent_kind));
     let started_at = Utc::now();
-    if model.is_empty() {
-        if sqlx::query(
-            r#"UPDATE "agent_run" SET "status" = $1, "thread_id" = $2,
-                  "started_at" = $3, "agent_metadata" = $4
-               WHERE "agent_run"."id" = $5"#,
-        )
-        .bind(AgentRunStatus::Running.value())
-        .bind(&thread_id)
-        .bind(started_at)
-        .bind(Value::Object(metadata))
-        .bind(locked.id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-        {
-            return server_error();
+    {
+        use orm::agent_run::{Column, Entity};
+        let mut update = Entity::update_many()
+            .col_expr(Column::Status, Expr::value(AgentRunStatus::Running.value()))
+            .col_expr(Column::ThreadId, Expr::value(thread_id.clone()))
+            .col_expr(Column::StartedAt, Expr::value(started_at))
+            .col_expr(Column::AgentMetadata, Expr::value(Value::Object(metadata)));
+        if !model.is_empty() {
+            update = update.col_expr(Column::LlmModel, Expr::value(truncate_chars(&model, 128)));
         }
-    } else {
-        if sqlx::query(
-            r#"UPDATE "agent_run" SET "status" = $1, "thread_id" = $2,
-                  "started_at" = $3, "agent_metadata" = $4, "llm_model" = $5
-               WHERE "agent_run"."id" = $6"#,
-        )
-        .bind(AgentRunStatus::Running.value())
-        .bind(&thread_id)
-        .bind(started_at)
-        .bind(Value::Object(metadata))
-        .bind(truncate_chars(&model, 128))
-        .bind(locked.id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+        if update
+            .filter(Column::Id.eq(locked.id))
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
         {
             return server_error();
         }
@@ -1773,48 +1807,50 @@ async fn run_events_inner(
             _ => Value::Object(Default::default()),
         };
         let payload = truncate_event_payload(&payload);
+        // `seq` is an `IntegerField`: a value outside `int4` is the
+        // source's `DataError` (500).
+        let Ok(seq) = i32::try_from(seq) else {
+            return server_error();
+        };
         // `update_or_create(agent_run=run, seq=seq)`: the get, then
         // the update or the create.
-        let existing: Option<i64> = match sqlx::query_scalar(
-            r#"SELECT "id" FROM "agent_run_event"
-               WHERE ("agent_run_id" = $1 AND "seq" = $2)"#,
-        )
-        .bind(run.id)
-        .bind(seq)
-        .fetch_optional(&mut *tx)
-        .await
+        use orm::agent_run_event::{ActiveModel, Column, Entity};
+        let conn = TxConn::new(&mut tx);
+        let existing: Option<i64> = match Entity::find()
+            .select_only()
+            .column(Column::Id)
+            .filter(Column::AgentRunId.eq(run.id))
+            .filter(Column::Seq.eq(seq))
+            .into_tuple::<i64>()
+            .one(&conn)
+            .await
         {
             Ok(existing) => existing,
             Err(_) => return server_error(),
         };
         match existing {
             Some(id) => {
-                if sqlx::query(
-                    r#"UPDATE "agent_run_event" SET "kind" = $1, "payload" = $2
-                       WHERE "agent_run_event"."id" = $3"#,
-                )
-                .bind(&kind)
-                .bind(&payload)
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .is_err()
+                if Entity::update_many()
+                    .col_expr(Column::Kind, Expr::value(kind.clone()))
+                    .col_expr(Column::Payload, Expr::value(payload.clone()))
+                    .filter(Column::Id.eq(id))
+                    .exec(&conn)
+                    .await
+                    .is_err()
                 {
                     return server_error();
                 }
             }
             None => {
-                if sqlx::query(
-                    r#"INSERT INTO "agent_run_event"
-                       ("agent_run_id", "seq", "kind", "payload", "created_at")
-                       VALUES ($1, $2, $3, $4, $5)"#,
-                )
-                .bind(run.id)
-                .bind(seq)
-                .bind(&kind)
-                .bind(&payload)
-                .bind(Utc::now())
-                .execute(&mut *tx)
+                if Entity::insert(ActiveModel {
+                    id: sea_orm::NotSet,
+                    seq: Set(seq),
+                    kind: Set(kind.clone()),
+                    payload: Set(payload.clone()),
+                    created_at: Set(Utc::now().into()),
+                    agent_run_id: Set(run.id),
+                })
+                .exec(&conn)
                 .await
                 .is_err()
                 {
@@ -1915,68 +1951,76 @@ async fn run_approval_inner(
     // `update_or_create(id=...)`: the get, then the update or the
     // create. The update rewrites the defaults wholesale — status
     // back to `pending` included.
-    let existing: Option<Uuid> =
-        match sqlx::query_scalar(r#"SELECT "id" FROM "agent_run_approval" WHERE "id" = $1"#)
-            .bind(approval_uuid)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(existing) => existing,
-            Err(_) => return server_error(),
-        };
+    use orm::agent_run_approval::{Column, Entity};
+    let conn = TxConn::new(&mut tx);
+    let existing: Option<Uuid> = match Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::Id.eq(approval_uuid))
+        .into_tuple::<Uuid>()
+        .one(&conn)
+        .await
+    {
+        Ok(existing) => existing,
+        Err(_) => return server_error(),
+    };
     match existing {
         Some(id) => {
-            if sqlx::query(
-                r#"UPDATE "agent_run_approval"
-                   SET "agent_run_id" = $1, "kind" = $2, "payload" = $3,
-                       "reason" = $4, "status" = $5, "expires_at" = $6::timestamptz
-                   WHERE "agent_run_approval"."id" = $7"#,
-            )
-            .bind(locked.id)
-            .bind(kind)
-            .bind(&payload)
-            .bind(&reason)
-            .bind("pending")
-            .bind(expires_at.as_deref())
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .is_err()
+            if Entity::update_many()
+                .col_expr(Column::AgentRunId, Expr::value(locked.id))
+                .col_expr(Column::Kind, Expr::value(kind))
+                .col_expr(Column::Payload, Expr::value(payload.clone()))
+                .col_expr(Column::Reason, Expr::value(reason.clone()))
+                .col_expr(Column::Status, Expr::value("pending"))
+                .col_expr(Column::ExpiresAt, expires_at_expr(expires_at.as_deref()))
+                .filter(Column::Id.eq(id))
+                .exec(&conn)
+                .await
+                .is_err()
             {
                 return server_error();
             }
         }
         None => {
-            if sqlx::query(
-                r#"INSERT INTO "agent_run_approval"
-                   ("id", "agent_run_id", "kind", "payload", "reason", "status",
-                    "decision_source", "decided_by_id", "requested_at", "expires_at",
-                    "decided_at")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11)"#,
-            )
-            .bind(approval_uuid)
-            .bind(locked.id)
-            .bind(kind)
-            .bind(&payload)
-            .bind(&reason)
-            .bind("pending")
-            .bind("")
-            .bind(None::<Uuid>)
-            .bind(Utc::now())
-            .bind(expires_at.as_deref())
-            .bind(None::<DateTime<Utc>>)
-            .execute(&mut *tx)
-            .await
-            .is_err()
-            {
+            // A sea-query insert: `expires_at` is a cast expression, not
+            // a bound value, so the active model cannot carry it.
+            let mut insert = Query::insert();
+            insert
+                .into_table(Entity)
+                .columns([
+                    Column::Id,
+                    Column::AgentRunId,
+                    Column::Kind,
+                    Column::Payload,
+                    Column::Reason,
+                    Column::Status,
+                    Column::DecisionSource,
+                    Column::DecidedById,
+                    Column::RequestedAt,
+                    Column::ExpiresAt,
+                    Column::DecidedAt,
+                ])
+                .values_panic([
+                    approval_uuid.into(),
+                    locked.id.into(),
+                    kind.into(),
+                    payload.clone().into(),
+                    reason.clone().into(),
+                    "pending".into(),
+                    "".into(),
+                    Option::<Uuid>::None.into(),
+                    Utc::now().into(),
+                    expires_at_expr(expires_at.as_deref()),
+                    Option::<DateTime<Utc>>::None.into(),
+                ]);
+            let statement = conn.get_database_backend().build(&insert);
+            if conn.execute(statement).await.is_err() {
                 return server_error();
             }
         }
     }
-    if sqlx::query(r#"UPDATE "agent_run" SET "status" = $1 WHERE "agent_run"."id" = $2"#)
-        .bind(AgentRunStatus::AwaitingApproval.value())
-        .bind(locked.id)
-        .execute(&mut *tx)
+    if run_status_update(AgentRunStatus::AwaitingApproval, locked.id)
+        .exec(&conn)
         .await
         .is_err()
     {
@@ -2039,10 +2083,8 @@ async fn run_awaiting_reauth_inner(
         }
         return pending;
     }
-    if sqlx::query(r#"UPDATE "agent_run" SET "status" = $1 WHERE "agent_run"."id" = $2"#)
-        .bind(AgentRunStatus::AwaitingReauth.value())
-        .bind(locked.id)
-        .execute(&mut *tx)
+    if run_status_update(AgentRunStatus::AwaitingReauth, locked.id)
+        .exec(&TxConn::new(&mut tx))
         .await
         .is_err()
     {
@@ -2120,6 +2162,7 @@ async fn run_completed_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2303,6 +2346,15 @@ async fn run_failed_inner(
     if reason_is(&preamble.data, "assign_rejected_busy") {
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, true).await;
     }
+    if reason_is(&preamble.data, "agent_auth_missing") {
+        let detail = preamble
+            .data
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return run_failed_agent_auth_missing(&pool, &ports, tx, runner, run.id, detail).await;
+    }
     let detail = preamble.data.get("detail").cloned().unwrap_or(Value::Null);
     let tokens = frame_tokens(&preamble.data);
     let model = preamble.data.get("model").cloned().unwrap_or(Value::Null);
@@ -2322,6 +2374,7 @@ async fn run_failed_inner(
             &category,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2340,6 +2393,10 @@ async fn run_failed_inner(
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"refused":true}"#.to_owned());
     }
+    // `runner_failure_reason=request.data.get("reason") or ""`
+    // (PDASHOSS01-183): the runner's structured reason feeds the
+    // write-time classification.
+    let reason = preamble.data.get("reason").cloned().unwrap_or(Value::Null);
     let effects = match execute_finalize_terminal(
         &mut tx,
         runner,
@@ -2350,6 +2407,7 @@ async fn run_failed_inner(
         &Value::Null,
         &tokens,
         &model,
+        &reason,
     )
     .await
     {
@@ -2406,6 +2464,7 @@ async fn run_failed_requeue(
             &Value::Null,
             &Value::Null,
             &Value::Null,
+            &Value::Null,
         )
         .await
         {
@@ -2434,6 +2493,88 @@ async fn run_failed_requeue(
             Ok(effects) => effects,
             Err(response) => return response,
         }
+    };
+    if commit_tx(tx).await.is_err() {
+        return server_error();
+    }
+    if !effects.is_empty()
+        && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    json_response(
+        StatusCode::OK,
+        r#"{"ok":true,"rescheduled":true}"#.to_owned(),
+    )
+}
+
+/// `agent_auth_missing` NACK path: lock, a pending cancel finalizes
+/// `CANCELLED`, otherwise BUSY-flip + requeue + failure comment with
+/// the detail (agent/runner/machine/fix). The run is re-queued without
+/// tick charge and the comment is posted synchronously, so a pod of
+/// credential-less runners does not loop silently.
+async fn run_failed_agent_auth_missing(
+    pool: &PgPool,
+    ports: &LivePorts,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    runner: &DaemonRunner,
+    run_id: Uuid,
+    detail: String,
+) -> Response {
+    let terminal_created_by = Some(runner.owner_id);
+    let locked = match lock_non_terminal(&mut tx, run_id).await {
+        Ok(locked) => locked,
+        Err(closed) => {
+            if commit_tx(tx).await.is_err() {
+                return server_error();
+            }
+            return closed;
+        }
+    };
+    if locked.status == AgentRunStatus::CancelRequested.value() {
+        let effects = match execute_finalize_terminal(
+            &mut tx,
+            runner,
+            run_id,
+            AgentRunStatus::Cancelled,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        )
+        .await
+        {
+            Ok(effects) => effects,
+            Err(response) => return response,
+        };
+        if commit_tx(tx).await.is_err() {
+            return server_error();
+        }
+        if !effects.is_empty()
+            && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+                .await
+                .is_err()
+        {
+            return server_error();
+        }
+        return json_response(StatusCode::OK, r#"{"ok":true,"cancelled":true}"#.to_owned());
+    }
+    let effects = match execute_agent_auth_missing(
+        &mut tx,
+        runner.id,
+        &locked,
+        ports,
+        &detail,
+        terminal_created_by,
+    )
+    .await
+    {
+        Ok(effects) => effects,
+        Err(response) => return response,
     };
     if commit_tx(tx).await.is_err() {
         return server_error();
@@ -2511,6 +2652,7 @@ async fn run_cancelled_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2586,10 +2728,8 @@ async fn run_resumed_inner(
         }
         return pending;
     }
-    if sqlx::query(r#"UPDATE "agent_run" SET "status" = $1 WHERE "agent_run"."id" = $2"#)
-        .bind(AgentRunStatus::Running.value())
-        .bind(locked.id)
-        .execute(&mut *tx)
+    if run_status_update(AgentRunStatus::Running, locked.id)
+        .exec(&TxConn::new(&mut tx))
         .await
         .is_err()
     {
@@ -2705,6 +2845,10 @@ pub fn routes() -> Router<AppState> {
     use axum::routing::post;
     const UNOWNED: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
+        .route(
+            "/api/v1/runner/runs/{run_id}/capacity/",
+            owned(post(crate::runner_runs::capacity::run_capacity), UNOWNED),
+        )
         .route(
             "/api/v1/runner/runs/{run_id}/accept/",
             owned(post(run_accept), UNOWNED),

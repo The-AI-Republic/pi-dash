@@ -13,12 +13,12 @@
 // delivered here, then the state is cleared so a refresh never resends it.
 
 import { Spinner } from "@pidash/kit";
-import type { AssistantMessage } from "@pidash/api-client";
+import type { AssistantMessage, LlmConfig } from "@pidash/api-client";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { markdownHtml } from "../../../shared/markdown/index.js";
-import { appendDictation } from "../../../shared/dictation/index.js";
+import { appendDictation, DICTATION_UI_ENABLED } from "../../../shared/dictation/index.js";
 import { useComposerDictation } from "../hooks/useComposerDictation.js";
 import { useAssistantChat } from "../hooks/useAssistantChat.js";
 import { EMPTY_CONVERSATION_HINT, HANDOFF_FAILED_TITLE, TOOL_LINK_FALLBACK } from "../lib/copy.js";
@@ -28,6 +28,7 @@ import { readPendingMessage } from "../lib/navigation.js";
 import { skippedServerLine, type ThreadNotice } from "../lib/notices.js";
 import { EMPTY_REPLY_PLACEHOLDER } from "../lib/turn.js";
 import { Composer } from "./Composer.js";
+import { OpenHubModelPicker } from "./OpenHubModelPicker.js";
 import { SetupCard } from "./SetupCard.js";
 
 export interface ThreadViewProps {
@@ -37,6 +38,8 @@ export interface ThreadViewProps {
   state: unknown;
   /** False only when no provider key is stored; then the setup card fills the thread. */
   configured: boolean;
+  /** The gate's config read, handed to the composer model picker gate. */
+  config: LlmConfig | undefined;
 }
 
 /**
@@ -46,7 +49,13 @@ export interface ThreadViewProps {
  */
 const ERROR_TEXT_CLASS = "text-(--danger)";
 
-export function ThreadView({ workspaceSlug, threadId, state, configured }: ThreadViewProps): React.ReactElement {
+export function ThreadView({
+  workspaceSlug,
+  threadId,
+  state,
+  configured,
+  config,
+}: ThreadViewProps): React.ReactElement {
   const chat = useAssistantChat(workspaceSlug, threadId);
   const navigate = useNavigate();
   const [draft, setDraft] = React.useState("");
@@ -151,7 +160,10 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
           running={chat.running}
           onStop={chat.stop}
           configured={configured}
-          dictation={dictation}
+          dictation={DICTATION_UI_ENABLED ? dictation : undefined}
+          modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config} />}
+          // The composer is its own bordered box; a divider above it would double the line.
+          bordered={false}
         />
       </div>
     </div>

@@ -95,7 +95,7 @@ pub enum Coerced {
     Null,
 }
 
-/// The annotation shapes the 17 tools use.
+/// The annotation shapes the 18 tools use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Str,
@@ -590,6 +590,16 @@ pub const CREATE_ISSUE_SPEC: &[FieldSpec] = &[
         kind: FieldKind::OptStr,
         default: Some(FieldDefault::Null),
     },
+    FieldSpec {
+        name: "assigned_runner",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Null),
+    },
+    FieldSpec {
+        name: "assigned_pod",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Null),
+    },
 ];
 
 pub const UPDATE_ISSUE_SPEC: &[FieldSpec] = &[
@@ -620,6 +630,16 @@ pub const UPDATE_ISSUE_SPEC: &[FieldSpec] = &[
     },
     FieldSpec {
         name: "parent_issue_id",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Str("__unset__")),
+    },
+    FieldSpec {
+        name: "assigned_runner",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Str("__unset__")),
+    },
+    FieldSpec {
+        name: "assigned_pod",
         kind: FieldKind::OptStr,
         default: Some(FieldDefault::Str("__unset__")),
     },
@@ -696,6 +716,25 @@ pub const DISPATCH_RUN_SPEC: &[FieldSpec] = &[
         kind: FieldKind::OptStr,
         default: Some(FieldDefault::Null),
     },
+    FieldSpec {
+        name: "pin",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Null),
+    },
+];
+
+/// `list_project_runners.project_id` plus optional `assignable_for`.
+pub const LIST_PROJECT_RUNNERS_SPEC: &[FieldSpec] = &[
+    FieldSpec {
+        name: "project_id",
+        kind: FieldKind::Str,
+        default: None,
+    },
+    FieldSpec {
+        name: "assignable_for",
+        kind: FieldKind::OptStr,
+        default: Some(FieldDefault::Null),
+    },
 ];
 
 pub const NO_ARGS_SPEC: &[FieldSpec] = &[];
@@ -713,6 +752,7 @@ pub fn tool_spec(name: &str) -> Option<&'static [FieldSpec]> {
         "list_issue_relations" => Some(ISSUE_REF_SPEC),
         "list_projects" => Some(NO_ARGS_SPEC),
         "list_states" | "list_labels" | "list_project_members" => Some(PROJECT_ID_SPEC),
+        "list_project_runners" => Some(LIST_PROJECT_RUNNERS_SPEC),
         "get_run_status" => Some(ISSUE_ID_SPEC),
         "create_comment" => Some(CREATE_COMMENT_SPEC),
         "get_pull_request_status" => Some(PR_STATUS_SPEC),
@@ -857,6 +897,8 @@ pub struct CreateIssueArgs {
     pub state_id: Option<String>,
     pub priority: Option<String>,
     pub parent_issue_id: Option<String>,
+    pub assigned_runner: Option<String>,
+    pub assigned_pod: Option<String>,
 }
 
 impl CreateIssueArgs {
@@ -869,6 +911,8 @@ impl CreateIssueArgs {
             state_id: take_opt_str(&values, "state_id"),
             priority: take_opt_str(&values, "priority"),
             parent_issue_id: take_opt_str(&values, "parent_issue_id"),
+            assigned_runner: take_opt_str(&values, "assigned_runner"),
+            assigned_pod: take_opt_str(&values, "assigned_pod"),
         })
     }
 }
@@ -891,16 +935,29 @@ pub struct UpdateIssueArgs {
     pub state_id: Option<String>,
     pub priority: Option<String>,
     pub parent_issue_id: ParentArg,
+    pub assigned_runner: ParentArg,
+    pub assigned_pod: ParentArg,
 }
 
 impl UpdateIssueArgs {
     pub fn parse(args: &Value) -> Result<Self, Vec<ArgError>> {
         let values = validate_tool_args(UPDATE_ISSUE_SPEC, args)?;
+        // The engine fills a missing field with the `"__unset__"`
+        // default, so `None` here is always an explicit null —
+        // and, exactly as in Python (`!= _PARENT_UNSET`), an
+        // explicit `"__unset__"` string also means untouched. The same
+        // tri-state guards the execution-target fields (`None` clears).
         let parent_issue_id = match take_opt_str(&values, "parent_issue_id") {
-            // The engine fills a missing field with the `"__unset__"`
-            // default, so `None` here is always an explicit null —
-            // and, exactly as in Python (`!= _PARENT_UNSET`), an
-            // explicit `"__unset__"` string also means untouched.
+            None => ParentArg::Null,
+            Some(text) if text == "__unset__" => ParentArg::Unset,
+            Some(text) => ParentArg::Value(text),
+        };
+        let assigned_runner = match take_opt_str(&values, "assigned_runner") {
+            None => ParentArg::Null,
+            Some(text) if text == "__unset__" => ParentArg::Unset,
+            Some(text) => ParentArg::Value(text),
+        };
+        let assigned_pod = match take_opt_str(&values, "assigned_pod") {
             None => ParentArg::Null,
             Some(text) if text == "__unset__" => ParentArg::Unset,
             Some(text) => ParentArg::Value(text),
@@ -912,6 +969,8 @@ impl UpdateIssueArgs {
             state_id: take_opt_str(&values, "state_id"),
             priority: take_opt_str(&values, "priority"),
             parent_issue_id,
+            assigned_runner,
+            assigned_pod,
         })
     }
 }
@@ -1012,6 +1071,7 @@ impl PrStatusArgs {
 pub struct DispatchRunArgs {
     pub issue_id: String,
     pub target_state_id: Option<String>,
+    pub pin: Option<String>,
 }
 
 impl DispatchRunArgs {
@@ -1020,6 +1080,23 @@ impl DispatchRunArgs {
         Ok(Self {
             issue_id: take_str(&values, "issue_id"),
             target_state_id: take_opt_str(&values, "target_state_id"),
+            pin: take_opt_str(&values, "pin"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListProjectRunnersArgs {
+    pub project_id: String,
+    pub assignable_for: Option<String>,
+}
+
+impl ListProjectRunnersArgs {
+    pub fn parse(args: &Value) -> Result<Self, Vec<ArgError>> {
+        let values = validate_tool_args(LIST_PROJECT_RUNNERS_SPEC, args)?;
+        Ok(Self {
+            project_id: take_str(&values, "project_id"),
+            assignable_for: take_opt_str(&values, "assignable_for"),
         })
     }
 }

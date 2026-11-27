@@ -355,6 +355,8 @@ export abstract class IssueDetail implements IIssueDetail {
   // sub issues
   fetchSubIssues = async (workspaceSlug: string, projectId: string, issueId: string) =>
     this.subIssues.fetchSubIssues(workspaceSlug, projectId, issueId);
+  fetchNextSubIssues = async (workspaceSlug: string, projectId: string, issueId: string) =>
+    this.subIssues.fetchNextSubIssues(workspaceSlug, projectId, issueId);
   createSubIssues = async (workspaceSlug: string, projectId: string, parentIssueId: string, data: string[]) =>
     this.subIssues.createSubIssues(workspaceSlug, projectId, parentIssueId, data);
   updateSubIssue = async (

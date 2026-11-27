@@ -11,7 +11,6 @@
 //!
 //! * [`complete_project_move_handoff_live`]: prefetches the source
 //!   run's creator presence, builds [`StoreDeps`] over the shared
-//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache],
 //!   and runs the jobs handoff driver.
 //! * [`maybe_apply_deferred_pause_live`]: same shape for the
 //!   deferred cap-hit pause (the pause path never reads presence,
@@ -35,23 +34,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
+use pidash_db::entity::{
+    agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
+};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
-use pidash_services::dispatch::LlmProfile;
+use pidash_services::assistant::seams::{has_usable_llm_config, pidash_agent_profile_for_user};
 use pidash_services::domain::clock::apply_clock_write;
-#[cfg(test)]
-use pidash_services::extensions::NoExtraToolsets;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -60,12 +63,10 @@ use super::creation_jobs::{
     complete_project_move_handoff as drive_handoff, CreationJobsError, LiveCreationStore,
 };
 use super::fire_tick_seam::{
-    emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
-    maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
+    emit_logs, maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
-use crate::admission::RedisAdmissionCache;
-use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
+use crate::run_dispatch::DispatchDecision;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 // ---------------------------------------------------------------------------
@@ -83,11 +84,18 @@ async fn fetch_presence(
     if user_ids.is_empty() {
         return Ok(presence);
     }
-    let rows: Vec<(Uuid, Option<Vec<u8>>)> =
-        sqlx::query_as(r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#)
-            .bind(user_ids)
-            .fetch_all(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let rows: Vec<(Uuid, Option<Vec<u8>>)> = assistant_user_llm_config::Entity::find()
+        .select_only()
+        .columns([
+            assistant_user_llm_config::Column::UserId,
+            assistant_user_llm_config::Column::ApiKeyEncrypted,
+        ])
+        .filter(assistant_user_llm_config::Column::UserId.is_in(user_ids.iter().copied()))
+        .into_tuple()
+        .all(&conn)
+        .await
+        .map_err(into_sqlx)?;
     for id in user_ids {
         presence.insert(*id, false);
     }
@@ -140,7 +148,7 @@ fn profile_fn(
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = agent_model_profile_for_user(key);
+        let profile = pidash_agent_profile_for_user(key);
         LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
@@ -152,11 +160,14 @@ fn profile_fn(
 /// A missing run narrows to `None` — the driver's own reads surface
 /// the missing row as designed.
 async fn run_creator(pool: &PgPool, run_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(r#"SELECT "created_by_id" FROM "agent_run" WHERE "id" = $1"#)
-        .bind(run_id)
-        .fetch_optional(pool)
+    let conn = sea_orm_connection(pool);
+    agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .column(agent_run::Column::CreatedById)
+        .into_tuple::<Uuid>()
+        .one(&conn)
         .await
-        .map(|row: Option<Uuid>| row)
+        .map_err(into_sqlx)
 }
 
 /// Enqueue the drivers' pending terminal effects into `rust_job_queue`
@@ -178,7 +189,6 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`],
 /// and `now`. The shared Redis client and runner settings feed the
 /// replacement run's pod drain. Answers the replacement run id
 /// (`None` on every early-out: unknown run, non-terminal source, no
@@ -186,12 +196,10 @@ async fn drain_terminal_effects(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> Result<Option<Uuid>, CreationJobsError> {
     let actor = run_creator(pool, run_id).await?;
@@ -199,13 +207,9 @@ pub async fn complete_project_move_handoff_live(
     let presence = Arc::new(fetch_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: gate_fn(verdicts),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
     // The driver's `dispatch_agent_run` only *returns* the decision
@@ -234,20 +238,14 @@ pub async fn complete_project_move_handoff_live(
 /// unread on this path (`left_bucket` never retimes) — `0.0`.
 pub async fn maybe_apply_deferred_pause_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_pause(pool, deps, Utc::now(), 0.0, run_id).await?;
     emit_logs(&outcome.outcome.logs);
@@ -263,40 +261,42 @@ pub async fn maybe_apply_deferred_pause_live(
 // ---------------------------------------------------------------------------
 
 /// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
-/// run's work item id, if the run exists and names one. Executor-generic
-/// so the pool path and the hooks-transaction path share it. Moved
-/// from the api ports (OVL-06 PIDASHCONV-1544).
-pub async fn run_work_item_id<'e, E>(ex: E, run_id: Uuid) -> Result<Option<Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<Option<Uuid>> =
-        sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#)
-            .bind(run_id)
-            .fetch_optional(ex)
-            .await?;
+/// run's work item id, if the run exists and names one. Connection-generic
+/// so the pool path (`sea_orm_connection`) and the hooks-transaction path
+/// (`TxConn`) share it. Moved from the api ports (OVL-06 PIDASHCONV-1544).
+pub async fn run_work_item_id(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let row: Option<Option<Uuid>> = agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .column(agent_run::Column::WorkItemId)
+        .into_tuple::<Option<Uuid>>()
+        .one(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(row.flatten())
 }
 
 /// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
-/// work item's pending ticker, if any. Executor-generic so the pool
+/// work item's pending ticker, if any. Connection-generic so the pool
 /// path and the hooks-transaction path share it. Moved from the api
 /// ports (OVL-06 PIDASHCONV-1544).
-pub async fn pending_entry_ticker_for<'e, E>(
-    ex: E,
+pub async fn pending_entry_ticker_for(
+    db: &impl ConnectionTrait,
     work_item_id: Uuid,
-) -> Result<Option<Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "issue_agent_ticker"
-           WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
-           LIMIT 1"#,
-    )
-    .bind(work_item_id)
-    .fetch_optional(ex)
-    .await
+) -> Result<Option<Uuid>, sqlx::Error> {
+    issue_agent_ticker::Entity::find()
+        .select_only()
+        .column(issue_agent_ticker::Column::Id)
+        .filter(issue_agent_ticker::Column::IssueId.eq(work_item_id))
+        .filter(issue_agent_ticker::Column::Enabled.eq(true))
+        .filter(issue_agent_ticker::Column::PendingEntry.eq(true))
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+        .map_err(into_sqlx)
 }
 
 /// `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's work
@@ -305,10 +305,12 @@ where
 /// lookup half are thin callers. Re-exported through
 /// `pidash-sdk::ops`.
 pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
-    let Some(work_item_id) = run_work_item_id(pool, run_id).await? else {
+    let conn = sea_orm_connection(pool);
+    let Some(work_item_id) = run_work_item_id(&conn, run_id).await? else {
         return Ok(());
     };
-    let Some(ticker_id) = pending_entry_ticker_for(pool, work_item_id).await? else {
+    let conn = sea_orm_connection(pool);
+    let Some(ticker_id) = pending_entry_ticker_for(&conn, work_item_id).await? else {
         return Ok(());
     };
     crate::tasks_ticker::scan::emit_fire_tick(pool, ticker_id).await
@@ -322,13 +324,7 @@ pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx:
 /// PIDASHCONV-1544) so the overlay shares the recipe instead of
 /// copying it; the ports method is now a thin caller. Re-exported
 /// through `pidash-sdk::ops`.
-pub async fn post_run_orchestration(
-    pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    run_id: Uuid,
-) {
+pub async fn post_run_orchestration(pool: &PgPool, managed: &PidashAgentSettings, run_id: Uuid) {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
         tracing::error!(
             ?error,
@@ -336,9 +332,7 @@ pub async fn post_run_orchestration(
             "orchestration.error: run-ended reconcile failed"
         );
     }
-    if let Err(error) =
-        maybe_apply_deferred_pause_live(pool, cloud, managed, run_id, toolsets).await
-    {
+    if let Err(error) = maybe_apply_deferred_pause_live(pool, managed, run_id).await {
         tracing::error!(
             ?error,
             run_id = %run_id,
@@ -367,33 +361,38 @@ pub async fn post_run_orchestration(
 pub async fn post_run_orchestration_in_tx<'t>(
     tx: Transaction<'t>,
     pool: &'t PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    cache: RedisAdmissionCache,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Transaction<'t> {
-    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
-        tracing::error!(
+    let mut tx = tx;
+    match disarm_on_terminal_signal_deferred(pool, run_id).await {
+        Ok(outcome) if outcome.clear_run_thread_id => {
+            // On the caller's transaction: it holds the run row lock.
+            if let Err(error) = clear_run_thread_id(&TxConn::new(tx.inner()), run_id).await {
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "orchestration.error: fresh-session thread clear failed"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::error!(
             ?error,
             run_id = %run_id,
             "orchestration.error: run-ended reconcile failed"
-        );
+        ),
     }
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache,
         // The pause path creates no runs: the presence closures are
         // unread (`maybe_apply_deferred_pause_live`), so the keyless
         // answers mirror it.
         has_usable_llm_config: |_actor: Uuid| false,
-        toolsets,
         llm_profile: |_actor: Option<Uuid>| LlmProfile {
             available: false,
             reason_code: String::new(),
         },
-        now_unix_secs: Utc::now().timestamp(),
     };
     let mut store = LiveCreationStore::new(tx, pool, deps);
     match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
@@ -419,22 +418,28 @@ pub async fn post_run_orchestration_in_tx<'t>(
             "orchestration.error: deferred-pause failed"
         ),
     }
-    let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
-    let work_item_id: Option<Uuid> = match run_work_item_id(&mut **tx.inner(), run_id).await {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: pending-entry lookup failed"
-            );
-            None
+    let (mut tx, _pool, _dispatches, _terminal_effects) = store.into_parts();
+    let work_item_id: Option<Uuid> = {
+        let conn = TxConn::new(tx.inner());
+        match run_work_item_id(&conn, run_id).await {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "orchestration.error: pending-entry lookup failed"
+                );
+                None
+            }
         }
     };
     let ticker_id: Option<Uuid> = match work_item_id {
-        Some(work_item_id) => pending_entry_ticker_for(&mut **tx.inner(), work_item_id)
-            .await
-            .unwrap_or(None),
+        Some(work_item_id) => {
+            let conn = TxConn::new(tx.inner());
+            pending_entry_ticker_for(&conn, work_item_id)
+                .await
+                .unwrap_or(None)
+        }
         None => None,
     };
     if let Some(ticker_id) = ticker_id {
@@ -482,47 +487,162 @@ pub enum DisarmError {
 /// work item, or a missing issue answers `false` without a transaction —
 /// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
-    let run: Option<(Option<Uuid>, String, String, Option<Value>)> = sqlx::query_as(
-        r#"SELECT "work_item_id", "status", "phase_kind", "done_payload" FROM "agent_run" WHERE "id" = $1"#,
-    )
-    .bind(run_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some((work_item_id, status, phase_kind, done_payload)) = run else {
-        return Ok(false);
+    let outcome = disarm_on_terminal_signal_deferred(pool, run_id).await?;
+    if outcome.clear_run_thread_id {
+        // No caller lock on the run row here, so a pool connection can
+        // take the write.
+        clear_run_thread_id(&sea_orm_connection(pool), run_id).await?;
+    }
+    Ok(outcome.stopped)
+}
+
+/// What [`disarm_on_terminal_signal_deferred`] decided and left for the
+/// caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DisarmOutcome {
+    /// The clock was stopped (`maybe_disarm_on_terminal_signal`'s answer).
+    pub stopped: bool,
+    /// The fresh-session lever (PDASHOSS01-183) fired: the caller must
+    /// clear the run's `thread_id` ([`clear_run_thread_id`]) on *its*
+    /// transaction. The terminal-effects callers hold the run row under
+    /// `FOR UPDATE` while this runs on a second connection, so writing the
+    /// row here would wait on the caller's lock while the caller waits on
+    /// this call — a cross-connection hang Postgres cannot detect, ended
+    /// only by `idle_in_transaction_session_timeout` rolling back the
+    /// caller's hooks transaction. Django clears it inside the same
+    /// `transaction.atomic()`.
+    pub clear_run_thread_id: bool,
+}
+
+/// The fresh-session lever's write (`AgentRun.objects.filter(pk=run.pk)
+/// .update(thread_id="")`): the next continuation builds a fresh-session
+/// Assign instead of resuming the session that will fail again.
+pub async fn clear_run_thread_id(
+    conn: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    agent_run::Entity::update_many()
+        .col_expr(
+            agent_run::Column::ThreadId,
+            sea_orm::sea_query::Expr::value(""),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(conn)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
+}
+
+/// [`disarm_on_terminal_signal`] without the run-row write: the ticker
+/// decision and its ticker write commit here; the `thread_id` clear is
+/// returned for the caller to apply where it already holds the run lock.
+pub async fn disarm_on_terminal_signal_deferred(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<DisarmOutcome, DisarmError> {
+    let conn = sea_orm_connection(pool);
+    #[allow(clippy::type_complexity)]
+    let run: Option<(
+        Option<Uuid>,
+        String,
+        String,
+        Option<Value>,
+        String,
+        Value,
+        String,
+    )> = agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .columns([
+            agent_run::Column::WorkItemId,
+            agent_run::Column::Status,
+            agent_run::Column::PhaseKind,
+            agent_run::Column::DonePayload,
+            agent_run::Column::FailureReason,
+            agent_run::Column::ErrorDetails,
+            agent_run::Column::ThreadId,
+        ])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
+    let Some((
+        work_item_id,
+        status,
+        phase_kind,
+        done_payload,
+        failure_reason,
+        error_details,
+        thread_id,
+    )) = run
+    else {
+        return Ok(DisarmOutcome::default());
     };
     let Some(work_item_id) = work_item_id else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let status =
         AgentRunStatus::from_value(&status).ok_or(DisarmError::Decode("agent_run.status"))?;
-    let issue: Option<(Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "state_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(work_item_id)
-            .fetch_optional(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> = issues::Entity::find_by_id(work_item_id)
+        .select_only()
+        .columns([issues::Column::StateId, issues::Column::ProjectId])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
     let Some((state_id, project_id)) = issue else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let state: Option<(String, String)> = match state_id {
         Some(state_id) => {
-            sqlx::query_as(r#"SELECT "name", "group" FROM "states" WHERE "id" = $1"#)
-                .bind(state_id)
-                .fetch_optional(pool)
-                .await?
+            let conn = sea_orm_connection(pool);
+            states::Entity::find_by_id(state_id)
+                .select_only()
+                .columns([states::Column::Name, states::Column::Group])
+                .into_tuple()
+                .one(&conn)
+                .await
+                .map_err(into_sqlx)?
         }
         None => None,
     };
     let policy = match project_id {
         Some(project_id) => {
-            let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-                r#"SELECT "agent_ticking_enabled", "agent_default_max_ticks", "agent_default_interval_seconds", "agent_review_default_interval_seconds", "agent_test_default_interval_seconds" FROM "projects" WHERE "id" = $1"#,
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await?;
+            let conn = sea_orm_connection(pool);
+            #[allow(clippy::type_complexity)]
+            let row: Option<(
+                Option<bool>,
+                Option<i32>,
+                Option<i32>,
+                Option<i32>,
+                Option<i32>,
+                serde_json::Value,
+            )> = projects::Entity::find_by_id(project_id)
+                .select_only()
+                .columns([
+                    projects::Column::AgentTickingEnabled,
+                    projects::Column::AgentDefaultMaxTicks,
+                    projects::Column::AgentDefaultIntervalSeconds,
+                    projects::Column::AgentReviewDefaultIntervalSeconds,
+                    projects::Column::AgentTestDefaultIntervalSeconds,
+                    projects::Column::Settings,
+                ])
+                .into_tuple()
+                .one(&conn)
+                .await
+                .map_err(into_sqlx)?;
             match row {
-                Some(row) => map_policy(&row).map_err(|_| DisarmError::Decode("project policy"))?,
+                Some((enabled, max, impl_secs, review_secs, test_secs, settings)) => {
+                    pidash_services::orchestration::clock::ProjectClockPolicy {
+                        agent_ticking_enabled: enabled,
+                        agent_default_max_ticks: max,
+                        agent_default_interval_seconds: impl_secs.map(i64::from),
+                        agent_review_default_interval_seconds: review_secs.map(i64::from),
+                        agent_test_default_interval_seconds: test_secs.map(i64::from),
+                        ..Default::default()
+                    }
+                    .with_stages(&settings)
+                }
                 None => Default::default(),
             }
         }
@@ -536,14 +656,35 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
     let interval = clock::effective_interval_seconds(state_ref.as_ref(), &policy);
     let jitter = jitter_seconds(interval, &mut rand08::thread_rng());
     let mut tx = Transaction::begin(pool).await?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-        .bind(work_item_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    let mut ticker: Option<IssueAgentTicker> = row
-        .map(|row| map_ticker(&row))
-        .transpose()
-        .map_err(|_| DisarmError::Decode("issue_agent_ticker"))?;
+    let ticker_model = {
+        let conn = TxConn::new(tx.inner());
+        issue_agent_ticker::Entity::find()
+            .filter(issue_agent_ticker::Column::IssueId.eq(work_item_id))
+            .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+            .order_by_asc(issue_agent_ticker::Column::Id)
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(into_sqlx)?
+    };
+    let mut ticker: Option<IssueAgentTicker> = ticker_model.map(IssueAgentTicker::from);
+    // `consecutive_failure_streak` (PDASHOSS01-183): read under the ticker
+    // lock, over the reason the policy routes on; only a FAILED run
+    // consults it. The stored `error` reads back from `error_details`.
+    let error = pidash_db::runner_runs::agent_run::error_details_text(
+        &error_details,
+        pidash_db::runner_runs::agent_run::ERROR_DETAILS_MESSAGE,
+    )
+    .to_owned();
+    let failure_streak = if status == AgentRunStatus::Failed {
+        let reason = clock::failure_reason_value(&failure_reason, &error);
+        let conn = TxConn::new(tx.inner());
+        pidash_services::runner_runs::failure_effects::failure_streak(&conn, work_item_id, &reason)
+            .await
+            .map_err(into_sqlx)?
+    } else {
+        0
+    };
     let done_payload_ref = done_payload.as_ref().and_then(|payload| match payload {
         Value::Null => None,
         value => Some(value),
@@ -559,6 +700,10 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             status,
             phase_kind: &phase_kind,
             done_payload: done_payload_ref,
+            failure_reason: &failure_reason,
+            error: &error,
+            thread_id: &thread_id,
+            failure_streak,
         },
         Some(work_item_id),
         now,
@@ -571,7 +716,13 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         // no row — there may be none (the no-ticker outcome).
         if outcome.write != ClockWrite::None {
             let ticker = ticker.as_ref().expect("clock write has a post-lock row");
-            apply_clock_write(&mut **tx.inner(), &outcome.write, ticker, now).await?;
+            apply_clock_write(
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
+                &outcome.write,
+                ticker,
+                now,
+            )
+            .await?;
         }
     }
     tx.commit().await?;
@@ -581,21 +732,17 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             clock::reconcile_log_line(&work_item_id, TickerEventKind::RUN_ENDED, &outcome.decision)
         );
     }
-    Ok(stopped)
+    Ok(DisarmOutcome {
+        stopped,
+        clear_run_thread_id: outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.clear_run_thread_id),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse one statement with the Postgres dialect (the scan-suite
-    /// precedent): new SQL must at least parse offline.
-    fn parse(sql: &str) -> sqlparser::ast::Statement {
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .expect("SQL parses")
-            .pop()
-            .expect("one statement")
-    }
 
     #[test]
     fn key_and_profile_closures_answer_keyless_outside_map() {
@@ -695,20 +842,60 @@ mod tests {
     }
 
     #[test]
-    fn seam_sql_parses() {
-        for sql in [
-            r#"SELECT "created_by_id" FROM "agent_run" WHERE "id" = $1"#,
-            r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#,
-            r#"SELECT "work_item_id", "status", "phase_kind", "done_payload" FROM "agent_run" WHERE "id" = $1"#,
-            r#"SELECT "state_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            r#"SELECT "name", "group" FROM "states" WHERE "id" = $1"#,
-            r#"SELECT "agent_ticking_enabled", "agent_default_max_ticks", "agent_default_interval_seconds", "agent_review_default_interval_seconds", "agent_test_default_interval_seconds" FROM "projects" WHERE "id" = $1"#,
-        ] {
-            assert!(
-                matches!(parse(sql), sqlparser::ast::Statement::Query(_)),
-                "{sql}"
-            );
-        }
+    fn seam_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let run_id = Uuid::from_u128(1);
+        let creator = agent_run::Entity::find_by_id(run_id)
+            .select_only()
+            .column(agent_run::Column::CreatedById)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(creator.contains("\"agent_run\""), "{creator}");
+        assert!(creator.contains("\"created_by_id\""), "{creator}");
+        let presence = assistant_user_llm_config::Entity::find()
+            .select_only()
+            .columns([
+                assistant_user_llm_config::Column::UserId,
+                assistant_user_llm_config::Column::ApiKeyEncrypted,
+            ])
+            .filter(assistant_user_llm_config::Column::UserId.is_in([run_id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            presence.contains("\"assistant_user_llm_config\""),
+            "{presence}"
+        );
+        assert!(presence.contains("\"user_id\""), "{presence}");
+        let work_item = agent_run::Entity::find_by_id(run_id)
+            .select_only()
+            .column(agent_run::Column::WorkItemId)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(work_item.contains("\"work_item_id\""), "{work_item}");
+        let pending = issue_agent_ticker::Entity::find()
+            .select_only()
+            .column(issue_agent_ticker::Column::Id)
+            .filter(issue_agent_ticker::Column::IssueId.eq(run_id))
+            .filter(issue_agent_ticker::Column::Enabled.eq(true))
+            .filter(issue_agent_ticker::Column::PendingEntry.eq(true))
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(pending.contains("\"issue_agent_ticker\""), "{pending}");
+        assert!(pending.contains("\"enabled\""), "{pending}");
+        assert!(pending.contains("LIMIT"), "{pending}");
+        let issues_read = issues::Entity::find_by_id(run_id)
+            .select_only()
+            .columns([issues::Column::StateId, issues::Column::ProjectId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(issues_read.contains("\"issues\""), "{issues_read}");
+        let states_read = states::Entity::find_by_id(run_id)
+            .select_only()
+            .columns([states::Column::Name, states::Column::Group])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(states_read.contains("\"states\""), "{states_read}");
     }
 
     /// Error rendering the bin maps to the seam string.
@@ -727,52 +914,14 @@ mod tests {
             .expect("pool connects")
     }
 
-    fn settings() -> (CloudAgentSettings, ManagedRunnerSettings) {
-        (
-            CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: true,
-                disabled_tools: Vec::new(),
-                reconcile_interval_secs: 30,
-                model_request_timeout_secs: 60,
-                execution_timeout_secs: 285,
-                run_soft_limit_secs: 300,
-                run_hard_limit_secs: 330,
-                stale_grace_secs: 60,
-                dispatch_lease_secs: 60,
-                dispatch_backoff_secs: 10,
-                dispatch_scan_interval_secs: 10,
-                sweep_interval_secs: 30,
-                dispatch_scan_batch: 100,
-                max_queue_age_secs: 900,
-                model_request_limit: 25,
-                tool_call_limit: 20,
-                write_call_limit: 3,
-                input_token_limit: 144_000,
-                output_token_limit: 16_000,
-                total_token_limit: 160_000,
-                max_output_tokens_per_request: 4096,
-                max_queued_per_workspace: 20,
-                max_running_per_workspace: 2,
-                user_creation_rate_per_minute: 6,
-                workspace_creation_rate_per_minute: 30,
-                tool_timeout_secs: 20,
-                max_tool_result_bytes: 65536,
-                max_prompt_bytes: 262_144,
-                max_final_result_bytes: 65536,
-                max_events: 500,
-                block_private_urls: true,
-            },
-            ManagedRunnerSettings {
-                enabled: false,
-                max_per_user_project: 1,
-                queued_max_age_secs: 43200,
-                graceful_stop_secs: 30,
-                sweep_interval_secs: 300,
-                desktop_min_version: String::new(),
-            },
-        )
+    fn settings() -> PidashAgentSettings {
+        PidashAgentSettings {
+            enabled: false,
+            queued_max_age_secs: 43200,
+            graceful_stop_secs: 30,
+            sweep_interval_secs: 300,
+            desktop_min_version: String::new(),
+        }
     }
 
     /// Unknown run answers `Ok(None)` (the driver's unknown-run
@@ -781,16 +930,14 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
+        let managed = settings();
         let runner = pidash_db::config::Settings::test_defaults().runner;
         let replacement = complete_project_move_handoff_live(
             &pool,
-            &cloud,
             &managed,
             None,
             &runner,
             Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
         .await
@@ -803,16 +950,10 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_pause_unknown_run_is_false() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
-        let applied = maybe_apply_deferred_pause_live(
-            &pool,
-            &cloud,
-            &managed,
-            Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
-        )
-        .await
-        .expect("unknown run is Ok");
+        let managed = settings();
+        let applied = maybe_apply_deferred_pause_live(&pool, &managed, Uuid::new_v4())
+            .await
+            .expect("unknown run is Ok");
         assert!(!applied);
     }
 
@@ -898,7 +1039,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
         )
         .bind(run)
         .bind(now)
@@ -927,5 +1068,231 @@ mod tests {
                 .await
                 .expect("cleanup row");
         }
+    }
+
+    /// The migrated pending-entry lookups over SeaORM: a run whose
+    /// work item has a pending ticker resolves through both helpers.
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_work_item_and_pending_via_seaorm() {
+        let pool = pool().await;
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let _ = url;
+        let tag = Uuid::new_v4().to_string();
+        let user = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let ticker = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "first_name", "last_name", "avatar", "date_joined", "created_at", "updated_at", "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired", "is_active", "is_staff", "is_email_verified", "is_password_autoset", "token", "user_timezone", "last_login_ip", "last_logout_ip", "last_login_medium", "last_login_uagent", "is_bot", "display_name", "is_email_valid", "is_password_reset_required") VALUES ('!', $1, $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, false, false, false, $4, 'UTC', '', '', '', '', false, $2, false, false)"#,
+        )
+        .bind(user)
+        .bind(format!("pending-{tag}"))
+        .bind(now)
+        .bind(tag.clone())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug", "owner_id", "timezone", "background_color") VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#fff')"#,
+        )
+        .bind(now)
+        .bind(workspace)
+        .bind(format!("pending-{tag}"))
+        .bind(format!("pending-{tag}"))
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network", "identifier", "workspace_id", "cycle_view", "module_view", "issue_views_view", "page_view", "intake_view", "archive_in", "close_in", "logo_props", "is_time_tracking_enabled", "is_issue_type_enabled", "guest_view_all_features", "timezone", "members_can_edit_states", "repo_url", "base_branch", "agent_default_interval_seconds", "agent_default_max_ticks", "agent_ticking_enabled", "is_default", "agent_review_default_interval_seconds", "default_agent_executor", "agent_test_default_interval_seconds") VALUES ($1, $1, $2, $3, '', 0, 'DSP', $4, false, false, false, false, false, 0, 0, '{}', false, false, false, 'UTC', false, '', 'main', 60, 10, true, false, 60, '', 60)"#,
+        )
+        .bind(now)
+        .bind(project)
+        .bind(format!("pending-{tag}"))
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "pod" ("id", "name", "description", "is_default", "created_at", "updated_at", "workspace_id", "project_id") VALUES ($1, $2, '', false, $3, $3, $4, $5)"#,
+        )
+        .bind(pod)
+        .bind(format!("pending-{tag}"))
+        .bind(now)
+        .bind(workspace)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        sqlx::query(
+            r#"INSERT INTO "issues" ("created_at", "updated_at", "id", "name", "description_json", "priority", "sequence_id", "project_id", "workspace_id", "description_html", "sort_order", "is_draft", "git_work_branch", "workpad", "complexity_score") VALUES ($1, $1, $2, $3, '{}', 'none', 1, $4, $5, '', 0, false, '', '', 0)"#,
+        )
+        .bind(now)
+        .bind(issue)
+        .bind(format!("pending-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
+        )
+        .bind(run)
+        .bind(now)
+        .bind(workspace)
+        .bind(issue)
+        .bind(pod)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            r#"INSERT INTO "issue_agent_ticker" ("id", "created_at", "updated_at", "issue_id", "used", "granted", "waited", "user_disabled", "enabled", "disarm_reason", "pending_entry", "pending_entry_free", "pending_entry_trigger") VALUES ($1, $2, $2, $3, 0, 0, 0, false, true, '', true, false, '')"#,
+        )
+        .bind(ticker)
+        .bind(now)
+        .bind(issue)
+        .execute(&pool)
+        .await
+        .expect("seed ticker");
+        let conn = sea_orm_connection(&pool);
+        let work_item = run_work_item_id(&conn, run).await.expect("work item");
+        assert_eq!(work_item, Some(issue));
+        let conn = sea_orm_connection(&pool);
+        let pending = pending_entry_ticker_for(&conn, issue)
+            .await
+            .expect("pending");
+        assert_eq!(pending, Some(ticker));
+        let conn = sea_orm_connection(&pool);
+        let missing = run_work_item_id(&conn, Uuid::new_v4())
+            .await
+            .expect("missing");
+        assert_eq!(missing, None);
+    }
+
+    /// Positive disarm: a terminal run with `stop_ticking:true` on a
+    /// ticking issue stops the armed clock (`stop_signal`).
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_disarm_stop_ticking_is_true() {
+        let pool = pool().await;
+        let tag = Uuid::new_v4().to_string();
+        let user = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let ticker = Uuid::new_v4();
+        let state = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "first_name", "last_name", "avatar", "date_joined", "created_at", "updated_at", "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired", "is_active", "is_staff", "is_email_verified", "is_password_autoset", "token", "user_timezone", "last_login_ip", "last_logout_ip", "last_login_medium", "last_login_uagent", "is_bot", "display_name", "is_email_valid", "is_password_reset_required") VALUES ('!', $1, $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, false, false, false, $4, 'UTC', '', '', '', '', false, $2, false, false)"#,
+        )
+        .bind(user)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(now)
+        .bind(tag.clone())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug", "owner_id", "timezone", "background_color") VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#fff')"#,
+        )
+        .bind(now)
+        .bind(workspace)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(format!("disarmpos-{tag}"))
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network", "identifier", "workspace_id", "cycle_view", "module_view", "issue_views_view", "page_view", "intake_view", "archive_in", "close_in", "logo_props", "is_time_tracking_enabled", "is_issue_type_enabled", "guest_view_all_features", "timezone", "members_can_edit_states", "repo_url", "base_branch", "agent_default_interval_seconds", "agent_default_max_ticks", "agent_ticking_enabled", "is_default", "agent_review_default_interval_seconds", "default_agent_executor", "agent_test_default_interval_seconds") VALUES ($1, $1, $2, $3, '', 0, 'DSP', $4, false, false, false, false, false, 0, 0, '{}', false, false, false, 'UTC', false, '', 'main', 60, 10, true, false, 60, '', 60)"#,
+        )
+        .bind(now)
+        .bind(project)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "pod" ("id", "name", "description", "is_default", "created_at", "updated_at", "workspace_id", "project_id") VALUES ($1, $2, '', false, $3, $3, $4, $5)"#,
+        )
+        .bind(pod)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(now)
+        .bind(workspace)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        sqlx::query(
+            r#"INSERT INTO "states" ("id", "created_at", "updated_at", "name", "description", "color", "slug", "project_id", "workspace_id", "sequence", "group", "default", "is_triage") VALUES ($1, $2, $2, 'In Progress', '', '', $3, $4, $5, 100, 'started', false, false)"#,
+        )
+        .bind(state)
+        .bind(now)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed state");
+        sqlx::query(
+            r#"INSERT INTO "issues" ("created_at", "updated_at", "id", "name", "description_json", "priority", "sequence_id", "project_id", "workspace_id", "description_html", "sort_order", "is_draft", "git_work_branch", "workpad", "complexity_score", "state_id") VALUES ($1, $1, $2, $3, '{}', 'none', 1, $4, $5, '', 0, false, '', '', 0, $6)"#,
+        )
+        .bind(now)
+        .bind(issue)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .bind(state)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "issue_agent_ticker" ("id", "created_at", "updated_at", "issue_id", "used", "granted", "waited", "user_disabled", "enabled", "disarm_reason", "pending_entry", "pending_entry_free", "pending_entry_trigger") VALUES ($1, $2, $2, $3, 0, 0, 0, false, true, '', false, false, '')"#,
+        )
+        .bind(ticker)
+        .bind(now)
+        .bind(issue)
+        .execute(&pool)
+        .await
+        .expect("seed ticker");
+        sqlx::query(
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}', '')"#,
+        )
+        .bind(run)
+        .bind(now)
+        .bind(workspace)
+        .bind(issue)
+        .bind(pod)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        let stopped = disarm_on_terminal_signal(&pool, run)
+            .await
+            .expect("disarm is Ok");
+        assert!(stopped);
+        let (enabled, disarm_reason): (bool, String) = sqlx::query_as(
+            r#"SELECT "enabled", "disarm_reason" FROM "issue_agent_ticker" WHERE "id" = $1"#,
+        )
+        .bind(ticker)
+        .fetch_one(&pool)
+        .await
+        .expect("read ticker");
+        assert!(!enabled);
+        assert_eq!(disarm_reason, "stop_signal");
     }
 }

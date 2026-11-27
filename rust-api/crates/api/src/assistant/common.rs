@@ -989,19 +989,22 @@ pub async fn workspace_role(
     user_id: &uuid::Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Failure> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error())?;
-    Ok(row.map(|row| i32::from(row.0)))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, RelationTrait};
+    use sea_query::JoinType;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            pidash_db::entity::workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(*user_id))
+        .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+        .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(|_| Failure::server_error())?;
+    Ok(row.map(|row| i32::from(row.role)))
 }
 
 #[cfg(test)]
@@ -1317,20 +1320,23 @@ pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Optio
     // `role` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16
     // (the `app_issues` precedent) and widen — decoding `int2` straight
     // into `i32` fails whenever a row exists.
-    let row: Option<(i16,)> = sqlx::query_as(
-        "SELECT \"workspace_members\".\"role\" FROM \"workspace_members\" \
-         INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"member_id\" = $2 \
-         AND \"workspace_members\".\"is_active\" \
-         AND \"workspace_members\".\"deleted_at\" IS NULL) \
-         ORDER BY \"workspace_members\".\"created_at\" DESC LIMIT 1",
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
+    use sea_query::JoinType;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            pidash_db::entity::workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(*user_id))
+        .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+        .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(pidash_db::entity::workspace_members::Column::CreatedAt)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(|row| i32::from(row.role)))
 }
 
 /// Mirror of `AssistantBaseView.require_member` (`views/_base.py:25-29`)
@@ -1365,42 +1371,32 @@ pub async fn owned_thread(
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<ThreadRow>, Response> {
-    sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, bool, Option<Uuid>, DateTime<Utc>, DateTime<Utc>)>(
-        "SELECT \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \
-         \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \
-         \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \
-         \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \
-         \"assistant_thread\".\"updated_at\" \
-         FROM \"assistant_thread\" \
-         INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"assistant_thread\".\"id\" = $1 \
-         AND \"assistant_thread\".\"user_id\" = $2 \
-         AND \"workspaces\".\"slug\" = $3) \
-         ORDER BY \"assistant_thread\".\"updated_at\" DESC LIMIT 1",
-    )
-    .bind(thread_id)
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())
-    .map(|row| {
-        row.map(
-            |(id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at)| {
-                ThreadRow {
-                    id,
-                    workspace_id,
-                    user_id,
-                    title,
-                    kind,
-                    is_archived,
-                    active_turn_id,
-                    created_at,
-                    updated_at,
-                }
-            },
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
+    use sea_query::JoinType;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_thread::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            pidash_db::entity::assistant_thread::Relation::Workspaces.def(),
         )
-    })
+        .filter(pidash_db::entity::assistant_thread::Column::Id.eq(*thread_id))
+        .filter(pidash_db::entity::assistant_thread::Column::UserId.eq(*user_id))
+        .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+        .order_by_desc(pidash_db::entity::assistant_thread::Column::UpdatedAt)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(|row| ThreadRow {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        user_id: row.user_id,
+        title: row.title,
+        kind: row.kind,
+        is_archived: row.is_archived,
+        active_turn_id: row.active_turn_id,
+        created_at: row.created_at.with_timezone(&Utc),
+        updated_at: row.updated_at.with_timezone(&Utc),
+    }))
 }
 
 /// Workspace id for `slug` (`Workspace.objects.filter(slug=slug).first()`,
@@ -1408,13 +1404,14 @@ pub async fn owned_thread(
 /// Unreachable once the member gate passes (a role implies the workspace),
 /// ported as written.
 pub async fn workspace_id_for_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Response> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT \"id\" FROM \"workspaces\" WHERE \"slug\" = $1")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    Ok(row.map(|(id,)| id))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::workspaces::Entity::find()
+        .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(|row| row.id))
 }
 
 /// Thread wire shape (`serializers.py:20-29`): `Meta.fields` order

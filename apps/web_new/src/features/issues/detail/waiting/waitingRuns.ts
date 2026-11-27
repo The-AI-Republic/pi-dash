@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Waiting-run actions for the issue detail (hybrid assignment, design
-// §10.3): release one queued run to its pod's shared queue, or cancel
-// it. Both re-read the issue caches on settle and toast on failure;
-// the release leaves the issue's dedicated assignment untouched.
+// §10.3, §12.2): release one queued locality run to its pod's shared
+// queue, or cancel it. A dedicated pin is never released (H-13), so the
+// banner renders no release control for it; these hooks only serve the
+// locality pin. Both re-read the issue caches on settle and toast on
+// failure; the release leaves the issue's dedicated assignment untouched.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { cancelRun, releaseRunPin } from "@pidash/api-client";
 

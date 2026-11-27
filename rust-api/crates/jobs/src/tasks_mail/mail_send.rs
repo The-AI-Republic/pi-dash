@@ -66,17 +66,17 @@ use pidash_db::config::{ConfigRegistry, ConfigValue};
 /// `emails/auth/magic_signin.html` — serves `magic_link` and
 /// `send_email_update_magic_code` with different subjects.
 pub const MAGIC_SIGNIN_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/auth/magic_signin.html");
+    include_str!("../../../../../rust-api/templates/emails/auth/magic_signin.html");
 /// `emails/auth/forgot_password.html` — serves `forgot_password`.
 pub const FORGOT_PASSWORD_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/auth/forgot_password.html");
+    include_str!("../../../../../rust-api/templates/emails/auth/forgot_password.html");
 /// `emails/user/email_updated.html` — serves `send_email_update_confirmation`.
 pub const EMAIL_UPDATED_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/user/email_updated.html");
+    include_str!("../../../../../rust-api/templates/emails/user/email_updated.html");
 /// `emails/exports/analytics.html` — serves `analytic_export_task`
 /// (`analytic_plot_export.py:55`, rendered with `{}`).
 pub const ANALYTICS_EXPORT_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/exports/analytics.html");
+    include_str!("../../../../../rust-api/templates/emails/exports/analytics.html");
 
 /// Django's `DEFAULT_FROM_EMAIL` global default: the project does not
 /// override it, so a null `EMAIL_FROM` row falls back here

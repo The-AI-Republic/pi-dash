@@ -47,6 +47,10 @@ export function RunnersOverviewScreen({
         podsFailed={data.podsFailed}
         onDelete={data.onDelete}
         onRevoke={data.onRevoke}
+        onSetPaused={data.onSetPaused}
+        allRunners={data.allRunners}
+        userId={data.userId}
+        onUpdateRunner={data.onUpdateRunner}
         action={<AddRunnerEntry />}
       />
     </>

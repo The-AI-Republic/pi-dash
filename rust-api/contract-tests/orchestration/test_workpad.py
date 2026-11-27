@@ -1,8 +1,13 @@
 """Workpad endpoint: byte-parity round-trip, the `body` wire-field rule,
-clearing, and the timestamp-only PATCH response."""
+clearing, the timestamp-only PATCH response, and the `body_sha256`
+stale-write guard (NEWPIDASH-320 §6.1, DIFF-60)."""
+
+import hashlib
+import uuid
 
 from _harness import db, world
 from _harness.db import get_database_url
+from _harness.diffs import expect, is_rust
 
 SAMPLE = """# Plan
 
@@ -76,3 +81,120 @@ def test_workpad_patch_returns_timestamp_only(api_client):
     assert r.status_code == 200, r.text
     assert "updated_at" in r.json()
     assert "body" not in r.json()
+
+
+def _sha(body):
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def test_workpad_get_carries_body_sha256(api_client):
+    """GET answers `body_sha256` — the stored body's hex digest — on Rust
+    (DIFF-60); Django answers `{body, updated_at}` only."""
+    w, client = api_client
+    issue = world.make_issue(w, "padsha", "In Progress")
+    assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
+
+    r = client.get_workpad(w.workspace_slug, w.project_id, issue)
+    assert r.status_code == 200, r.text
+    if is_rust():
+        assert r.json()["body_sha256"] == _sha(SAMPLE), r.text
+    else:
+        assert "body_sha256" not in r.json(), r.text
+
+
+def test_workpad_patch_returns_body_sha256(api_client):
+    """PATCH answers the new body's hash on Rust (DIFF-60) alongside
+    `updated_at`; Django answers the timestamp only."""
+    w, client = api_client
+    issue = world.make_issue(w, "padshap", "In Progress")
+
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE})
+    assert r.status_code == 200, r.text
+    if is_rust():
+        assert r.json()["body_sha256"] == _sha(SAMPLE), r.text
+    else:
+        assert "body_sha256" not in r.json(), r.text
+
+
+def test_workpad_patch_stale_guard_returns_412(api_client):
+    """A PATCH whose `if_body_sha256` no longer matches the stored body is
+    refused on Rust (DIFF-60): 412 with the current hash, and nothing is
+    written. Django ignores the unknown field and writes unconditionally."""
+    w, client = api_client
+    issue = world.make_issue(w, "padstale", "In Progress")
+    assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
+    current = client.get_workpad(w.workspace_slug, w.project_id, issue).json()
+    if is_rust():
+        assert current["body_sha256"] == _sha(SAMPLE)
+
+    r = client.patch_workpad(
+        w.workspace_slug, w.project_id, issue, {"body": "new notes", "if_body_sha256": "0" * 64}
+    )
+    assert r.status_code == expect("DIFF-60", django=200, rust=412), r.text
+    if is_rust():
+        assert r.json() == {
+            "error": "workpad changed since you read it",
+            "body_sha256": _sha(SAMPLE),
+        }, r.text
+        assert _db_workpad(issue) == SAMPLE
+    else:
+        assert _db_workpad(issue) == "new notes"
+
+    # A matching hash writes through on Rust, unconditionally elsewhere.
+    r = client.patch_workpad(
+        w.workspace_slug, w.project_id, issue, {"body": "new notes", "if_body_sha256": current.get("body_sha256", "") or _sha(SAMPLE)}
+    )
+    assert r.status_code == 200, r.text
+    assert _db_workpad(issue) == "new notes"
+
+
+def test_workpad_guard_survives_state_move(api_client):
+    """The guard hashes the body, not the issue row's `updated_at`: an
+    intervening state move (which re-stamps the row) must not turn a fresh
+    hash stale. Passes on both backends — Django ignores the field, Rust
+    compares the unchanged body."""
+    w, client = api_client
+    issue = world.make_issue(w, "padmove", "In Progress")
+
+    r = client.get_workpad(w.workspace_slug, w.project_id, issue)
+    assert r.status_code == 200, r.text
+    fresh = r.json().get("body_sha256") or _sha("")
+
+    states = client.list_states(w.workspace_slug, w.project_id).json()["results"]
+    target = next(s["id"] for s in states if s["id"] != w.states["In Progress"]["id"])
+    r = client.patch_issue(w.workspace_slug, w.project_id, issue, {"state": target})
+    assert r.status_code == 200, r.text
+
+    r = client.patch_workpad(
+        w.workspace_slug, w.project_id, issue, {"body": SAMPLE, "if_body_sha256": fresh}
+    )
+    assert r.status_code == 200, r.text
+    assert _db_workpad(issue) == SAMPLE
+
+
+def test_workpad_patch_over_the_size_cap_is_refused(api_client):
+    """Unified workpad U7/§8.5: the workpad is inlined into every issue-run
+    prompt, so the Rust API refuses an agent write (one sent from a run,
+    with the run header) over 16,000 characters with a 400 and leaves the
+    stored body as it was. A person's edit is not capped. Django has no cap."""
+    w, client = api_client
+    issue = world.make_issue(w, "padcap", "In Progress")
+    assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
+
+    # Characters, not bytes: a multi-byte body exactly at the cap fits.
+    run_id = str(uuid.uuid4())
+    at_cap = "é" * 16_000
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": at_cap}, run_id=run_id)
+    assert r.status_code == 200, r.text
+
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": "x" * 16_001}, run_id=run_id)
+    if is_rust():
+        assert r.status_code == 400, r.text
+        assert "longer than 16000 characters" in r.json()["error"], r.text
+        assert _db_workpad(issue) == at_cap
+    else:
+        assert r.status_code == 200, r.text
+
+    # A person's edit (no run header) is never capped.
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": "y" * 16_001})
+    assert r.status_code == 200, r.text

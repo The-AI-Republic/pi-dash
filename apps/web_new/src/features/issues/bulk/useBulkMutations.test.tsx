@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { archivesKeys } from "../../archives/index.js";
 import { issueKeys } from "../api/keys.js";
 import { bulkFailureDescription, useBulkMutations } from "./useBulkMutations.js";
 
@@ -127,6 +128,30 @@ describe("useBulkMutations", () => {
       await result.current.archive.mutateAsync([ID1]);
     });
     expect(client.getQueryCache().find({ queryKey: cycleKey })?.state.isInvalidated).toBe(true);
+  });
+
+  it("marks the archived count stale after a bulk archive (ARCH-002)", async () => {
+    const { result, client } = setup();
+    const countKey = archivesKeys.count(SLUG, PROJECT);
+    client.setQueryData(countKey, 11);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await act(async () => {
+      await result.current.archive.mutateAsync([ID1]);
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: archivesKeys.all(SLUG, PROJECT) });
+    expect(client.getQueryCache().find({ queryKey: countKey })?.state.isInvalidated).toBe(true);
+  });
+
+  it("marks the archived count stale after a bulk delete (ARCH-002)", async () => {
+    const { result, client } = setup();
+    const countKey = archivesKeys.count(SLUG, PROJECT);
+    client.setQueryData(countKey, 11);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await act(async () => {
+      await result.current.remove.mutateAsync([ID1]);
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: archivesKeys.all(SLUG, PROJECT) });
+    expect(client.getQueryCache().find({ queryKey: countKey })?.state.isInvalidated).toBe(true);
   });
 
   it("reports the server detail and keeps the selection on failure", async () => {

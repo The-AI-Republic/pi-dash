@@ -22,6 +22,7 @@ import {
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { openhubKeys } from "./keys.js";
 import { appMechanism, connectReturnPath, hubAppUrl, reserveConnectTab, type AppMechanism } from "../lib/connect.js";
@@ -93,12 +94,31 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
   const statusHubUrl = (): string | undefined =>
     queryClient.getQueryData<OpenhubStatus>(openhubKeys.status(workspaceSlug))?.hub_url;
 
-  const finishProviderConnect = (
+  const finishProviderConnect = async (
     app: OpenhubApp,
     auth: OpenhubAuthStatus,
     tab: Window | null,
     failureTitle: string
-  ): void => {
+  ): Promise<void> => {
+    // Desktop (PIDESKAPP-186): the shell denies the reserved blank tab,
+    // so there is nothing to steer — resolve the destination first and
+    // hand it to the system browser instead.
+    if (platform.kind === "desktop") {
+      const url =
+        auth.status === "connected"
+          ? hubAppUrl(statusHubUrl(), app.slug, app.appId)
+          : appOAuthBeginUrl(getAppClient().baseUrl, app.appId, connectReturnPath(window.location));
+      if (url === null) {
+        notifyError(failureTitle, HUB_REFUSED_DESCRIPTION);
+        return;
+      }
+      try {
+        await platform.openExternal(url);
+      } catch (error) {
+        notifyError(failureTitle, writeFailureMessage(error));
+      }
+      return;
+    }
     if (tab === null) {
       notifyError(failureTitle, POPUP_BLOCKED_DESCRIPTION);
       return;
@@ -118,9 +138,9 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
 
   const install = async (app: OpenhubApp): Promise<void> => {
     const mechanism: AppMechanism = appMechanism(app.authType);
-    // Synchronous with the click: a tab opened after the awaits below
-    // would no longer be attributable to it (CLOUD-025).
-    const tab = mechanism === "provider" ? reserveConnectTab(window) : null;
+    // Synchronous with the click (web, CLOUD-025). On desktop the shell
+    // always denies the reserved tab (PIDESKAPP-186), so skip it there.
+    const tab = mechanism === "provider" && platform.kind !== "desktop" ? reserveConnectTab(window) : null;
     try {
       await installApp(getAppClient(), app.appId);
     } catch (error) {
@@ -150,7 +170,7 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
       else notifySuccess(installedTitle(app.name));
       return;
     }
-    finishProviderConnect(app, auth, tab, INSTALLED_UNCONNECTED_TITLE);
+    await finishProviderConnect(app, auth, tab, INSTALLED_UNCONNECTED_TITLE);
   };
 
   const remove = async (app: OpenhubApp): Promise<void> => {
@@ -166,7 +186,7 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
 
   const connect = async (app: OpenhubApp): Promise<void> => {
     const mechanism: AppMechanism = appMechanism(app.authType);
-    const tab = mechanism === "provider" ? reserveConnectTab(window) : null;
+    const tab = mechanism === "provider" && platform.kind !== "desktop" ? reserveConnectTab(window) : null;
     let auth: OpenhubAuthStatus;
     try {
       auth = await getAppAuthStatus(getAppClient(), app.appId);
@@ -180,7 +200,7 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
       return;
     }
     if (mechanism === "provider") {
-      finishProviderConnect(app, auth, tab, COULD_NOT_CONNECT_TITLE);
+      await finishProviderConnect(app, auth, tab, COULD_NOT_CONNECT_TITLE);
       return;
     }
     notifySuccess(connectedTitle(app.name));

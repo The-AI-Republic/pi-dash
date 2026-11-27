@@ -2,17 +2,46 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DetailMissingState } from "./DetailMissingState.js";
 import { DetailSkeleton } from "./DetailSkeleton.js";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("DetailSkeleton", () => {
   it("announces the loading detail", () => {
     render(<DetailSkeleton />);
     expect(screen.getByRole("status", { name: "Loading work item" })).toBeInTheDocument();
+  });
+
+  it("stacks sidebar above activity in narrow layout (NEWPIDASH-233)", () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    render(<DetailSkeleton />);
+    expect(screen.getByRole("status", { name: "Loading work item" })).toHaveStyle({
+      gridTemplateAreas: '"main" "sidebar" "activity"',
+    });
+  });
+
+  it("keeps two columns in wide layout (NEWPIDASH-233)", () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    render(<DetailSkeleton />);
+    expect(screen.getByRole("status", { name: "Loading work item" })).toHaveStyle({
+      gridTemplateAreas: '"main sidebar" "activity sidebar"',
+    });
   });
 });
 

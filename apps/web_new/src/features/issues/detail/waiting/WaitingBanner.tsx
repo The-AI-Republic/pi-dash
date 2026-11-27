@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Waiting banner for the issue detail (hybrid assignment, design
-// §10.3): while the active run is queued for its runner, the banner
-// names the runner and the reason, and offers the three ways out —
-// release this run to the pod once, change the issue's runner, or
-// cancel the run. Renders nothing while nothing waits.
+// §10.3, §14.4): while the active run is queued for its runner, the banner
+// names the runner and the reason. For a locality pin it offers release
+// to the pod once; for a dedicated pin the release is never offered
+// (H-13, §12.2: 409 dedicated_pin_not_releasable, releasable always
+// false). Change runner and Cancel run remain for every pin.
+// Renders nothing while nothing waits.
 import { Button, Dialog } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
 import { Hourglass } from "lucide-react";
@@ -14,6 +16,7 @@ import * as React from "react";
 import {
   PodPicker,
   executionTargetPatch,
+  formatRunnerSeenAgo,
   usePickerPods,
   type ExecutionSelection,
 } from "../../../../shared/pickers/index.js";
@@ -52,7 +55,8 @@ export function WaitingBanner({
 
   const podName = pods.data?.find((pod) => pod.id === issue.assigned_pod_id)?.name ?? null;
   const releaseLabel = podName === null ? "Run on any runner in the pod once" : `Run on any runner in ${podName} once`;
-  const busy = release.isReleasing || cancel.isCancelling || change.isSaving;
+  const isDedicated = waiting.wait.pin_kind === "dedicated";
+  const busy = (isDedicated ? false : release.isReleasing) || cancel.isCancelling || change.isSaving;
 
   async function handleChange(picked: ExecutionSelection): Promise<void> {
     try {
@@ -63,6 +67,25 @@ export function WaitingBanner({
     }
   }
 
+  // Machine-level capacity wait (NEWPIDASH-241 T7), distinct from the
+  // cloud dispatch_wait above. Typed via the shared `CapacityWait`
+  // contract — no inline cast. Stale reports (>90s, the server
+  // freshness window) render as last-known, never as live.
+  const capacity = waiting.run.capacity_wait ?? null;
+  let capacityText: string | null = null;
+  if (capacity !== null && capacity.phase === "waiting_for_capacity") {
+    const parts = ["Waiting for machine capacity"];
+    if (capacity.queue_position != null) parts.push(`position ${capacity.queue_position}`);
+    if (capacity.active != null && capacity.limit != null) parts.push(`(${capacity.active}/${capacity.limit})`);
+    if (capacity.reported_at != null) {
+      const ago = formatRunnerSeenAgo(capacity.reported_at);
+      const elapsedMs = Date.now() - Date.parse(capacity.reported_at);
+      if (ago !== null) {
+        parts.push(elapsedMs > 90_000 ? `last known ${ago}` : `last updated ${ago}`);
+      }
+    }
+    capacityText = parts.join(" — ");
+  }
   return (
     <section
       aria-label="Waiting for runner"
@@ -72,16 +95,23 @@ export function WaitingBanner({
         <Hourglass size={16} strokeWidth={1.5} className="shrink-0 text-(--text-muted)" aria-hidden="true" />
         {waitingBannerText(waiting.runnerName, waiting.wait)}
       </p>
+      {capacityText && (
+        <p data-testid="capacity-waiting" className="text-body text-(--text-muted)">
+          {capacityText}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-(--space-2)">
-        <Button
-          variant="secondary"
-          size="small"
-          disabled={disabled || busy || !waiting.wait.releasable}
-          loading={release.isReleasing}
-          onClick={() => release.releaseWaitingRun(waiting.run.id)}
-        >
-          {releaseLabel}
-        </Button>
+        {!isDedicated && (
+          <Button
+            variant="secondary"
+            size="small"
+            disabled={disabled || busy || !waiting.wait.releasable}
+            loading={release.isReleasing}
+            onClick={() => release.releaseWaitingRun(waiting.run.id)}
+          >
+            {releaseLabel}
+          </Button>
+        )}
         <Dialog
           trigger={
             <Button variant="secondary" size="small" disabled={disabled || busy}>

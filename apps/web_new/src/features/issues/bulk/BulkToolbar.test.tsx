@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -322,6 +322,28 @@ describe("BulkToolbar", () => {
     await user.click(screen.getByRole("button", { name: "Pick Due date" }));
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(props.onUpdate).toHaveBeenCalledWith({ start_date: "2026-05-01", target_date: "2026-05-01" });
+  });
+
+  it("hands the edit dialog's open-time focus to its first property switch", async () => {
+    // The kit's deferred pass would otherwise pick the header's Close
+    // button and could land after the reader clicked a control, stealing
+    // their input on a busy host (NEWFRONT-1055, 1058).
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    const first = screen.getByRole("checkbox", { name: "State" });
+    await waitFor(() => expect(first).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps the dialog's keyboard input once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    const first = screen.getByRole("checkbox", { name: "State" });
+    await waitFor(() => expect(first).toHaveFocus());
+    await user.keyboard(" ");
+    expect(first).toBeChecked();
   });
 });
 

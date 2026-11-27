@@ -14,6 +14,7 @@ import uuid
 
 import pytest
 
+from _harness.diffs import expect, is_rust
 from _harness.sse import EVENT_STREAM_CONTENT_TYPE, collect_frames
 from _harness.web import web_post
 
@@ -229,20 +230,71 @@ def test_web_chat_cancel_noop_shape(user_client, chat_world):
 
 
 def test_web_chat_close_shape(user_client, chat_world, machine_flow, seeder):
-    """Close persists CLOSED, then the offline fan-out answers 500 (Django bug).
+    """Close persists CLOSED, then the offline fan-out divergence (DIFF-25).
 
-    ``send_to_runner`` raises ``RunnerOfflineError`` inside ``on_commit`` —
-    after the session row committed — so the 500 carries a persisted close.
-    The oracle pins both halves.
+    Django ``send_to_runner`` raises ``RunnerOfflineError`` inside
+    ``on_commit`` — after the session row committed — so the 500
+    carries a persisted close. Rust swallows the offline dispatch and
+    returns the persisted write (DIFF-25). Both halves pin the row.
     """
     response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/close/", {})
-    assert response.status_code == 500, response.text
+    assert response.status_code == expect("DIFF-25", django=500, rust=200), response.text
     assert (
         seeder.db.fetchval(
             "SELECT status FROM agent_chat_session WHERE id = %s", (_sid(chat_world),)
         )
         == "closed"
     )
+    if is_rust():
+        body = response.json()
+        assert SESSION_KEYS <= set(body)
+        assert body["status"] == "closed"
+        assert body["closed_at"] is not None
+
+
+def test_web_chat_cancel_active_offline_shape(user_client, chat_world, machine_flow, seeder):
+    """Active-turn cancel offline divergence (DIFF-25).
+
+    With an active message, cancel sends ``chat_cancel`` after commit.
+    Django 500s on offline ``RunnerOfflineError``; Rust swallows it and
+    answers 200 ``{"ok": true}``. The idle noop early return masks this
+    in ``test_web_chat_cancel_noop_shape``.
+    """
+    seeder.db.execute(
+        "UPDATE agent_chat_session SET active_message_id = %s WHERE id = %s",
+        (chat_world["message"]["id"], _sid(chat_world)),
+    )
+    response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/cancel/", {})
+    assert response.status_code == expect("DIFF-25", django=500, rust=200), response.text
+    if is_rust():
+        assert response.json() == {"ok": True}
+
+
+def test_web_chat_close_active_offline_shape(user_client, chat_world, machine_flow, seeder):
+    """Close with an active turn offline divergence (DIFF-25).
+
+    Idle close is covered by ``test_web_chat_close_shape``; the active
+    branch marks ``close_requested`` and sends ``chat_cancel`` after
+    commit. Django 500s on offline; Rust swallows it and returns the
+    persisted ``close_requested`` write.
+    """
+    seeder.db.execute(
+        "UPDATE agent_chat_session SET active_message_id = %s WHERE id = %s",
+        (chat_world["message"]["id"], _sid(chat_world)),
+    )
+    response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/close/", {})
+    assert response.status_code == expect("DIFF-25", django=500, rust=200), response.text
+    assert (
+        seeder.db.fetchval(
+            "SELECT close_requested FROM agent_chat_session WHERE id = %s", (_sid(chat_world),)
+        )
+        is True
+    )
+    if is_rust():
+        body = response.json()
+        assert SESSION_KEYS <= set(body)
+        assert body["close_requested"] is True
+        assert body["status"] == "open"
 
 
 def _seed_chat_approval(machine_client, chat_world) -> str:
@@ -285,18 +337,23 @@ def test_web_chat_approval_decide_rejects_bad_decision(user_client, machine_clie
 
 
 def test_web_chat_approval_decide_shape(user_client, machine_client, chat_world, seeder):
-    """Decide persists, then the offline fan-out answers 500 (same Django bug)."""
+    """Decide persists, then the offline fan-out divergence (DIFF-25)."""
     approval_id = _seed_chat_approval(machine_client, chat_world)
     response = web_post(
         user_client, f"{WEB}/chat/approvals/{approval_id}/decide/", {"decision": "accept"}
     )
-    assert response.status_code == 500, response.text
+    assert response.status_code == expect("DIFF-25", django=500, rust=200), response.text
     assert (
         seeder.db.fetchval(
             "SELECT status FROM agent_chat_approval WHERE id = %s", (approval_id,)
         )
         == "accepted"
     )
+    if is_rust():
+        body = response.json()
+        assert CHAT_APPROVAL_KEYS <= set(body)
+        assert body["status"] == "accepted"
+        assert body["decision_source"] == "web"
 
 
 def test_web_chat_events_replay_shape(user_client, machine_client, chat_world, seeder):

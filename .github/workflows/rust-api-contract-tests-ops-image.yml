@@ -28,7 +28,7 @@ concurrency:
 jobs:
   ops-image:
     name: ops image build + F37-12 replay
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6

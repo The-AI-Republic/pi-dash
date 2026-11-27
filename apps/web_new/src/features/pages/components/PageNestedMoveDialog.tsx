@@ -56,6 +56,11 @@ export function PageNestedMoveDialog({
   const currentParent = page.parent_id ?? page.parent;
   const [target, setTarget] = React.useState<string | null>(currentParent);
   const [query, setQuery] = React.useState("");
+  // The search field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button and can land after the reader has clicked into the field, eating
+  // their keystrokes on a busy host (NEWFRONT-1055, 1058).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
     if (!open) return;
@@ -77,6 +82,7 @@ export function PageNestedMoveDialog({
       title={PAGE_MOVE_DIALOG_TITLE}
       description={`Choose a new place for “${title}”. Its sub-pages move with it.`}
       open={open}
+      initialFocus={searchRef}
       onOpenChange={(next) => {
         if (!next && pending) return;
         onOpenChange(next);
@@ -99,6 +105,7 @@ export function PageNestedMoveDialog({
     >
       <div className="flex flex-col gap-(--space-2)">
         <input
+          ref={searchRef}
           type="search"
           aria-label={PAGE_MOVE_SEARCH_PLACEHOLDER}
           placeholder={PAGE_MOVE_SEARCH_PLACEHOLDER}

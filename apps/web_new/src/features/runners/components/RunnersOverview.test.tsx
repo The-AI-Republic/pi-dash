@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const navigate = vi.fn(async () => undefined);
 const notifyError = vi.fn();
+const notifyInfo = vi.fn();
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -45,19 +46,29 @@ vi.mock("./DeletePodDialog.js", () => ({
 }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
-  return { ...original, notifyError: (title: string, description?: string) => notifyError(title, description) };
+  return {
+    ...original,
+    notifyError: (title: string, description?: string) => notifyError(title, description),
+    notifyInfo: (title: string, description?: string) => notifyInfo(title, description),
+  };
 });
 
 import type { PodFilterState } from "../podFilter.js";
 import {
+  canPauseRunner,
   canRevokeRunner,
   DELETE_RUNNER_FAILED,
+  PAUSE_RUNNER_FAILED,
+  RESUME_RUNNER_FAILED,
+  RUNNER_PAUSED_TITLE,
   REVOKE_RUNNER_FAILED,
   RUNNERS_EMPTY_TEXT,
   RUNNER_ACTION_FAILED_TITLE,
   RunnersOverview,
   runnerHeartbeat,
+  runnerPausedInFlightText,
   runnerPlatform,
+  runnerRowActions,
   runnerVersion,
 } from "./RunnersOverview.js";
 
@@ -82,7 +93,11 @@ function state(runners: Runner[]): PodFilterState {
 
 function renderTable(
   runners: Runner[],
-  handlers: { onDelete?: (id: string) => Promise<void>; onRevoke?: (id: string) => Promise<void> } = {}
+  handlers: {
+    onDelete?: (id: string, options?: { purgeLocal?: boolean }) => Promise<void>;
+    onRevoke?: (id: string) => Promise<void>;
+    onSetPaused?: (id: string, paused: boolean) => Promise<{ inFlight: number }>;
+  } = {}
 ) {
   const onDelete = handlers.onDelete ?? vi.fn(async () => undefined);
   const onRevoke = handlers.onRevoke ?? vi.fn(async () => undefined);
@@ -96,6 +111,7 @@ function renderTable(
         podsFailed={false}
         onDelete={onDelete}
         onRevoke={onRevoke}
+        onSetPaused={handlers.onSetPaused}
       />
     </QueryClientProvider>
   );
@@ -105,6 +121,7 @@ function renderTable(
 beforeEach(() => {
   navigate.mockClear();
   notifyError.mockClear();
+  notifyInfo.mockClear();
 });
 
 describe("cell helpers", () => {
@@ -261,6 +278,43 @@ describe("RunnersOverview row actions", () => {
     await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("offers a Pi Dash Agent only Remove from project, then Delete once removed (design §11)", () => {
+    const engine = { status: "online", enrolled_at: "2024-01-01T00:00:00Z", provisioning: "desktop_bundled" } as const;
+    expect(runnerRowActions({ ...engine, revoked_at: null })).toEqual({ revoke: false, remove: true, delete: false });
+    expect(runnerRowActions({ ...engine, revoked_at: "2024-02-01T00:00:00Z" })).toEqual({
+      revoke: false,
+      remove: false,
+      delete: true,
+    });
+    expect(runnerRowActions({ ...engine, provisioning: "manual", revoked_at: null })).toEqual({
+      revoke: true,
+      remove: false,
+      delete: true,
+    });
+  });
+
+  it("removes a Pi Dash Agent from the project by revoking it, never deleting its folder", async () => {
+    const { onRevoke, onDelete } = renderTable([runner({ provisioning: "desktop_bundled", revoked_at: null })]);
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Remove from project" }));
+    const dialog = screen.getByRole("dialog", { name: "Remove from project?" });
+    expect(dialog).toHaveTextContent("folder on the computer is kept");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
+    await waitFor(() => expect(onRevoke).toHaveBeenCalledWith("r-1"));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("deletes a removed engine's row with the local purge off", async () => {
+    const onDelete = vi.fn(async (_id: string, _options?: { purgeLocal?: boolean }) => undefined);
+    renderTable([runner({ provisioning: "desktop_bundled", revoked_at: "2024-02-01T00:00:00Z", status: "revoked" })], {
+      onDelete,
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1", { purgeLocal: false }));
   });
 
   it("revokes through the confirmation", async () => {
@@ -442,5 +496,182 @@ describe("RunnersOverview pods wiring", () => {
     );
     expect(screen.getByText("Failed to load pods")).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+});
+
+describe("engine runners in the table", () => {
+  it("names engines by machine with a Pi Dash Agent badge, and shows each own-agent runner's machine", () => {
+    const machine = { id: "m-1", label: "Work laptop", host_label: "rich-mbp" };
+    renderTable([
+      runner({ id: "r-engine", name: "builtin-x", provisioning: "desktop_bundled", dev_machine_detail: machine }),
+      runner({ id: "r-own", name: "codex-1", provisioning: "manual", dev_machine_detail: machine }),
+    ]);
+    expect(screen.getByText("Pi Dash Agent · Work laptop")).toBeInTheDocument();
+    expect(screen.getAllByTestId("runner-built-in-badge")).toHaveLength(1);
+    expect(screen.getByText("codex-1")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-machine")).toHaveTextContent("Work laptop");
+  });
+});
+
+describe("pod members panel", () => {
+  const pod = {
+    id: "p-1",
+    name: "Alpha pod",
+    description: "",
+    is_default: true,
+    project: "prj",
+    project_identifier: "WEB",
+    runner_count: 2,
+  } as never;
+
+  it("lists the selected pod's runners with their membership and owner actions", async () => {
+    const onUpdateRunner = vi.fn(async () => undefined);
+    const podDetail = { id: "p-1", name: "Alpha pod", project: "prj" } as never;
+    const engine = runner({
+      id: "r-engine",
+      name: "builtin-x",
+      provisioning: "desktop_bundled",
+      pod_dispatch: "pinned_only",
+      owner: "me",
+      revoked_at: null,
+      pod_detail: podDetail,
+      dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
+    });
+    const theirs = runner({
+      id: "r-theirs",
+      name: "their-runner",
+      owner: "you",
+      revoked_at: null,
+      pod_detail: podDetail,
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([engine, theirs]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    const panel = screen.getByTestId("pod-members");
+    expect(panel).toHaveTextContent("Pod work: off");
+    expect(panel).toHaveTextContent("Takes pod work");
+    // Only the viewer's own runner carries an action.
+    const addButtons = screen.getAllByRole("button", { name: "Add to pod" });
+    expect(addButtons).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Remove from pod" })).toBeNull();
+    await userEvent.click(addButtons[0]!);
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-engine", { pod_dispatch: "pod_member" });
+  });
+
+  it("toasts the reason when the server refuses", async () => {
+    const onUpdateRunner = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const own = runner({ id: "r-own", owner: "me", revoked_at: null, pod_dispatch: "pod_member" });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([own]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Remove from pod" }));
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-own", { pod_dispatch: "pinned_only" });
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't change the runner's pod",
+        "The runner is unchanged. Try again."
+      )
+    );
+  });
+});
+
+describe("RunnersOverview per-runner pause", () => {
+  it("offers pause on any live runner of a server that reports paused_at", () => {
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: null }))).toBe(true);
+    expect(canPauseRunner(runner({ paused_at: "2026-11-18T00:00:00Z", revoked_at: null }))).toBe(true);
+    expect(canPauseRunner(runner({ revoked_at: null }))).toBe(false);
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: "2026-11-18T00:00:00Z" }))).toBe(false);
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: null, status: "revoked" }))).toBe(false);
+  });
+
+  it("words the in-flight notice and skips it when nothing is held", () => {
+    expect(runnerPausedInFlightText(0)).toBeNull();
+    expect(runnerPausedInFlightText(1)).toBe("1 run already assigned to this runner will still run.");
+    expect(runnerPausedInFlightText(3)).toBe("3 runs already assigned to this runner will still run.");
+  });
+
+  it("hides the toggle without a writer", () => {
+    renderTable([runner({ paused_at: null, revoked_at: null })]);
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
+  it("pauses a runner and tells the user what it still holds", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 2 }));
+    renderTable([runner({ paused_at: null, revoked_at: null })], { onSetPaused });
+    expect(screen.queryByTestId("runner-paused-badge")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalledWith("r-1", true));
+    await waitFor(() =>
+      expect(notifyInfo).toHaveBeenCalledWith(
+        RUNNER_PAUSED_TITLE,
+        "2 runs already assigned to this runner will still run."
+      )
+    );
+  });
+
+  it("pauses quietly when the runner holds nothing", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 0 }));
+    renderTable([runner({ paused_at: null, revoked_at: null })], { onSetPaused });
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalled());
+    expect(notifyInfo).not.toHaveBeenCalled();
+  });
+
+  it("badges a paused runner and resumes it", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 0 }));
+    renderTable([runner({ paused_at: "2026-11-18T00:00:00Z", revoked_at: null })], { onSetPaused });
+    expect(screen.getByTestId("runner-paused-badge")).toHaveTextContent("Paused");
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalledWith("r-1", false));
+  });
+
+  it("toasts a failed pause and a failed resume", async () => {
+    const failing = vi.fn(async () => {
+      throw new Error("nope");
+    });
+    renderTable(
+      [
+        runner({ id: "r-1", name: "a", paused_at: null, revoked_at: null }),
+        runner({ id: "r-2", name: "b", paused_at: "2026-11-18T00:00:00Z", revoked_at: null }),
+      ],
+      { onSetPaused: failing }
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, PAUSE_RUNNER_FAILED));
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, RESUME_RUNNER_FAILED));
+  });
+
+  it("offers pause on a Pi Dash Agent too", () => {
+    renderTable([runner({ provisioning: "desktop_bundled", paused_at: null, revoked_at: null })], {
+      onSetPaused: vi.fn(async () => ({ inFlight: 0 })),
+    });
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
   });
 });

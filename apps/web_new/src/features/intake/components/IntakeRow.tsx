@@ -15,6 +15,7 @@ import type { IntakeIssueRow, WorkspaceMemberList } from "@pidash/api-client";
 import * as React from "react";
 
 import { formatDay } from "../../issues/index.js";
+import { timestampToLocalDay } from "../lib/dates.js";
 import { PRIORITY_ICONS, PRIORITY_LABELS, PRIORITY_TONES } from "../../../shared/pickers/index.js";
 import { isIntakeIdentityCreator } from "../lib/identity.js";
 import { intakeRowIdLabel } from "../lib/rows.js";
@@ -84,7 +85,7 @@ export function IntakeRow({
   const issue = row.issue;
   const idLabel = intakeRowIdLabel(projectIdentifier, issue.sequence_id);
   const chip = intakeStatusChipLabel(row.status);
-  const day = formatDay(issue.created_at.slice(0, 10));
+  const day = formatDay(timestampToLocalDay(issue.created_at));
   const priority = issue.priority;
   const PriorityGlyph = PRIORITY_ICONS[priority];
   const labels = (issue.label_ids ?? [])

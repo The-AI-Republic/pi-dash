@@ -418,6 +418,17 @@ def _gap_for_unmatched(dj: dict) -> str:
         return "G3"
     if path == "/api/v1/workspaces/{slug}/":
         return "G3"
+    if (
+        path in {
+            "/api/v1/runner/dev-machines/{dev_machine_id}/",
+            "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+            "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+            "/api/v1/runner/engine/credential/revoke/",
+            "/api/v1/runner/engine/model-token/",
+            "/api/v1/runner/engine/profile/",
+        }
+    ):
+        return "G7"
     return "G0"
 
 

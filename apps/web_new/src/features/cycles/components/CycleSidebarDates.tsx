@@ -16,6 +16,7 @@ import { Tooltip } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { useMe } from "../../../core/session/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { DateRangePicker, todayIsoDay, type RangeValue } from "../../issues/index.js";
 import { invalidateAfterCycleWrite } from "../api/invalidate.js";
@@ -27,7 +28,7 @@ import {
   cycleOverlapMessage,
   needsCycleDateCheck,
 } from "../dialog/cycleRange.js";
-import { cycleSpanModel, instantToProjectDate } from "../lib/cycleDates.js";
+import { cycleSpanModel, instantToProjectDate, resolveViewerTimeZone } from "../lib/cycleDates.js";
 
 export interface CycleSidebarDatesProps {
   workspaceSlug: string;
@@ -35,7 +36,7 @@ export interface CycleSidebarDatesProps {
   cycle: CycleRow;
   /** IANA name of the project's timezone. */
   projectTimeZone: string;
-  /** Viewer zone override; defaults to the browser zone. Tests inject. */
+  /** Viewer zone override; defaults to the profile's timezone. Tests inject. */
   viewerTimeZone?: string | undefined;
   /** Member/admin on a live cycle; everyone else reads the span disabled. */
   editable: boolean;
@@ -62,6 +63,8 @@ export function CycleSidebarDates({
   viewerTimeZone,
   editable,
 }: CycleSidebarDatesProps): React.ReactElement {
+  const me = useMe();
+  const resolvedViewer = viewerTimeZone ?? resolveViewerTimeZone(me.data?.user_timezone);
   const queryClient = useQueryClient();
   const stored = storedDays(cycle, projectTimeZone);
   const [draft, setDraft] = React.useState<RangeValue>(stored);
@@ -138,7 +141,7 @@ export function CycleSidebarDates({
     chain.current = run.catch(() => undefined);
   }
 
-  const span = cycleSpanModel(cycle.start_date, cycle.end_date, projectTimeZone, viewerTimeZone);
+  const span = cycleSpanModel(cycle.start_date, cycle.end_date, projectTimeZone, resolvedViewer);
   const disabled = !editable || saving;
   const row = (
     <span data-testid="cycle-sidebar-dates" className="inline-flex flex-wrap items-center gap-(--space-2)">

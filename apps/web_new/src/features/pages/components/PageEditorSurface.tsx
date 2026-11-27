@@ -169,7 +169,7 @@ export function PageEditorSurface({
   // A stored body keeps the asset id; the editor paints the served URL
   // while serialization writes the id back (PAGE-034, ISS-127).
   const resolveAsset = React.useCallback(
-    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
     [workspaceSlug, projectId]
   );
 
@@ -279,8 +279,10 @@ export function PageEditorSurface({
       setUploading(true);
       void upload(file)
         .then((uploaded) => {
+          const src =
+            uploaded.assetUrl === "" ? pageAssetUrl(workspaceSlug, projectId, uploaded.assetId) : uploaded.assetUrl;
           handleRef.current?.insertImage(
-            uploaded.assetUrl === "" ? pageAssetUrl(workspaceSlug, projectId, uploaded.assetId) : uploaded.assetUrl,
+            resolveAsset(src),
             uploaded.assetId,
             // The assets pane reads alt first; a bare UUID source would
             // otherwise be its row name. The old app's `image-<id>` label
@@ -295,7 +297,7 @@ export function PageEditorSurface({
           setUploading(false);
         });
     },
-    [upload, workspaceSlug, projectId]
+    [resolveAsset, upload, workspaceSlug, projectId]
   );
 
   const handleKeyDown = React.useCallback((event: KeyboardEvent): boolean => {

@@ -101,32 +101,20 @@ struct SttRow {
     last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Decoded config-row tuple: base URL, model, encrypted key,
-/// verification timestamp.
-type SttRowTuple = (
-    String,
-    String,
-    Option<Vec<u8>>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
-
 async fn fetch_row(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Option<SttRow>, Failure> {
-    let row: Option<SttRowTuple> = sqlx::query_as(
-        r#"SELECT base_url, model_name, api_key_encrypted, last_verified_at
-           FROM assistant_user_stt_config WHERE user_id = $1 LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error())?;
-    Ok(row.map(
-        |(base_url, model_name, api_key_encrypted, last_verified_at)| SttRow {
-            base_url,
-            model_name,
-            api_key_encrypted,
-            last_verified_at,
-        },
-    ))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_stt_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(*user_id))
+        .one(&db)
+        .await
+        .map_err(|_| Failure::server_error())?;
+    Ok(row.map(|row| SttRow {
+        base_url: row.base_url,
+        model_name: row.model_name,
+        api_key_encrypted: row.api_key_encrypted,
+        last_verified_at: row.last_verified_at.map(|v| v.with_timezone(&chrono::Utc)),
+    }))
 }
 
 /// `cfg.save()` (`stt_config.py:73`): a full-row write that refreshes
@@ -140,40 +128,51 @@ async fn save_row(
     api_key_encrypted: &Option<Vec<u8>>,
     existed: bool,
 ) -> Result<(), Failure> {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let now = chrono::Utc::now();
     let result = if existed {
-        sqlx::query(
-            r#"UPDATE assistant_user_stt_config
-               SET base_url = $1, model_name = $2, api_key_encrypted = $3, updated_at = $4
-               WHERE user_id = $5"#,
-        )
-        .bind(base_url)
-        .bind(model_name)
-        .bind(api_key_encrypted)
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await
+        pidash_db::entity::assistant_user_stt_config::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::BaseUrl,
+                Expr::value(base_url.to_owned()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::ModelName,
+                Expr::value(model_name.to_owned()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::ApiKeyEncrypted,
+                Expr::value(api_key_encrypted.clone()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::UpdatedAt,
+                Expr::value(now),
+            )
+            .filter(pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(*user_id))
+            .exec(&db)
+            .await
+            .map(|_| ())
+            .map_err(pidash_db::orm_tx::into_sqlx)
     } else {
-        sqlx::query(
-            r#"INSERT INTO assistant_user_stt_config
-               (user_id, base_url, model_name, api_key_encrypted,
-                last_verified_at, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, NULL, $5, $6)"#,
-        )
-        .bind(user_id)
-        .bind(base_url)
-        .bind(model_name)
-        .bind(api_key_encrypted)
-        .bind(now)
-        .bind(now)
-        .execute(pool)
-        .await
+        let model = pidash_db::entity::assistant_user_stt_config::ActiveModel {
+            user_id: Set(*user_id),
+            base_url: Set(base_url.to_owned()),
+            model_name: Set(model_name.to_owned()),
+            api_key_encrypted: Set(api_key_encrypted.clone()),
+            last_verified_at: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            ..Default::default()
+        };
+        model
+            .insert(&db)
+            .await
+            .map(|_| ())
+            .map_err(pidash_db::orm_tx::into_sqlx)
     };
-    result
-        .map(|_| ())
-        .map_err(|_| Failure::bare_error(StatusCode::BAD_REQUEST, "invalid"))?;
-    Ok(())
+    result.map_err(|_| Failure::bare_error(StatusCode::BAD_REQUEST, "invalid"))
 }
 
 /// Render `_serialize` (`stt_config.py:28-41`): no `provider_kind` field;
@@ -404,13 +403,19 @@ async fn delete_config(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
-    if let Err(failure) = sqlx::query(r#"DELETE FROM assistant_user_stt_config WHERE user_id = $1"#)
-        .bind(actor.id)
-        .execute(&pool)
-        .await
-        .map(|_| ())
-        .map_err(|_| Failure::server_error())
-    {
+    if let Err(failure) = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        pidash_db::entity::assistant_user_stt_config::Entity::delete_many()
+            .filter(pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(actor.id))
+            .exec(&db)
+            .await
+            .map(|_| ())
+            .map_err(|e: sea_orm::DbErr| {
+                let _ = pidash_db::orm_tx::into_sqlx(e);
+                Failure::server_error()
+            })
+    } {
         return failure.into_response();
     }
     Response::builder()
@@ -553,16 +558,26 @@ async fn post_test(
         ProbeOutcome::Classified(code, detail) => ok_false_detail(code, detail),
         ProbeOutcome::Ok => {
             let now = chrono::Utc::now();
-            if let Err(failure) = sqlx::query(
-                r#"UPDATE assistant_user_stt_config SET last_verified_at = $1 WHERE user_id = $2"#,
-            )
-            .bind(now)
-            .bind(actor.id)
-            .execute(&pool)
-            .await
-            .map(|_| ())
-            .map_err(|_| Failure::server_error())
-            {
+            if let Err(failure) = {
+                use sea_orm::sea_query::Expr;
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                let db = pidash_db::pool::sea_orm_connection(&pool);
+                pidash_db::entity::assistant_user_stt_config::Entity::update_many()
+                    .col_expr(
+                        pidash_db::entity::assistant_user_stt_config::Column::LastVerifiedAt,
+                        Expr::value(now),
+                    )
+                    .filter(
+                        pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(actor.id),
+                    )
+                    .exec(&db)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e: sea_orm::DbErr| {
+                        let _ = pidash_db::orm_tx::into_sqlx(e);
+                        Failure::server_error()
+                    })
+            } {
                 return failure.into_response();
             }
             ok_true()
@@ -671,5 +686,41 @@ mod tests {
         assert!(text.contains("name=\"model\"\r\n\r\nwhisper-1\r\n"));
         assert!(text.contains("name=\"file\"; filename=\"probe.wav\""));
         assert!(text.contains("Content-Type: audio/wav"));
+    }
+
+    #[test]
+    fn fetch_row_seaorm_shape_pins_user_filter() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
+        let sql = pidash_db::entity::assistant_user_stt_config::Entity::find()
+            .filter(
+                pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(uuid::Uuid::nil()),
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_user_stt_config"), "table: {sql}");
+        assert!(sql.contains("user_id"), "user filter: {sql}");
+    }
+
+    #[test]
+    fn save_update_seaorm_shape_writes_all_fields() {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
+        let sql = pidash_db::entity::assistant_user_stt_config::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::BaseUrl,
+                Expr::value("https://8.8.8.8/v1"),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_user_stt_config::Column::ModelName,
+                Expr::value("whisper-1"),
+            )
+            .filter(
+                pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(uuid::Uuid::nil()),
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("UPDATE"), "update: {sql}");
+        assert!(sql.contains("base_url"), "base_url: {sql}");
+        assert!(sql.contains("model_name"), "model: {sql}");
     }
 }

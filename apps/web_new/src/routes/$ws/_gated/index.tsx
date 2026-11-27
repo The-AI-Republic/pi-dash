@@ -18,7 +18,6 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { WorkspaceHomeTour } from "../../../features/auth/components/WorkspaceHomeTour.js";
-import { HomeAllOffState } from "../../../features/home/components/HomeAllOffState.js";
 import { HomeDashboard } from "../../../features/home/components/HomeDashboard.js";
 import { HomeWidgetStack } from "../../../features/home/components/HomeWidgetStack.js";
 import { ManageWidgetsDialog } from "../../../features/home/components/ManageWidgetsDialog.js";
@@ -65,7 +64,6 @@ export const Route = createFileRoute("/$ws/_gated/")({
               projects={projects.data}
               quicklinks={<QuicklinksWidget workspaceSlug={params.ws} />}
               manageWidgets={(controls) => <ManageWidgetsDialog workspaceSlug={params.ws} {...controls} />}
-              emptyState={<HomeAllOffState />}
             />
           }
         />

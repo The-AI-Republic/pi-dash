@@ -5,13 +5,16 @@
 // One draft box that sends on an unmodified Enter and keeps the newline on
 // Shift+Enter, a send control that stays shut for an empty draft, a
 // sending lockout, a stop control while the agent replies, and the
-// push-to-talk dictation control wherever dictation is set up. The page
-// decides what the composer may do; this component renders it.
+// push-to-talk dictation control wherever dictation is set up. One bordered
+// box holds the draft on top and a toolbar underneath: page-supplied
+// controls (the desktop approval mode) on the left, mic and send/stop on
+// the right. The page decides what the composer may do; this component
+// renders it.
 
 import { Mic, Send, Square } from "lucide-react";
 import * as React from "react";
 
-import { Button } from "@pidash/kit";
+import { Button, cn } from "@pidash/kit";
 
 import { appendDictation, useDictation } from "../../../shared/dictation/index.js";
 
@@ -36,6 +39,8 @@ export interface ChatComposerProps {
   sending?: boolean;
   /** Offer the microphone control (dictation configured and enabled). */
   dictationAvailable?: boolean;
+  /** Controls for the toolbar's leading edge, inside the box. */
+  toolbar?: React.ReactNode;
 }
 
 /** Whole seconds as minutes and seconds. */
@@ -53,6 +58,7 @@ export function ChatComposer({
   onStop,
   sending = false,
   dictationAvailable = false,
+  toolbar,
 }: ChatComposerProps): React.ReactElement {
   const blocked = blockedReason !== null;
   const locked = blocked || sending;
@@ -76,7 +82,7 @@ export function ChatComposer({
         : null;
 
   return (
-    <div data-testid="runner-chat-composer" className="shrink-0 border-t border-(--border) pt-(--space-3)">
+    <div data-testid="runner-chat-composer" className="shrink-0 pt-(--space-3)">
       {blocked ? (
         <div data-testid="runner-chat-block-reason" className="text-meta mb-(--space-2) text-(--text-muted)">
           {blockedReason}
@@ -95,7 +101,14 @@ export function ChatComposer({
           {hint}
         </div>
       )}
-      <div className="flex items-end gap-(--space-2)">
+      <div
+        data-testid="runner-chat-composer-box"
+        className={cn(
+          "flex flex-col gap-(--space-2) rounded-(--radius-dialog) border border-(--border) bg-(--surface)",
+          "px-(--space-4) pt-(--space-3) pb-(--space-3) transition-colors focus-within:border-(--accent)",
+          locked && "opacity-60"
+        )}
+      >
         <textarea
           aria-label="Message"
           placeholder={CHAT_COMPOSER_PLACEHOLDER}
@@ -110,66 +123,77 @@ export function ChatComposer({
             event.preventDefault();
             submit();
           }}
-          className="text-body min-h-20 flex-1 resize-none rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-3) py-(--space-2) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          className="text-body min-h-16 w-full resize-none border-0 bg-transparent px-(--space-1) text-(--text) placeholder:text-(--text-muted) focus:outline-none disabled:cursor-not-allowed"
         />
-        {showMic ? (
-          <Button
-            variant={recording ? "danger" : "ghost"}
-            size="small"
-            aria-label={recording ? CHAT_MIC_RECORDING_LABEL : CHAT_MIC_LABEL}
-            aria-pressed={dictation.status === "recording"}
-            disabled={blocked || transcribing}
-            loading={transcribing}
-            title={recording ? CHAT_MIC_RECORDING_LABEL : CHAT_MIC_LABEL}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              dictation.reset();
-              void dictation.start();
-            }}
-            onPointerUp={() => dictation.stop()}
-            onPointerLeave={() => {
-              if (dictation.status === "recording") dictation.stop();
-            }}
-            onPointerCancel={() => dictation.cancel()}
-            onKeyDown={(event) => {
-              if ((event.key !== " " && event.key !== "Enter") || event.repeat) return;
-              event.preventDefault();
-              dictation.reset();
-              void dictation.start();
-            }}
-            onKeyUp={(event) => {
-              if (event.key !== " " && event.key !== "Enter") return;
-              event.preventDefault();
-              dictation.stop();
-            }}
-            className="tabular-nums"
-          >
-            {dictation.status === "recording" ? (
-              <span className="flex items-center gap-(--space-1)">
-                <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
-                {formatDictationElapsed(dictation.elapsedSeconds)}
-              </span>
+        <div className="flex items-center gap-(--space-2)">
+          {toolbar}
+          <div className="ml-auto flex items-center gap-(--space-2)">
+            {showMic ? (
+              <Button
+                variant={recording ? "danger" : "ghost"}
+                size="small"
+                aria-label={recording ? CHAT_MIC_RECORDING_LABEL : CHAT_MIC_LABEL}
+                aria-pressed={dictation.status === "recording"}
+                disabled={blocked || transcribing}
+                loading={transcribing}
+                title={recording ? CHAT_MIC_RECORDING_LABEL : CHAT_MIC_LABEL}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  dictation.reset();
+                  void dictation.start();
+                }}
+                onPointerUp={() => dictation.stop()}
+                onPointerLeave={() => {
+                  if (dictation.status === "recording") dictation.stop();
+                }}
+                onPointerCancel={() => dictation.cancel()}
+                onKeyDown={(event) => {
+                  if ((event.key !== " " && event.key !== "Enter") || event.repeat) return;
+                  event.preventDefault();
+                  dictation.reset();
+                  void dictation.start();
+                }}
+                onKeyUp={(event) => {
+                  if (event.key !== " " && event.key !== "Enter") return;
+                  event.preventDefault();
+                  dictation.stop();
+                }}
+                className="tabular-nums"
+              >
+                {dictation.status === "recording" ? (
+                  <span className="flex items-center gap-(--space-1)">
+                    <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+                    {formatDictationElapsed(dictation.elapsedSeconds)}
+                  </span>
+                ) : (
+                  <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+                )}
+              </Button>
+            ) : null}
+            {turnInFlight ? (
+              <Button
+                variant="danger"
+                size="small"
+                aria-label={CHAT_STOP_LABEL}
+                title={CHAT_STOP_LABEL}
+                onClick={onStop}
+              >
+                <Square size={16} strokeWidth={1.5} aria-hidden="true" />
+              </Button>
             ) : (
-              <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+              <Button
+                aria-label={CHAT_SEND_LABEL}
+                size="small"
+                variant="primary"
+                disabled={!canSend}
+                loading={sending}
+                onClick={submit}
+              >
+                <Send size={16} strokeWidth={1.5} aria-hidden="true" />
+              </Button>
             )}
-          </Button>
-        ) : null}
-        {turnInFlight ? (
-          <Button variant="danger" size="small" aria-label={CHAT_STOP_LABEL} title={CHAT_STOP_LABEL} onClick={onStop}>
-            <Square size={16} strokeWidth={1.5} aria-hidden="true" />
-          </Button>
-        ) : (
-          <Button
-            aria-label={CHAT_SEND_LABEL}
-            size="small"
-            variant="primary"
-            disabled={!canSend}
-            loading={sending}
-            onClick={submit}
-          >
-            <Send size={16} strokeWidth={1.5} aria-hidden="true" />
-          </Button>
-        )}
+          </div>
+        </div>
       </div>
     </div>
   );

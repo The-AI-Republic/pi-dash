@@ -22,6 +22,11 @@
 #   runner: runner/test_runner_agent_health.py publishes
 #     runner.reconcile_stalled_runs and waits for the sweep to reap the
 #     control run (PIDASHCONV-1579); same BACKEND-branched publish shape.
+#   runner_dedicated: runner_dedicated/test_dedicated_activity.py
+#     (NEWPIDASH-172, PDASHOSS01-297) PATCHes assigned_runner_id via the
+#     API and polls issue_activities for the two-row-per-change pattern;
+#     without a consumer the task rows never appear.
 app_intake
 orchestration
 runner
+runner_dedicated

@@ -73,6 +73,47 @@ def test_enter_bucket_bounces_to_backlog_when_pod_has_no_runner(api_client):
     assert "no eligible runner" in comments[-1]["comment_html"]
 
 
+def test_enter_bucket_counts_pod_member_engine(api_client):
+    """#2903: a pod-member engine alone in the pod defeats the tick
+    preflight — the issue stays In Progress, the ticker arms, no bounce."""
+    w, client = api_client
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    machine = world.uid()
+    db.execute(
+        get_database_url(),
+        """INSERT INTO dev_machine
+           (id, owner_id, host_label, visibility, provisioning, last_seen_at, label, created_at,
+            updated_at)
+           VALUES (%s,%s,%s,0,'manual',now(),'',now(),now())""",
+        (machine, w.user_id, "eng-bucket"),
+    )
+    engine = world.make_online_runner(w.user_id, w.workspace_id, pod)
+    db.execute(
+        get_database_url(),
+        """UPDATE runner SET provisioning='desktop_bundled',
+           pod_dispatch='pod_member', dev_machine_id=%s, status='online',
+           last_heartbeat_at=now() WHERE id=%s""",
+        (machine, engine),
+    )
+    db.execute(
+        get_database_url(),
+        "INSERT INTO runner_session (id, runner_id, protocol_version,"
+        " created_at, last_seen_at, revoked_at, revoked_reason)"
+        " VALUES (%s,%s,4,now(),now(),NULL,'')",
+        (world.uid(), engine),
+    )
+    issue = world.make_issue(w, "engbucket", "Backlog")
+
+    r = client.patch_issue(w.workspace_slug, w.project_id, issue,
+                           {"state": w.states["In Progress"]["id"]})
+    assert r.status_code == 200, r.text
+
+    assert _issue_state(issue) == w.states["In Progress"]["id"]
+    tick = _ticker(issue)
+    assert tick is not None
+    assert tick["enabled"] is True
+
+
 def test_move_between_rooms_retimes_clock(api_client):
     """In Progress → In Review (human, no active run): still no pod, no run,
     clock stays armed and `next_run_at` moves to now + the review cadence."""

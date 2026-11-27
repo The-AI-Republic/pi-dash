@@ -14,16 +14,28 @@ import {
   presetDayRange,
   sameDayNextMonth,
   shiftIsoDay,
-  todayUtcIsoDay,
+  timestampToLocalDay,
+  todayLocalIsoDay,
   DEFAULT_INTAKE_CUSTOM_MODE,
 } from "./dates.js";
+
+// Pinned so the local-day assertions below read the same day on any
+// machine running the suite.
+process.env.TZ = "America/Los_Angeles";
 
 const TODAY = "2026-10-23";
 
 describe("intake date values (INT-010)", () => {
-  it("reads the UTC day, not the local day", () => {
-    // 01:30 UTC is still the previous day behind UTC.
-    expect(todayUtcIsoDay(new Date("2026-10-23T01:30:00Z"))).toBe("2026-10-23");
+  it("reads the viewer's local day, not the UTC day", () => {
+    // 01:00 UTC is still the previous day in Los Angeles.
+    expect(todayLocalIsoDay(new Date("2026-11-18T01:00:00Z"))).toBe("2026-11-17");
+    expect(todayLocalIsoDay(new Date("2026-11-18T12:00:00Z"))).toBe("2026-11-18");
+  });
+
+  it("renders timestamps on the viewer's local day", () => {
+    expect(timestampToLocalDay("2026-11-18T01:00:00Z")).toBe("2026-11-17");
+    expect(timestampToLocalDay("2026-11-18T12:00:00Z")).toBe("2026-11-18");
+    expect(timestampToLocalDay("2026-10-20")).toBe("2026-10-20");
   });
 
   it("shifts days across month boundaries", () => {
@@ -49,7 +61,7 @@ describe("intake date values (INT-010)", () => {
     expect(INTAKE_CUSTOM_MODES.map((entry) => entry.mode)).toEqual(["before", "after", "range"]);
   });
 
-  it("resolves presets to inclusive UTC day bounds", () => {
+  it("resolves presets to inclusive local day bounds", () => {
     expect(presetDayRange("today", TODAY)).toEqual({ from: TODAY, to: TODAY });
     expect(presetDayRange("yesterday", TODAY)).toEqual({ from: "2026-10-22", to: "2026-10-22" });
     expect(presetDayRange("last7", TODAY)).toEqual({ from: "2026-10-16", to: TODAY });

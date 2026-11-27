@@ -90,7 +90,29 @@ pub const FORCE_CLOSE_REASON: &str = "force_close";
 /// (unlike the open/delete/poll lookups). `$1` is the runner id. The
 /// pool implementation executes this text verbatim and maps rows with
 /// [`pidash_db::runner_sessions::models::runner_session::runner_session_from_row`].
-pub const CLOSE_ACTIVE_SESSIONS_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC";
+///
+/// NEWPIDASH-241 T1: the projection appends the native-owned
+/// `capabilities` column (last in field order) beyond the Django
+/// baseline capture; the term order is unchanged.
+pub const CLOSE_ACTIVE_SESSIONS_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\", \"runner_session\".\"capabilities\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC";
+
+/// [`CLOSE_ACTIVE_SESSIONS_SQL`] on SeaORM: the runner's active
+/// sessions, full rows, newest first, no `LIMIT`
+/// ([`pidash_db::runner_sessions::models::runner_session::active_select`]).
+/// The pool and transaction [`PubsubStore`] implementations call this
+/// for [`PubsubStore::active_runner_sessions`].
+pub async fn active_runner_sessions(
+    db: &impl sea_orm::ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<RunnerSession>, sea_orm::DbErr> {
+    use pidash_db::runner_sessions::models::runner_session;
+    Ok(runner_session::active_select(runner_id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(runner_session::runner_session_from_model)
+        .collect())
+}
 
 /// What a swallowing verb did with its failures.
 ///
@@ -345,6 +367,7 @@ mod tests {
             last_seen_at: Some(at),
             revoked_at: None,
             revoked_reason: String::new(),
+            capabilities: serde_json::json!([]),
         }
     }
 
@@ -501,7 +524,14 @@ mod tests {
         let django = fx["close_runner_session"]["sql"][0]
             .as_str()
             .expect("close sql[0]");
-        assert_eq!(dollarize_param(django), CLOSE_ACTIVE_SESSIONS_SQL);
+        // NEWPIDASH-241 T1: one native-owned column appended beyond the Django baseline.
+        let upgraded = dollarize_param(django).replacen(
+            "\"runner_session\".\"revoked_reason\" FROM",
+            "\"runner_session\".\"revoked_reason\", \"runner_session\".\"capabilities\" FROM",
+            1,
+        );
+        assert_eq!(upgraded, CLOSE_ACTIVE_SESSIONS_SQL);
+        assert!(upgraded.contains("\"runner_session\".\"capabilities\""));
         // Full-row projection, default ordering, no LIMIT: `list()`
         // fetches every active row (unlike the LIMIT 1 open lookup).
         assert!(!CLOSE_ACTIVE_SESSIONS_SQL.contains("LIMIT"));

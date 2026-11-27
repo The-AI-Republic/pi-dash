@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import type { DevMachine } from "@pidash/api-client";
+import type { DevMachine, Runner } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,8 +10,14 @@ import {
   devMachineName,
   devMachineStatus,
   devMachineSubline,
+  pidashAgentState,
   machineActions,
+  machineIsLive,
+  machineSettings,
   machineTime,
+  mergedIntoText,
+  replacementCandidate,
+  runnersByMachine,
   runnerCountLabel,
   shortMachineId,
   type DevMachineStatus,
@@ -94,5 +100,144 @@ describe("machineActions", () => {
       expect(MACHINE_ACTION_COPY[action].title).toContain("?");
       expect(MACHINE_ACTION_COPY[action].body.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("pidashAgentState", () => {
+  const fmt = () => "Nov 7";
+  const engine = { hasPidashAgent: true };
+  const online = { control_online: true };
+  it("shows nothing for a machine with no engine runner or a revoked machine", () => {
+    expect(
+      pidashAgentState(machine({ ...online, engine_paused_by_owner: false }), { hasPidashAgent: false })
+    ).toBeNull();
+    expect(
+      pidashAgentState(machine({ engine_paused_by_owner: true, revoked_at: "2026-01-01T00:00:00Z" }), engine)
+    ).toBeNull();
+  });
+
+  it("ranks the owner's pause, then the automatic pause, then the sign-in state", () => {
+    const paused = { ...online, engine_paused_by_owner: true, engine_auto_pause_reason: "wallet_empty" };
+    expect(pidashAgentState(machine(paused), engine)?.label).toBe("Pi Dash Agent paused by you");
+    expect(pidashAgentState(machine({ ...paused, engine_paused_by_owner: false }), engine)?.label).toBe(
+      "Pi Dash Agent paused: wallet is empty"
+    );
+    expect(pidashAgentState(machine({ ...online, engine_auto_pause_reason: "brand_new" }), engine)?.label).toBe(
+      "Pi Dash Agent paused: brand_new"
+    );
+    expect(pidashAgentState(machine({ ...online, engine_paused_by_owner: false }), engine)).toEqual({
+      label: "Pi Dash Agent available",
+      tone: "success",
+    });
+  });
+
+  it("reads an offline machine's engine as unavailable", () => {
+    expect(
+      pidashAgentState(machine({ engine_paused_by_owner: false, engine_sign_in_state: "active" }), engine)
+    ).toEqual({
+      label: "Pi Dash Agent unavailable",
+      tone: "neutral",
+    });
+    expect(pidashAgentState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe(
+      "Pi Dash Agent signed out"
+    );
+  });
+
+  it("uses connection and pause state for legacy desktops without engine credentials", () => {
+    const legacy = { provisioning: "desktop_bundled", engine_sign_in_state: "never" };
+    expect(pidashAgentState(machine({ ...legacy, ...online }), engine)?.label).toBe("Pi Dash Agent available");
+    expect(pidashAgentState(machine(legacy), engine)?.label).toBe("Pi Dash Agent unavailable");
+    expect(pidashAgentState(machine({ ...legacy, ...online, engine_paused_by_owner: true }), engine)?.label).toBe(
+      "Pi Dash Agent paused by you"
+    );
+    expect(
+      pidashAgentState(machine({ ...legacy, ...online, engine_auto_pause_reason: "wallet_empty" }), engine)?.label
+    ).toBe("Pi Dash Agent paused: wallet is empty");
+  });
+
+  it("reads the sign-in state with its expiry", () => {
+    const at = { ...online, engine_credential_expires_at: "2026-11-07T00:00:00Z" };
+    expect(pidashAgentState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(
+      "Pi Dash Agent expiring on Nov 7"
+    );
+    const read = (state: string) =>
+      pidashAgentState(machine({ ...online, engine_sign_in_state: state }), engine)?.label;
+    expect(read("expiring")).toBe("Pi Dash Agent sign-in expiring");
+    expect(read("signed_out")).toBe("Pi Dash Agent signed out");
+    expect(read("expired")).toBe("Pi Dash Agent sign-in expired");
+    expect(read("never")).toBe("Pi Dash Agent not signed in");
+    expect(read("active")).toBe("Pi Dash Agent available");
+  });
+});
+
+describe("machineSettings", () => {
+  const engine = { hasPidashAgent: true };
+  it("offers each engine control only when its field is reported", () => {
+    expect(machineSettings(machine(), engine)).toEqual({
+      rename: true,
+      pause: false,
+      teamRuns: false,
+    });
+    expect(machineSettings(machine({ engine_paused_by_owner: false, engine_team_runs: true }), engine)).toEqual({
+      rename: true,
+      pause: true,
+      teamRuns: true,
+    });
+    expect(
+      machineSettings(machine({ revoked_at: "2026-01-01T00:00:00Z", engine_paused_by_owner: false }), engine)
+    ).toEqual({
+      rename: false,
+      pause: false,
+      teamRuns: false,
+    });
+  });
+
+  it("hides pause and team runs on a machine with no engine runner", () => {
+    expect(
+      machineSettings(machine({ engine_paused_by_owner: false, engine_team_runs: false }), { hasPidashAgent: false })
+    ).toEqual({ rename: true, pause: false, teamRuns: false });
+  });
+});
+
+describe("replacementCandidate", () => {
+  const live = machine({ id: "new", host_label: "box", control_online: true });
+  it("pairs an offline machine with a live one of the same hostname", () => {
+    const old = machine({ id: "old", host_label: "box" });
+    expect(replacementCandidate(old, [old, live])?.id).toBe("new");
+    expect(machineIsLive(live)).toBe(true);
+  });
+
+  it("skips live, revoked, merged and hostname-less machines and other hosts", () => {
+    const others = [live, machine({ id: "far", host_label: "other", control_online: true })];
+    expect(replacementCandidate(live, others)).toBeNull();
+    expect(replacementCandidate(machine({ id: "a", host_label: "box", revoked_at: "x" }), others)).toBeNull();
+    expect(replacementCandidate(machine({ id: "b", host_label: "box", merged_into: "new" }), others)).toBeNull();
+    expect(replacementCandidate(machine({ id: "c", host_label: "" }), others)).toBeNull();
+    expect(replacementCandidate(machine({ id: "d", host_label: "lonely" }), others)).toBeNull();
+  });
+});
+
+describe("mergedIntoText", () => {
+  it("names the target from the list, else its short id", () => {
+    const rows = [machine({ id: "new-machine-id", label: "new box" })];
+    expect(mergedIntoText(machine({ merged_into: "new-machine-id" }), rows)).toBe("Merged into new box");
+    expect(mergedIntoText(machine({ merged_into: "abcdef0123" }), rows)).toBe("Merged into abcdef01");
+    expect(mergedIntoText(machine(), rows)).toBeNull();
+  });
+});
+
+describe("runnersByMachine", () => {
+  it("groups live runners by machine, engines apart from own agents", () => {
+    const rows = [
+      { id: "e", dev_machine: "m1", provisioning: "desktop_bundled", revoked_at: null },
+      { id: "a", dev_machine: "m1", provisioning: "manual", revoked_at: null },
+      { id: "gone", dev_machine: "m1", provisioning: "desktop_bundled", revoked_at: "2026-01-01T00:00:00Z" },
+      { id: "z", dev_machine: null, provisioning: "manual", revoked_at: null },
+    ] as unknown as Runner[];
+    const grouped = runnersByMachine(rows);
+    expect(grouped.get("m1")?.engines.map((row) => row.id)).toEqual(["e"]);
+    expect(grouped.get("m1")?.ownAgents.map((row) => row.id)).toEqual(["a"]);
+    expect(grouped.size).toBe(1);
   });
 });

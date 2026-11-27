@@ -124,7 +124,7 @@ def test_corpus_manifests_valid():
             )
         for task, issue in (sess.known_absent_jobs or {}).items():
             assert "." in task, f"{sess.name}: bad pinned task {task!r}"
-            assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+            assert re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", issue), (
                 f"{sess.name}: pinned {task} must name its fix issue"
             )
         for entry in sess.db_cell_refs or []:
@@ -142,7 +142,7 @@ def test_corpus_manifests_valid():
                     isinstance(entry, (list, tuple))
                     and len(entry) == 3
                     and re.fullmatch(r"[a-z_]+", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and isinstance(entry[2], dict)
                     and entry[2]
                 ), f"{sess.name}: bad {field_name} {entry!r}"
@@ -153,7 +153,7 @@ def test_corpus_manifests_valid():
                 isinstance(entry, (list, tuple))
                 and len(entry) == 6
                 and re.fullmatch(r"[a-z_]+", entry[0])
-                and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                 and isinstance(entry[2], dict)
                 and entry[2]
                 and re.fullmatch(r"[a-z_]+", entry[3])
@@ -183,7 +183,7 @@ def test_corpus_manifests_valid():
                         isinstance(ref, (list, tuple))
                         and len(ref) == 4
                         and (ref[0].startswith("args/") or ref[0].startswith("kwargs/"))
-                        and re.fullmatch(r"PIDASHCONV-\d+", ref[1])
+                        and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", ref[1])
                         and ref[2] != ref[3]
                     ), f"{sess.name}: bad value diff {ref!r} for {task} ({owner})"
         # Pin values render as templates: every placeholder must be a
@@ -287,7 +287,7 @@ def test_corpus_manifests_valid():
                     isinstance(entry, (list, tuple))
                     and len(entry) == 4
                     and "." in entry[0]
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and isinstance(entry[2], dict)
                     and entry[2]
                     and isinstance(entry[3], dict)
@@ -296,15 +296,25 @@ def test_corpus_manifests_valid():
                 ), f"{label}: bad known job shape {entry!r}"
             for task, issue in (req.known_absent_jobs or {}).items():
                 assert "." in task, f"{label}: bad pinned task {task!r}"
-                assert re.fullmatch(r"PIDASHCONV-\d+", issue), (
+                assert re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", issue), (
                     f"{label}: pinned {task} must name its fix issue"
                 )
+            for entry in req.known_django_extra_jobs or []:
+                assert (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 3
+                    and "." in entry[0]
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
+                    and isinstance(entry[2], dict)
+                    and entry[2]
+                    and entry[2].get("task") == entry[0]
+                ), f"{label}: bad known django extra job {entry!r}"
             for entry in req.known_headers or []:
                 assert (
                     isinstance(entry, (list, tuple))
                     and len(entry) == 4
                     and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and (entry[2] is None or isinstance(entry[2], str))
                     and (entry[3] is None or isinstance(entry[3], str))
                     and entry[2] != entry[3]
@@ -315,7 +325,7 @@ def test_corpus_manifests_valid():
                     and len(entry) == 4
                     and isinstance(entry[0], str)
                     and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[0])
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[1])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[1])
                     and entry[2] != entry[3]
                 ), f"{label}: bad known body diff {entry!r}"
             for entry in req.known_body_aliases or []:
@@ -327,7 +337,7 @@ def test_corpus_manifests_valid():
                     and isinstance(entry[1], str)
                     and re.fullmatch(r"[^/ ]+(/([^/ ]+))*", entry[1])
                     and entry[0] != entry[1]
-                    and re.fullmatch(r"PIDASHCONV-\d+", entry[2])
+                    and re.fullmatch(r"(PIDASHCONV|NEWPIDASH|PDASHOSS01)-\d+", entry[2])
                 ), f"{label}: bad known body alias {entry!r}"
             for entry in req.body_contains or []:
                 assert (
@@ -647,6 +657,97 @@ def test_blank_process_logs_echo_mirrors_body_blanks():
     freed = compare._blank_process_logs_echo(kwargs, free)
     assert freed["log_data"]["response_body"] == effects.VOLATILE_PLACEHOLDER
     assert freed["mongo_log"]["response_body"] == effects.VOLATILE_PLACEHOLDER
+
+
+def _process_logs_pair(tok_id, apikey_val, body, resp, host_port):
+    """One process_logs payload in the Django str(dict) headers shape."""
+    hdrs = (
+        "{'Content-Length': '41', 'Content-Type': 'application/json', "
+        f"'Host': '127.0.0.1:{host_port}', 'X-Api-Key': '{apikey_val}', "
+        "'X-Foo': 'visible', 'User-Agent': 'httpx/0.28'}"
+    )
+    section = {
+        "token_identifier": tok_id,
+        "path": "/api/x/",
+        "method": "POST",
+        "query_params": "",
+        "headers": hdrs,
+        "body": body,
+        "response_body": resp,
+        "response_code": 201,
+        "ip_address": "127.0.0.1",
+        "user_agent": "httpx/0.28",
+    }
+    return {"log_data": dict(section), "mongo_log": dict(section)}
+
+
+def _process_logs_normalise(kwargs, side):
+    """Full process_logs normalisation chain, as the normalisers run it."""
+    from . import compare
+
+    ctx = compare.CompareContext()
+    kwargs = compare._blank_topology_hosts(kwargs)
+    kwargs = compare._sub_process_logs_scalars(kwargs, {})
+    kwargs = compare._blank_process_logs_echo(kwargs, ctx)
+    return compare._canonical_process_logs_diff20(kwargs, side)
+
+
+def test_canonical_process_logs_diff20_equalises_fixed_vs_old():
+    """DIFF-20: Django-raw and Rust hashed/redacted/None compare equal."""
+    import hashlib
+
+    from . import compare
+    from . import effects
+
+    tok = "mt_" + "a" * 43
+    hashed = hashlib.sha256(tok.encode()).hexdigest()[:32]
+    assert compare._is_hashed_token_id(hashed)
+    assert not compare._is_hashed_token_id(tok)
+    dj = _process_logs_normalise(
+        _process_logs_pair(tok, tok, '{"t": 1}', '{"id": "x"}', 18223), "django"
+    )
+    rs = _process_logs_normalise(
+        _process_logs_pair(hashed, "[REDACTED]", None, None, 18225), "rust"
+    )
+    assert dj == rs
+    # Non-sensitive headers still compare strictly.
+    assert "'X-Foo': 'visible'" in dj["log_data"]["headers"]
+    assert "'Content-Type': 'application/json'" in dj["log_data"]["headers"]
+    # Sensitive values are redacted on both sides; token ids blanked.
+    assert "'X-Api-Key': '[REDACTED]'" in dj["log_data"]["headers"]
+    assert tok not in dj["log_data"]["headers"]
+    assert dj["log_data"]["token_identifier"] == effects.VOLATILE_PLACEHOLDER
+    assert rs["log_data"]["token_identifier"] == effects.VOLATILE_PLACEHOLDER
+    assert dj["log_data"]["body"] == effects.VOLATILE_PLACEHOLDER
+    assert dj["log_data"]["response_body"] == effects.VOLATILE_PLACEHOLDER
+    assert dj == rs
+
+
+def test_canonical_process_logs_diff20_fails_loudly_on_leak():
+    """A Rust raw key (or fixed Django) must not normalise to a match."""
+    import hashlib
+
+    from . import compare
+
+    tok = "mt_" + "b" * 43
+    hashed = hashlib.sha256(tok.encode()).hexdigest()[:32]
+    dj = _process_logs_normalise(
+        _process_logs_pair(tok, tok, '{"t": 1}', '{"id": "x"}', 18223), "django"
+    )
+    # Rust storing the raw key again: left in place, still diverges.
+    rs_raw = _process_logs_normalise(
+        _process_logs_pair(tok, tok, '{"t": 1}', '{"id": "x"}', 18225), "rust"
+    )
+    assert rs_raw != dj
+    assert rs_raw["log_data"]["token_identifier"] == tok
+    # Django already hashed (PDASHOSS01-371 landed): left in place.
+    dj_hashed = _process_logs_normalise(
+        _process_logs_pair(hashed, "[REDACTED]", None, None, 18223), "django"
+    )
+    assert dj_hashed["log_data"]["token_identifier"] == hashed
+    assert compare._canonical_process_logs_diff20(
+        {"log_data": {"token_identifier": None}, "mongo_log": {}}, "rust"
+    ) == {"log_data": {"token_identifier": None}, "mongo_log": {}}
 
 
 def test_sub_header_tokens_only_long_values():
@@ -1002,6 +1103,42 @@ def test_known_job_shapes_share_task_and_consume_one_each():
     assert compare.compare_jobs(dj, extra, known_shapes=pins) is not None
 
 
+def test_known_django_extra_jobs_consume_one_each():
+    """A one-sided Django pin excuses exactly the Django surplus, nothing else."""
+    from . import compare
+
+    task = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+
+    def job(model):
+        return {
+            "task": task,
+            "args": ["db", model, "{row:x}"],
+            "kwargs": {"using": None},
+            "eta": None,
+            "retries": 0,
+            "queue": "celery",
+        }
+
+    generic = job("gitcodereviewlink")
+    legacy = job("githubpullrequestlink")
+    dj = [generic, legacy]
+    rs = [generic]
+    pin = [(task, "NEWPIDASH-229", dict(legacy))]
+    # The Django surplus is excused; the shared generic job still compares.
+    assert compare.compare_jobs(dj, rs, django_extra=pin) is None
+    # Unpinned, the same pair fails.
+    assert compare.compare_jobs(dj, rs) is not None
+    # Rust emitting the legacy job too leaves a rust-only leftover: loud.
+    assert compare.compare_jobs(dj, rs + [legacy], django_extra=pin) is not None
+    # Django stopping emitting it breaks the pin loudly.
+    error = compare.compare_jobs([generic], rs, django_extra=pin)
+    assert error is not None and "NEWPIDASH-229" in error
+    # Bytes changed on Django breaks the pin loudly.
+    changed = [generic, {**legacy, "args": ["db", "githubpullrequestlink", "other"]}]
+    error = compare.compare_jobs(changed, rs, django_extra=pin)
+    assert error is not None and "NEWPIDASH-229" in error
+
+
 def test_known_cell_diff_blanks_exact_and_fails_on_change():
     """Cell pins excuse one cell of matched rows, nothing else."""
     from . import compare
@@ -1278,6 +1415,83 @@ def test_encrypted_columns_decrypt_flagged_rows_only():
         compare.normalise_snapshot(seed, "django", tuned)[table][0]["value"]
         == "old"
     )
+
+
+def test_process_logs_time_paths_blank_stamps_but_keep_null():
+    """process_logs mongo_log now() stamps blank; null/garbage still fail.
+
+    NEWPIDASH-58: both backends mint their own now (Django
+    microseconds, Rust seconds), so the corpus blanks the two stamps
+    via payload_time_paths. auth_engine_grant failed req7 without
+    the map even though auth_device_lifecycle carried it.
+    """
+    from datetime import datetime, timezone
+
+    from . import compare
+
+    start = datetime(2026, 11, 6, 18, 26, 15, tzinfo=timezone.utc)
+    paths = ["kwargs/mongo_log/created_at", "kwargs/mongo_log/updated_at"]
+    dj = {"kwargs": {"mongo_log": {
+        "created_at": "2026-11-06T18:26:15.356039+00:00",
+        "updated_at": "2026-11-06T18:26:15.356042+00:00",
+    }}}
+    rs = {"kwargs": {"mongo_log": {
+        "created_at": "2026-11-06T18:26:15+00:00",
+        "updated_at": "2026-11-06T18:26:15+00:00",
+    }}}
+    assert compare._blank_time_paths(dj, paths, start) == {
+        "kwargs": {"mongo_log": {
+            "created_at": effects.VOLATILE_PLACEHOLDER,
+            "updated_at": effects.VOLATILE_PLACEHOLDER,
+        }},
+    }
+    assert compare._blank_time_paths(rs, paths, start) == {
+        "kwargs": {"mongo_log": {
+            "created_at": effects.VOLATILE_PLACEHOLDER,
+            "updated_at": effects.VOLATILE_PLACEHOLDER,
+        }},
+    }
+    # A missing stamp (null vs stamped) is left in place and fails.
+    assert compare._blank_time_paths(
+        {"kwargs": {"mongo_log": {"created_at": None}}}, paths, start
+    ) == {"kwargs": {"mongo_log": {"created_at": None}}}
+    # Garbage timestamps are left in place and fail loudly.
+    assert compare._blank_time_paths(
+        {"kwargs": {"mongo_log": {"created_at": "1970-01-01T00:00:00+00:00"}}},
+        paths,
+        start,
+    ) == {"kwargs": {"mongo_log": {"created_at": "1970-01-01T00:00:00+00:00"}}}
+    # The engine-grant session carries the map (regression pin).
+    by_name = {sess.name: sess for sess in ALL_SESSIONS}
+    grant = by_name["auth_engine_grant"].payload_time_paths
+    assert grant.get("pi_dash.bgtasks.logger_task.process_logs") == [
+        "kwargs/mongo_log/created_at",
+        "kwargs/mongo_log/updated_at",
+    ]
+
+
+def test_runner_web_patch_deleted_runner_pins_404():
+    """PATCH on a deleted runner pins 404 (lookup precedes validation).
+
+    NEWPIDASH-58 (run 42446993323 req56): the owner-engine-controls
+    request PATCHes rdel_id with an invalid pod_dispatch and expected
+    400, but Django looks the runner up first and answers 404
+    {"error":"not found"} because the runner was deleted earlier in
+    the session (the DELETE request above). Rust does the same
+    (manage.rs runner_patch calls get_runner before reading the
+    body), so 404 is the only correct expectation.
+    """
+    by_name = {sess.name: sess for sess in ALL_SESSIONS}
+    sess = by_name["runner_web_lifecycle"]
+    matches = [
+        r
+        for r in sess.requests
+        if r.method == "PATCH"
+        and "rdel_id" in r.path
+        and r.json == {"pod_dispatch": "sometimes"}
+    ]
+    assert matches, "no pod_dispatch probe on rdel_id found"
+    assert all(r.expect_status == 404 for r in matches)
 
 
 def test_reasons_shape():

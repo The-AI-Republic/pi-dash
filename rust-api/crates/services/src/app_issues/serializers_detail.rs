@@ -21,7 +21,7 @@
 //!   [`effective_interval_seconds`](crate::orchestration::clock) over the
 //!   caller's [`ProjectClockPolicy`](crate::orchestration::clock).
 //! * `can_re_tick` calls the merged D-12
-//!   [`is_ticking_state`](pidash_types::orchestration) (PIDASHCONV-545) and
+//!   [`stage_runs_automatically`](pidash_types::orchestration) (PIDASHCONV-545) and
 //!   [`is_paused_state`](crate::orchestration::clock) (PIDASHCONV-580).
 //! * The blocker fields select out of the merged D-12
 //!   [`RelationsSummary`](crate::orchestration::blockers) (PIDASHCONV-561).
@@ -86,9 +86,11 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use pidash_db::tasks_ticker::IssueAgentTicker;
-use pidash_types::orchestration::{is_ticking_state, StateRef};
-use pidash_types::runner_runs::{classify_run_error, flat_token_fields, RunErrorDiagnostic};
+use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
+use pidash_types::orchestration::{stage_runs_automatically, StateRef};
+use pidash_types::runner_runs::{
+    classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
+};
 
 use super::serializers_links::{user_lite_to_representation, UserLiteRow, UserLiteView};
 use super::serializers_refs::{
@@ -125,9 +127,9 @@ pub fn serialize_drf_datetime(value: DateTime<Utc>) -> String {
 }
 
 /// App `IssueSerializer` wire keys (`issue.py:1071-1103`), in
-/// `Meta.fields` order: the 31-key base every detail response starts with.
-/// Count the list: 31.
-pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 31] = [
+/// `Meta.fields` order: the 32-key base every detail response starts with.
+/// Count the list: 32.
+pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -145,7 +147,9 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 31] = [
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -161,9 +165,11 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 31] = [
     "is_synced",
 ];
 
-/// An `Issue` row for the 31-key base shape (`db/models/issue.py:115-229`):
+/// An `Issue` row for the 32-key base shape (`db/models/issue.py:115-229`,
+/// plus `assigned_runner_id` from the dedicated-runner design §14.1):
 /// `state_id` / `estimate_point` / `parent_id` / `type_id` /
-/// `assigned_pod_id` / `created_by` / `updated_by` render FK ids or `None`;
+/// `assigned_pod_id` / `assigned_runner_id` / `created_by` / `updated_by`
+/// render FK ids or `None`;
 /// the `*_id` attnames are DRF property-fallback `ReadOnlyField`s (same
 /// rule as the label port); datetimes are pre-rendered DRF strings;
 /// `archived_at` is a `DateField`; `is_synced` is the merged
@@ -195,7 +201,9 @@ pub struct IssueDetailBaseRow<'a> {
     pub type_id: Option<&'a str>,
     pub is_epic: bool,
     pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub module_ids: Option<Vec<&'a str>>,
     pub label_ids: Option<Vec<&'a str>>,
     pub assignee_ids: Option<Vec<&'a str>>,
@@ -238,7 +246,9 @@ pub struct IssueDetailBaseView<'a> {
     pub type_id: Option<&'a str>,
     pub is_epic: bool,
     pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_ids: Option<Vec<&'a str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,7 +293,9 @@ pub fn issue_detail_base_to_representation<'a>(
         type_id: row.type_id,
         is_epic: row.is_epic,
         assigned_pod_id: row.assigned_pod_id,
+        assigned_runner_id: row.assigned_runner_id,
         agent_executor: row.agent_executor,
+        work_type: row.work_type,
         module_ids: row.module_ids.clone(),
         label_ids: row.label_ids.clone(),
         assignee_ids: row.assignee_ids.clone(),
@@ -344,8 +356,9 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and cap_reached`,
-/// `:1296`) and the stage interval. Pool math, predicates and interval all
+/// `can_re_tick` (`(stage_runs_automatically or is_paused_state) and
+/// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
+/// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
 pub fn agent_ticker_to_representation<'a>(
     ticker: &'a IssueAgentTicker,
@@ -353,10 +366,24 @@ pub fn agent_ticker_to_representation<'a>(
     state: Option<&StateRef<'_>>,
 ) -> AgentTickerView<'a> {
     let pool = pool_size(policy);
+    // Besides a spent pool, the failure policy's stops (needs-human /
+    // repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+    // the clock without granting, mirroring `_on_retick`.
+    let failure_stopped = !ticker.enabled
+        && ticker
+            .disarm_reason
+            .parse::<TickerDisarmReason>()
+            .is_ok_and(TickerDisarmReason::is_failure_stop);
+    let ticking = stage_runs_automatically(state, policy.stage_switches());
     let can_re_tick =
-        (is_ticking_state(state) || is_paused_state(state)) && ticker.cap_reached(pool);
+        (ticking || is_paused_state(state)) && (ticker.cap_reached(pool) || failure_stopped);
+    // A stage the project switched off keeps its ticker armed, but every
+    // tick there is skipped (lean workflow §6.4): show no next-tick time.
+    let stage_off = pidash_types::orchestration::phase_config_for(state).is_some() && !ticking;
     AgentTickerView {
-        enabled: ticker.enabled,
+        // A switched-off stage keeps the row armed but never runs there:
+        // report the clock as not running, so the UI shows no armed clock.
+        enabled: ticker.enabled && !stage_off,
         user_disabled: ticker.user_disabled,
         used: ticker.used,
         tick_count: ticker.used,
@@ -365,7 +392,10 @@ pub fn agent_ticker_to_representation<'a>(
         max_ticks: ticker.effective_max_ticks(pool),
         remaining: ticker.remaining(pool),
         interval_seconds: effective_interval_seconds(state, policy),
-        next_run_at: ticker.next_run_at.map(serialize_iso_datetime),
+        next_run_at: ticker
+            .next_run_at
+            .filter(|_| !stage_off)
+            .map(serialize_iso_datetime),
         last_tick_at: ticker.last_tick_at.map(serialize_iso_datetime),
         disarm_reason: ticker.disarm_reason.as_str(),
         pending_entry: ticker.pending_entry,
@@ -462,8 +492,10 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 18.
-pub const AGENT_RUN_FIELDS: [&str; 18] = [
+/// 21 (`failure_reason` since PDASHOSS01-183; PDASHOSS01-351 adds
+/// `cancel_requested_at` / `cancel_reason` so the issue card can show
+/// Stopping for cloud RUNNING).
+pub const AGENT_RUN_FIELDS: [&str; 21] = [
     "id",
     "status",
     "executor_kind",
@@ -473,9 +505,12 @@ pub const AGENT_RUN_FIELDS: [&str; 18] = [
     "assigned_at",
     "started_at",
     "ended_at",
+    "cancel_requested_at",
+    "cancel_reason",
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "llm_model",
     "input_tokens",
@@ -489,7 +524,8 @@ pub const AGENT_RUN_FIELDS: [&str; 18] = [
 /// `id` / `status` / `executor_kind` (non-null, defaulted),
 /// `runner_id` + the joined
 /// `runner.name`, `created_at` (non-null) + the three nullable stamps,
-/// `done_payload` (nullable JSON), `error` / `error_code` / `llm_model`
+/// `cancel_requested_at` (nullable) + `cancel_reason` (non-null, default
+/// `""`), `done_payload` (nullable JSON), `error` / `error_code` / `llm_model`
 /// (non-null, default `""`), the three generated nullable token bigints —
 /// plus the joined live-state row. Datetimes are pre-rendered `isoformat`
 /// strings.
@@ -504,9 +540,12 @@ pub struct AgentRunDetailRow<'a> {
     pub assigned_at: Option<&'a str>,
     pub started_at: Option<&'a str>,
     pub ended_at: Option<&'a str>,
+    pub cancel_requested_at: Option<&'a str>,
+    pub cancel_reason: &'a str,
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -515,7 +554,8 @@ pub struct AgentRunDetailRow<'a> {
 }
 
 /// `_serialize_agent_run` output (`issue.py:1339-1371`), in dict order.
-/// `error_diagnostic` is the merged `classify_run_error` verdict.
+/// `error_diagnostic` is the merged `classify_run_error(error,
+/// failure_reason=…)` verdict (PDASHOSS01-183).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentRunView<'a> {
     pub id: &'a str,
@@ -527,9 +567,12 @@ pub struct AgentRunView<'a> {
     pub assigned_at: Option<&'a str>,
     pub started_at: Option<&'a str>,
     pub ended_at: Option<&'a str>,
+    pub cancel_requested_at: Option<&'a str>,
+    pub cancel_reason: &'a str,
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
@@ -572,10 +615,13 @@ pub fn agent_run_to_representation<'a>(
         assigned_at: run.assigned_at,
         started_at: run.started_at,
         ended_at: run.ended_at,
+        cancel_requested_at: run.cancel_requested_at,
+        cancel_reason: run.cancel_reason,
         done_payload: run.done_payload,
         error: run.error,
         error_code: run.error_code,
-        error_diagnostic: classify_run_error(Some(run.error)),
+        failure_reason: run.failure_reason,
+        error_diagnostic: classify_run_error_for_reason(Some(run.error), Some(run.failure_reason)),
         llm_model: run.llm_model,
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,
@@ -585,7 +631,13 @@ pub fn agent_run_to_representation<'a>(
 }
 
 /// `get_agent_status` wire keys (`issue.py:1407-1412`), in dict order: 4.
-pub const AGENT_STATUS_FIELDS: [&str; 4] = ["ticker", "active_run", "latest_run", "run_count"];
+pub const AGENT_STATUS_FIELDS: [&str; 5] = [
+    "ticker",
+    "active_run",
+    "latest_run",
+    "run_count",
+    "total_tokens",
+];
 
 /// `get_agent_status` output (`issue.py:1373-1412`), in dict order. The
 /// `ticker` value duplicates the top-level `agent_ticker` block (Python
@@ -596,6 +648,8 @@ pub struct AgentStatusView<'a> {
     pub active_run: Option<AgentRunView<'a>>,
     pub latest_run: Option<AgentRunView<'a>>,
     pub run_count: i64,
+    /// Cumulative tokens over every run of the issue (PDASHOSS01-189).
+    pub total_tokens: i64,
 }
 
 /// Port of `get_agent_status` (`issue.py:1373-1412`).
@@ -603,7 +657,9 @@ pub struct AgentStatusView<'a> {
 /// `ticker` is the already-rendered `agent_ticker` block (or `None` without
 /// a ticker row); `active_run` / `latest_run` are the
 /// runs from [`super::agent_runs::issue_agent_runs`] (or `None` without
-/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`].
+/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`]
+/// and `total_tokens` its
+/// [`super::agent_runs::IssueAgentRuns::total_tokens`].
 /// Returns `None` when the ticker block is `None` and there is no latest
 /// run (`:1404-1405`). The active run always carries live state; the latest
 /// carries it only when there is no active run (`:1410-1411`).
@@ -612,6 +668,7 @@ pub fn agent_status_to_representation<'a>(
     active_run: Option<&'a AgentRunDetailRow<'a>>,
     latest_run: Option<&'a AgentRunDetailRow<'a>>,
     run_count: i64,
+    total_tokens: i64,
 ) -> Option<AgentStatusView<'a>> {
     if ticker.is_none() && latest_run.is_none() {
         return None;
@@ -621,6 +678,7 @@ pub fn agent_status_to_representation<'a>(
         active_run: agent_run_to_representation(active_run, true),
         latest_run: agent_run_to_representation(latest_run, active_run.is_none()),
         run_count,
+        total_tokens,
     })
 }
 
@@ -637,8 +695,10 @@ pub fn has_open_blockers_field(summary: &RelationsSummary) -> bool {
 }
 
 /// `IssueDetailSerializer` wire keys (`issue.py:1237-1245`), in
-/// `Meta.fields` order: the 31 base keys plus the 7 added keys. 38.
-pub const ISSUE_DETAIL_FIELDS: [&str; 38] = [
+/// `Meta.fields` order: the 33 base keys plus the 8 added keys. 41.
+/// (`assigned_runner_id` sits after `assigned_pod_id` in the base keys;
+/// `assigned_runner_detail` is the last key, design §14.1.)
+pub const ISSUE_DETAIL_FIELDS: [&str; 41] = [
     "id",
     "name",
     "state_id",
@@ -656,7 +716,9 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 38] = [
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -677,13 +739,14 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 38] = [
     "agent_status",
     "relations_summary",
     "has_open_blockers",
+    "assigned_runner_detail",
 ];
 
 /// The retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus `is_intake`, which
 /// that view does not annotate, so DRF's `SkipField` omits the key
-/// (`base.py:486-618`). 37. (Archive retrieve is a different, 30-key shape
+/// (`base.py:486-618`). 40. (Archive retrieve is a different, 33-key shape
 /// — see [`ISSUE_DETAIL_ARCHIVE_FIELDS`].)
-pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 37] = [
+pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 40] = [
     "id",
     "name",
     "state_id",
@@ -701,7 +764,9 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 37] = [
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -721,13 +786,14 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 37] = [
     "agent_status",
     "relations_summary",
     "has_open_blockers",
+    "assigned_runner_detail",
 ];
 
 /// The archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus the eight
 /// unannotated keys — the seven annotation-driven base fields plus
 /// `is_intake` — which DRF's `SkipField` omits (`archive.py:222-255`
-/// annotates only `is_subscribed`). 30.
-pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 30] = [
+/// annotates only `is_subscribed`). 33.
+pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -744,7 +810,9 @@ pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 30] = [
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "created_at",
     "updated_at",
     "created_by",
@@ -758,6 +826,7 @@ pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 30] = [
     "agent_status",
     "relations_summary",
     "has_open_blockers",
+    "assigned_runner_detail",
 ];
 
 /// The ticker half of an issue-detail row: the `agent_ticker` row, the
@@ -770,12 +839,14 @@ pub struct AgentTickerInput<'a> {
     pub state: Option<StateRef<'a>>,
 }
 
-/// An issue-detail row: the 31-key base, the two existence annotations
+/// An issue-detail row: the 32-key base, the two existence annotations
 /// (`is_intake` is `None` when the queryset lacks the annotation —
 /// retrieve / archive-retrieve — reproducing the `SkipField` omission),
 /// the ticker input (or `None` without a ticker row), the latest + active
-/// run rows (or `None` without one), the total run count, and the one
-/// cached blocker summary both blocker fields select out of.
+/// run rows (or `None` without one), the total run count, the one
+/// cached blocker summary both blocker fields select out of, and the
+/// dedicated-runner detail (`None` when the issue is pod-assigned —
+/// design §14.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueDetailRow<'a> {
     pub base: IssueDetailBaseRow<'a>,
@@ -786,11 +857,13 @@ pub struct IssueDetailRow<'a> {
     pub latest_run: Option<AgentRunDetailRow<'a>>,
     pub active_run: Option<AgentRunDetailRow<'a>>,
     pub run_count: i64,
+    pub run_total_tokens: i64,
     pub blockers: &'a RelationsSummary,
+    pub assigned_runner_detail: Option<serde_json::Value>,
 }
 
 /// `IssueDetailSerializer.to_representation` output (`issue.py:1226-1414`),
-/// in `Meta.fields` order. The flattened base keeps its 31 keys first;
+/// in `Meta.fields` order. The flattened base keeps its 32 keys first;
 /// `is_intake` is skipped when the row lacks the annotation.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueDetailView<'a> {
@@ -804,6 +877,9 @@ pub struct IssueDetailView<'a> {
     pub agent_status: Option<AgentStatusView<'a>>,
     pub relations_summary: &'a RelationDirections,
     pub has_open_blockers: bool,
+    /// Dedicated-runner detail (design §14.1, H-6): always emitted,
+    /// `null` when the issue is pod-assigned.
+    pub assigned_runner_detail: serde_json::Value,
 }
 
 /// Port of `IssueDetailSerializer` (`issue.py:1226-1414`). The ticker block
@@ -818,6 +894,7 @@ pub fn issue_detail_to_representation<'a>(row: &'a IssueDetailRow<'a>) -> IssueD
         row.active_run.as_ref(),
         row.latest_run.as_ref(),
         row.run_count,
+        row.run_total_tokens,
     );
     IssueDetailView {
         base: issue_detail_base_to_representation(&row.base),
@@ -828,6 +905,10 @@ pub fn issue_detail_to_representation<'a>(row: &'a IssueDetailRow<'a>) -> IssueD
         agent_status,
         relations_summary: relations_summary_field(row.blockers),
         has_open_blockers: has_open_blockers_field(row.blockers),
+        assigned_runner_detail: row
+            .assigned_runner_detail
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -1085,7 +1166,7 @@ pub const ERROR_DIAGNOSTIC_FIELDS: [&str; 5] =
 /// The eight `AgentRunStatus` values that gate the active run
 /// (`issue.py:1386-1402`): `WAITING_FOR_WORKTREE` is retired but historical
 /// rows still gate. Each literal equals the merged
-/// `pidash_db::dispatch::AgentRunStatus` value (pinned by test).
+/// `pidash_db::agent_runs::AgentRunStatus` value (pinned by test).
 pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
     "queued",
     "assigned",
@@ -1100,8 +1181,9 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::dispatch::AgentRunStatus;
+    use pidash_db::agent_runs::AgentRunStatus;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker as TickerRowCheck;
+    use pidash_types::runner_runs::classify_run_error;
 
     fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
         let rendered = serde_json::to_string(value).expect("serializes");
@@ -1166,7 +1248,9 @@ mod tests {
             type_id: Some(TYPE),
             is_epic: true,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: Some(vec![]),
             label_ids: Some(vec![]),
             assignee_ids: Some(vec![USER]),
@@ -1217,6 +1301,7 @@ mod tests {
             agent_default_interval_seconds: Some(7200),
             agent_review_default_interval_seconds: None,
             agent_test_default_interval_seconds: None,
+            ..Default::default()
         }
     }
 
@@ -1256,9 +1341,12 @@ mod tests {
             assigned_at: Some("2026-10-03T10:00:01+00:00"),
             started_at: Some("2026-10-03T10:00:02+00:00"),
             ended_at: None,
+            cancel_requested_at: None,
+            cancel_reason: "",
             done_payload: None,
             error: "",
             error_code: "",
+            failure_reason: "",
             llm_model: "m",
             input_tokens: Some(100),
             output_tokens: Some(20),
@@ -1273,7 +1361,7 @@ mod tests {
 
     #[test]
     fn base_fields_match_wire_order() {
-        // TRACE: issue.py:1071-1103 (31 keys).
+        // TRACE: issue.py:1071-1103 (32 keys with `assigned_runner_id`).
         assert_eq!(
             serialized_keys(&issue_detail_base_to_representation(&base_row())),
             const_keys(&ISSUE_DETAIL_BASE_FIELDS)
@@ -1291,8 +1379,8 @@ mod tests {
              \"completed_at\":null,\"estimate_point\":null,\"priority\":\"high\",\
              \"complexity_score\":4,\"start_date\":\"2026-10-01\",\"target_date\":null,\
              \"sequence_id\":639,\"project_id\":\"22222222-2222-2222-2222-222222222222\",\
-             \"parent_id\":null,\"cycle_id\":null,\"type_id\":\"77777777-7777-7777-7777-777777777777\",\"is_epic\":true,\"assigned_pod_id\":null,\
-             \"agent_executor\":null,\"module_ids\":[],\"label_ids\":[],\
+             \"parent_id\":null,\"cycle_id\":null,\"type_id\":\"77777777-7777-7777-7777-777777777777\",\"is_epic\":true,\"assigned_pod_id\":null,\"assigned_runner_id\":null,\
+             \"agent_executor\":null,\"work_type\":null,\"module_ids\":[],\"label_ids\":[],\
              \"assignee_ids\":[\"44444444-4444-4444-4444-444444444444\"],\
              \"sub_issues_count\":2,\"created_at\":\"2026-10-02T21:42:34.824827Z\",\
              \"updated_at\":\"2026-10-04T03:57:29.850339Z\",\
@@ -1303,7 +1391,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_identifier_has_38_keys() {
+    fn detail_identifier_has_40_keys() {
         // TRACE: issue.py:1237-1245; base.py:1436-1445 (is_intake annotated).
         let summary = empty_summary();
         let row = IssueDetailRow {
@@ -1315,7 +1403,9 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
+            assigned_runner_detail: None,
         };
         assert_eq!(
             serialized_keys(&issue_detail_to_representation(&row)),
@@ -1326,7 +1416,7 @@ mod tests {
     #[test]
     fn detail_retrieve_omits_is_intake() {
         // TRACE: the ported SkipField bug — retrieve (base.py:486-618) does
-        // not annotate is_intake, so the key is absent (37 keys), while
+        // not annotate is_intake, so the key is absent (39 keys), while
         // identifier renders it (even false). Archive retrieve omits eight
         // keys, not one — see detail_archive_has_30_keys.
         let summary = empty_summary();
@@ -1339,7 +1429,9 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
+            assigned_runner_detail: None,
         };
         let view = issue_detail_to_representation(&row);
         assert_eq!(
@@ -1372,10 +1464,10 @@ mod tests {
     }
 
     #[test]
-    fn detail_archive_has_30_keys() {
+    fn detail_archive_has_32_keys() {
         // TRACE: archive.py:222-255 — archive retrieve annotates only
         // is_subscribed, so the seven annotation-driven base fields plus
-        // is_intake skip (30 keys). Proves skip-inside-flatten shrinks the
+        // is_intake skip (32 keys). Proves skip-inside-flatten shrinks the
         // outer key set.
         let summary = empty_summary();
         let mut base = base_row();
@@ -1395,7 +1487,9 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &summary,
+            assigned_runner_detail: None,
         };
         let view = issue_detail_to_representation(&row);
         assert_eq!(
@@ -1471,6 +1565,63 @@ mod tests {
     }
 
     #[test]
+    fn ticker_cannot_re_tick_in_a_switched_off_stage() {
+        // Lean workflow §6: Re-tick only applies where runs happen
+        // automatically; a stage switched off is a label.
+        let capped = ticker_row(10, 0, 0);
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let test = StateRef {
+            group: "test",
+            name: "In Test",
+        };
+        let on = policy();
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&test)).can_re_tick);
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        assert!(!agent_ticker_to_representation(&capped, &review_off, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &review_off, Some(&test)).can_re_tick);
+    }
+
+    #[test]
+    fn ticker_hides_the_next_tick_in_a_switched_off_stage() {
+        let row = ticker_row(3, 0, 0);
+        assert!(row.next_run_at.is_some());
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let on = agent_ticker_to_representation(&row, &policy(), Some(&review));
+        assert!(on.next_run_at.is_some());
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        let off = agent_ticker_to_representation(&row, &review_off, Some(&review));
+        assert_eq!(off.next_run_at, None);
+        assert!(
+            !off.enabled,
+            "reported as not running while the stage is off"
+        );
+        assert!(row.enabled, "the row itself stays armed");
+        // Not a stage at all: unchanged behaviour.
+        let done = StateRef {
+            group: "completed",
+            name: "Done",
+        };
+        assert!(
+            agent_ticker_to_representation(&row, &review_off, Some(&done))
+                .next_run_at
+                .is_some()
+        );
+    }
+
+    #[test]
     fn run_replays_bytes_with_diagnostic_and_live_state() {
         // TRACE: issue.py:1352-1371; unknown-error fallback; canonical usage
         // keys; observed id equal to the run id keeps the block.
@@ -1490,8 +1641,9 @@ mod tests {
              \"created_at\":\"2026-10-03T10:00:00+00:00\",\
              \"assigned_at\":\"2026-10-03T10:00:01+00:00\",\
              \"started_at\":\"2026-10-03T10:00:02+00:00\",\"ended_at\":null,\
+             \"cancel_requested_at\":null,\"cancel_reason\":\"\",\
              \"done_payload\":{\"signal\":\"done\"},\"error\":\"boom\\nsecond line\",\
-             \"error_code\":\"E1\",\"error_diagnostic\":{\"source\":\"unknown\",\
+             \"error_code\":\"E1\",\"failure_reason\":\"\",\"error_diagnostic\":{\"source\":\"unknown\",\
              \"source_label\":\"Unknown\",\"kind\":\"unknown\",\"summary\":\"boom\",\
              \"action\":\"\"},\"llm_model\":\"m\",\"input_tokens\":100,\
              \"output_tokens\":20,\"total_tokens\":120,\
@@ -1549,10 +1701,12 @@ mod tests {
         // TRACE: issue.py:1404-1405 (None iff no ticker and no latest);
         // :1410-1411 (latest carries live state iff no active run).
         let usage = serde_json::json!({});
-        assert!(agent_status_to_representation(None, None, None, 0).is_none());
+        assert!(agent_status_to_representation(None, None, None, 0, 0).is_none());
 
         let latest = run_row(RUN, "completed", Some(live_row(Some(RUN), &usage)));
-        let status = agent_status_to_representation(None, None, Some(&latest), 1).expect("renders");
+        let status =
+            agent_status_to_representation(None, None, Some(&latest), 1, 12_800).expect("renders");
+        assert_eq!(status.total_tokens, 12_800);
         assert_eq!(serialized_keys(&status), const_keys(&AGENT_STATUS_FIELDS));
         assert!(status.ticker.is_none());
         assert!(status.active_run.is_none());
@@ -1561,8 +1715,8 @@ mod tests {
         assert_eq!(status.run_count, 1);
 
         let active = run_row(RUN, "running", Some(live_row(Some(RUN), &usage)));
-        let status =
-            agent_status_to_representation(None, Some(&active), Some(&latest), 2).expect("renders");
+        let status = agent_status_to_representation(None, Some(&active), Some(&latest), 2, 0)
+            .expect("renders");
         assert!(status
             .active_run
             .expect("active renders")

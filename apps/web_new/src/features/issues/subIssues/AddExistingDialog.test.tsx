@@ -133,12 +133,32 @@ describe("AddExistingDialog", () => {
     const user = userEvent.setup();
     renderDialog();
     await screen.findByRole("option", { name: /First candidate/ });
-    await user.type(screen.getByRole("searchbox", { name: "Search work items" }), "second");
+    const field = screen.getByRole("searchbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "second");
     await waitFor(() =>
       expect(calls.some((call) => call.url.includes("/search-issues/") && call.url.includes("search=second"))).toBe(
         true
       )
     );
+  });
+
+  it("hands the open-time focus to the search field", async () => {
+    stubApi();
+    renderDialog();
+    const field = screen.getByRole("searchbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    stubApi();
+    const user = userEvent.setup();
+    renderDialog();
+    const field = screen.getByRole("searchbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "second");
+    expect(field).toHaveValue("second");
   });
 
   it("takes several rows and posts the chosen ids", async () => {

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Label } from "@pidash/api-client";
 import * as React from "react";
@@ -360,10 +360,15 @@ describe("LabelPicker chip", () => {
     expect(empty.querySelector("svg")).not.toBeNull();
   });
 
-  it("counts the selection in the chip", () => {
+  it("counts the selection in the chip", async () => {
     setup({}, { value: [AID, BID], chip: true, emptyText: "Labels" });
     const chip = screen.getByRole("button", { name: "Labels: 2 selected" });
     expect(chip).toHaveTextContent("2 selected");
-    expect(chip).toHaveAttribute("title", "2 selected");
+    expect(chip).not.toHaveAttribute("title");
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Labels: 2 selected — Tags that group and filter this work item."
+    );
   });
 });

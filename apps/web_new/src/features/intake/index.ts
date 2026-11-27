@@ -155,7 +155,8 @@ export {
   presetDayRange,
   sameDayNextMonth,
   shiftIsoDay,
-  todayUtcIsoDay,
+  timestampToLocalDay,
+  todayLocalIsoDay,
 } from "./lib/dates.js";
 export type { IntakeCustomMode, IntakeDatePresetId, IntakeDateValue } from "./lib/dates.js";
 export { selectIntakeEmptyState } from "./lib/emptyStates.js";

@@ -76,8 +76,12 @@
           "run",
           "tick",
           "unavailable_capabilities",
+          "work_type",
           "workpad_body",
-          "workspace"
+          "workspace",
+          "stages",
+          "handoff",
+          "stage_history"
         ],
         "workpad_body": ""
       },
@@ -126,7 +130,7 @@
       "comment_labels": {
         "agent_bot": "AI agent: Helper (submitted by a@b.c)",
         "agent_human_token": "AI agent: Helper (submitted by H)",
-        "bot_actor": "AI agent: Pi Dash Agent",
+        "bot_actor": "AI agent: Pi Dash Bot",
         "human": "Human: a@b.c",
         "integration": "Integration: GH",
         "none_actor": "Unknown",
@@ -164,8 +168,10 @@
     }
   },
   "fixture_id": "FIX-context",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
-  "notes": [],
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). LEAN-WORKFLOW-C (design .ai_design/lean_agent_workflow/design.md, D13/\u00a710.2): re-based on the Rust implementation; these entries NO LONGER MIRROR Django. build_context.top_keys gained stages, handoff, stage_history (Rust-only context keys).",
+  "notes": [
+    "LEAN-WORKFLOW-C (design .ai_design/lean_agent_workflow/design.md, D13/\u00a710.2): re-based on the Rust implementation; these entries NO LONGER MIRROR Django. build_context.top_keys gained stages, handoff, stage_history."
+  ],
   "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
   "trace": [
     "prompting/context.py:22-69 (description/identifier/ancestor helpers), 72-77 (_MAX_RELATIONSHIP_ITEMS=25), 80-246 (children/related/directional relations + open_blockers), 249-294 (url/actor/comment labels), 297-329 (_comments_section), 332-398 (_humanize_interval/_tick_context), 401-431 (parent payload/run kind), 434-494 (_repo_context/_code_reviews_context), 497-518 (extra_toolsets_vars), 521-643 (build_context), 646-663 (build_scheduler_task_body), 666-718 (build_scheduler_context), 721-731 (_compute_attempt)"

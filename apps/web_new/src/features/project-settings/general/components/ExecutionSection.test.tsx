@@ -2,9 +2,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Execution section (PSET-009): the cadence choice list, the label of an
-// unknown stored executor, the inert policy while ticking is off, and the
-// budget/no-cap edits the form receives.
+// Execution section (PSET-009): the cadence choice list, the runs-on note
+// that replaced the executor picker, the inert policy while ticking is off,
+// and the budget/no-cap edits the form receives.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
@@ -44,7 +44,6 @@ function setup(
       values={{ ...generalFormFrom(stored()), ...form }}
       errors={{}}
       disabled={false}
-      executorOptions={[{ kind: "local_runner", available: true }]}
       onChange={onChange}
       {...rest}
     />
@@ -62,9 +61,11 @@ describe("cadenceChoices", () => {
 });
 
 describe("ExecutionSection", () => {
-  it("shows an unknown stored executor by its stored kind", () => {
-    setup({ form: { executor: "future_runner" } });
-    expect(screen.getByTestId("general-executor")).toHaveTextContent("future_runner");
+  it("explains that work runs on runners instead of offering an executor choice", () => {
+    setup();
+    expect(screen.getByTestId("general-execution-target-note")).toHaveTextContent("default pod");
+    expect(screen.queryByTestId("general-executor-trigger")).not.toBeInTheDocument();
+    expect(screen.queryByText(/cloud agent|desktop agent/i)).not.toBeInTheDocument();
   });
 
   it("leaves the budget and cadence inert while ticking is off without disabling the switch", () => {
@@ -118,5 +119,47 @@ describe("ExecutionSection", () => {
   it("renders an inline budget error", () => {
     setup({ errors: { budget: "The run budget must be at least one" } });
     expect(screen.getByText("The run budget must be at least one")).toBeInTheDocument();
+  });
+
+  it("defaults to Auto with no stage toggles and the helper text", () => {
+    setup();
+    expect(screen.getByTestId("general-stages-mode")).toHaveTextContent("Auto");
+    expect(screen.queryByTestId("general-stages-toggle-trigger")).not.toBeInTheDocument();
+    expect(screen.getByTestId("general-stages")).toHaveTextContent("A stage that is off is only a label.");
+  });
+
+  it("reports a picked mode", async () => {
+    const user = userEvent.setup();
+    const { onChange } = setup();
+    await user.click(screen.getByTestId("general-stages-mode-trigger"));
+    await user.click(screen.getByRole("option", { name: "Customize" }));
+    expect(onChange).toHaveBeenCalledWith({ stagesMode: "custom" });
+  });
+
+  it("toggles In Review and In Test under Customize, never In Progress", () => {
+    const { onChange } = setup({ form: { stagesMode: "custom", reviewStage: true, testStage: false } });
+    expect(screen.getByTestId("general-stages-enabled")).toHaveTextContent("In Progress, In Review");
+    // fireEvent drives the real click path (see the kit Menu suite).
+    fireEvent.click(screen.getByTestId("general-stages-toggle-trigger"));
+    const progress = screen.getByRole("menuitem", { name: /In Progress/ });
+    expect(progress).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("menuitem", { name: /In Review/ }));
+    expect(onChange).toHaveBeenCalledWith({ reviewStage: false });
+    fireEvent.click(screen.getByRole("menuitem", { name: /In Test/ }));
+    expect(onChange).toHaveBeenCalledWith({ testStage: true });
+    expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ stagesMode: expect.anything() }));
+  });
+
+  it("keeps the Stages block usable while automated runs are off", () => {
+    // A person moving a work item into a stage still starts one run then.
+    setup({ form: { ticking: false, stagesMode: "custom" } });
+    expect(screen.getByTestId("general-stages-mode-trigger")).not.toBeDisabled();
+    expect(screen.getByTestId("general-stages-toggle-trigger")).not.toBeDisabled();
+  });
+
+  it("disables the Stages block for someone who cannot edit", () => {
+    setup({ disabled: true, form: { stagesMode: "custom" } });
+    expect(screen.getByTestId("general-stages-mode-trigger")).toBeDisabled();
+    expect(screen.getByTestId("general-stages-toggle-trigger")).toBeDisabled();
   });
 });

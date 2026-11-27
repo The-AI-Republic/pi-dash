@@ -24,8 +24,16 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use sqlx::postgres::PgRow;
-use sqlx::Row;
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Select,
+};
+
+use crate::entity::{
+    issue_assignees, issue_subscribers, issues, project_members, projects, states,
+    workspace_members, workspaces,
+};
+use crate::orm_tx;
 
 // ---------------------------------------------------------------------------
 // Issue querysets
@@ -131,42 +139,107 @@ pub fn user_issues_sql(scope: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct IssueIdRow {
+    id: uuid::Uuid,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct RoleRow {
+    role: i16,
+}
+
+/// The relations the Django traversals render. `issue_subscribers`
+/// from the issue side is an omitted entity relation, spelled as the
+/// bridge prescribes.
+fn subscribers_relation() -> sea_orm::RelationDef {
+    issue_subscribers::Entity::belongs_to(issues::Entity)
+        .from(issue_subscribers::Column::IssueId)
+        .to(issues::Column::Id)
+        .into()
+}
+
+/// The member-project scope shared by all four querysets: the
+/// [`MEMBER_PROJECT_ISSUES_SQL`] projection, joins and manager scope
+/// (`db/models/issue.py:95-104`), verbatim — including the
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)` NULL
+/// subtlety (stateless issues are included).
+fn member_scope_statement(user_id: uuid::Uuid, workspace_slug: &str) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([issues::Column::Id, issues::Column::CreatedAt])
+        .distinct()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(Condition::not(
+            Condition::all()
+                .add(states::Column::Group.eq("triage"))
+                .add(states::Column::Group.is_not_null()),
+        ))
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .order_by_desc(issues::Column::CreatedAt)
+}
+
 /// Issue ids in member projects, newest-first
 /// (`core/querysets.py:19-30`).
-pub async fn fetch_member_project_issue_ids<'e, E>(
-    ex: E,
+///
+/// Takes a [`ConnectionTrait`] (the pool connection or a
+/// transaction-held [`TxConn`](crate::orm_tx::TxConn)).
+pub async fn fetch_member_project_issue_ids(
+    db: &impl ConnectionTrait,
     user_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Vec<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(MEMBER_PROJECT_ISSUES_SQL)
-        .bind(user_id)
-        .bind(workspace_slug)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(|row| row.try_get("id")).collect()
+) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
+    let rows = member_scope_statement(user_id, workspace_slug)
+        .into_model::<IssueIdRow>()
+        .all(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    Ok(rows.iter().map(|row| row.id).collect())
 }
 
 /// Issue ids the user is involved in, newest-first
 /// (`core/querysets.py:33-52`). `scope` is `all` (default),
 /// `assigned` or `created`; anything else means `all`.
-pub async fn fetch_user_issue_ids<'e, E>(
-    ex: E,
+pub async fn fetch_user_issue_ids(
+    db: &impl ConnectionTrait,
     user_id: uuid::Uuid,
     workspace_slug: &str,
     scope: &str,
-) -> Result<Vec<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(user_issues_sql(scope))
-        .bind(user_id)
-        .bind(workspace_slug)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(|row| row.try_get("id")).collect()
+) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
+    let statement = match scope {
+        "assigned" => member_scope_statement(user_id, workspace_slug)
+            .join(JoinType::InnerJoin, issues::Relation::IssueAssignees.def())
+            .filter(issue_assignees::Column::AssigneeId.eq(user_id)),
+        "created" => member_scope_statement(user_id, workspace_slug)
+            .filter(issues::Column::CreatedById.eq(user_id)),
+        _ => member_scope_statement(user_id, workspace_slug)
+            .join(JoinType::LeftJoin, issues::Relation::IssueAssignees.def())
+            .join_rev(JoinType::LeftJoin, subscribers_relation())
+            .filter(
+                Condition::any()
+                    .add(issue_assignees::Column::AssigneeId.eq(user_id))
+                    .add(issues::Column::CreatedById.eq(user_id))
+                    .add(issue_subscribers::Column::SubscriberId.eq(user_id)),
+            ),
+    };
+    let rows = statement
+        .into_model::<IssueIdRow>()
+        .all(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    Ok(rows.iter().map(|row| row.id).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -205,78 +278,86 @@ pub const WORKSPACE_ROLE_BY_SLUG_SQL: &str =
 
 /// Whether an active membership row exists (`:28-34`). `None` (an
 /// anonymous caller) is `false` with no query, as the fixture pins.
-pub async fn fetch_is_workspace_member<'e, E>(
-    ex: E,
+pub async fn fetch_is_workspace_member(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<bool, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(false);
     };
-    let row: Option<PgRow> = sqlx::query(IS_WORKSPACE_MEMBER_SQL)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(ex)
-        .await?;
+    let row = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .limit(1)
+        .into_model::<IssueIdRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     Ok(row.is_some())
 }
 
 /// The newest active row's role, or `None` (`:37-45`). The column is
 /// `smallint`; the value widens to `i32` for the F-06 kernel.
-/// `None` user short-circuits to `None` with no query.
-pub async fn fetch_workspace_role<'e, E>(
-    ex: E,
+/// `None` user short-circuits to `None` with no query. The
+/// `ORDER BY created_at DESC` comes from the model's `Meta.ordering`
+/// plus `.first()`.
+pub async fn fetch_workspace_role(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_id: uuid::Uuid,
-) -> Result<Option<i32>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Option<i32>, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(None);
     };
-    let row: Option<PgRow> = sqlx::query(WORKSPACE_ROLE_SQL)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(ex)
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let role: i16 = row.try_get("role")?;
-            Ok(Some(i32::from(role)))
-        }
-    }
+    let row = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .limit(1)
+        .into_model::<RoleRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    Ok(row.map(|row| i32::from(row.role)))
 }
 
 /// The newest active row's role for the workspace slug, or `None`
 /// (`:48-58`). `None` user short-circuits with no query.
-pub async fn fetch_workspace_role_by_slug<'e, E>(
-    ex: E,
+pub async fn fetch_workspace_role_by_slug(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_slug: &str,
-) -> Result<Option<i32>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Option<i32>, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(None);
     };
-    let row: Option<PgRow> = sqlx::query(WORKSPACE_ROLE_BY_SLUG_SQL)
-        .bind(user_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let role: i16 = row.try_get("role")?;
-            Ok(Some(i32::from(role)))
-        }
-    }
+    let row = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .limit(1)
+        .into_model::<RoleRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    Ok(row.map(|row| i32::from(row.role)))
 }
 
 // ---------------------------------------------------------------------------
@@ -319,75 +400,99 @@ pub const WORKSPACE_ADMIN_BY_SLUG_SQL: &str = "SELECT 1 AS a FROM workspace_memb
 
 /// Whether the user holds an active project row with an allowed role
 /// (`:89-95`). `None` user (or no roles) is `false` with no query.
-pub async fn fetch_project_has_allowed_role<'e, E>(
-    ex: E,
+pub async fn fetch_project_has_allowed_role(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_slug: &str,
     project_id: uuid::Uuid,
     allowed_roles: &[i32],
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<bool, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(false);
     };
     if allowed_roles.is_empty() {
         return Ok(false);
     }
-    let sql = project_has_allowed_role_sql(allowed_roles.len());
-    let mut query = sqlx::query(&sql)
-        .bind(user_id)
-        .bind(workspace_slug)
-        .bind(project_id);
-    for role in allowed_roles {
-        query = query.bind(*role);
-    }
-    let row: Option<PgRow> = query.fetch_optional(ex).await?;
+    let roles: Vec<i16> = allowed_roles.iter().map(|role| *role as i16).collect();
+    let row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::Role.is_in(roles))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .limit(1)
+        .into_model::<IssueIdRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     Ok(row.is_some())
 }
 
 /// Whether the user holds an active project row, any role
 /// (`:104-109`). `None` user is `false` with no query.
-pub async fn fetch_project_is_member<'e, E>(
-    ex: E,
+pub async fn fetch_project_is_member(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_slug: &str,
     project_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<bool, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(false);
     };
-    let row: Option<PgRow> = sqlx::query(PROJECT_IS_MEMBER_SQL)
-        .bind(user_id)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .fetch_optional(ex)
-        .await?;
+    let row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .limit(1)
+        .into_model::<IssueIdRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     Ok(row.is_some())
 }
 
 /// Whether the user holds an active workspace row with role exactly
 /// `ADMIN` (`:110-115`). `None` user is `false` with no query.
-pub async fn fetch_workspace_admin_by_slug<'e, E>(
-    ex: E,
+pub async fn fetch_workspace_admin_by_slug(
+    db: &impl ConnectionTrait,
     user_id: Option<uuid::Uuid>,
     workspace_slug: &str,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<bool, sqlx::Error> {
     let Some(user_id) = user_id else {
         return Ok(false);
     };
-    let row: Option<PgRow> = sqlx::query(WORKSPACE_ADMIN_BY_SLUG_SQL)
-        .bind(user_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
-        .await?;
+    let row = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN as i16))
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .limit(1)
+        .into_model::<IssueIdRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     Ok(row.is_some())
 }
 
@@ -823,9 +928,13 @@ mod tests {
             set.sort();
             set
         };
-        let mut member_issues = fetch_member_project_issue_ids(&mut *tx, member, "fx2-workspace")
-            .await
-            .expect("member issues");
+        let mut member_issues = fetch_member_project_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+        )
+        .await
+        .expect("member issues");
         member_issues.sort();
         // The member set is the fixture's plus the extra stateless
         // seed (included per the fixture SQL's NULL semantics).
@@ -833,29 +942,53 @@ mod tests {
         expected_member.push(ids["ex-stateless"]);
         expected_member.sort();
         assert_eq!(member_issues, expected_member);
-        let mut all = fetch_user_issue_ids(&mut *tx, member, "fx2-workspace", "all")
-            .await
-            .expect("all");
+        let mut all = fetch_user_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+            "all",
+        )
+        .await
+        .expect("all");
         all.sort();
         assert_eq!(all, fixture_set("user_issues_queryset scope=all"));
         // Unknown scopes fall into `all`.
-        let mut bogus = fetch_user_issue_ids(&mut *tx, member, "fx2-workspace", "bogus")
-            .await
-            .expect("bogus scope");
+        let mut bogus = fetch_user_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+            "bogus",
+        )
+        .await
+        .expect("bogus scope");
         bogus.sort();
         assert_eq!(bogus, all);
-        let assigned = fetch_user_issue_ids(&mut *tx, member, "fx2-workspace", "assigned")
-            .await
-            .expect("assigned");
+        let assigned = fetch_user_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+            "assigned",
+        )
+        .await
+        .expect("assigned");
         assert_eq!(assigned, fixture_set("user_issues_queryset scope=assigned"));
-        let created = fetch_user_issue_ids(&mut *tx, member, "fx2-workspace", "created")
-            .await
-            .expect("created");
+        let created = fetch_user_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+            "created",
+        )
+        .await
+        .expect("created");
         assert_eq!(created, fixture_set("user_issues_queryset scope=created"));
         // Newest-first order (no sort): `created_at` descends.
-        let ordered = fetch_member_project_issue_ids(&mut *tx, member, "fx2-workspace")
-            .await
-            .expect("ordered");
+        let ordered = fetch_member_project_issue_ids(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            member,
+            "fx2-workspace",
+        )
+        .await
+        .expect("ordered");
         assert_eq!(
             ordered,
             vec![
@@ -930,23 +1063,27 @@ mod tests {
             (None, false, None),
         ] {
             assert_eq!(
-                fetch_is_workspace_member(&mut *tx, actor, ws)
+                fetch_is_workspace_member(&crate::orm_tx::TxConn::new(&mut tx), actor, ws)
                     .await
                     .expect("member?"),
                 is_member,
                 "{actor:?}"
             );
             assert_eq!(
-                fetch_workspace_role(&mut *tx, actor, ws)
+                fetch_workspace_role(&crate::orm_tx::TxConn::new(&mut tx), actor, ws)
                     .await
                     .expect("role"),
                 role,
                 "{actor:?}"
             );
             assert_eq!(
-                fetch_workspace_role_by_slug(&mut *tx, actor, "fx2-workspace")
-                    .await
-                    .expect("role by slug"),
+                fetch_workspace_role_by_slug(
+                    &crate::orm_tx::TxConn::new(&mut tx),
+                    actor,
+                    "fx2-workspace"
+                )
+                .await
+                .expect("role by slug"),
                 role,
                 "{actor:?}"
             );
@@ -958,45 +1095,78 @@ mod tests {
             allowed || (bypass && member && admin)
         };
         async fn project_facts(
-            conn: &mut sqlx::PgConnection,
+            db: &impl sea_orm::ConnectionTrait,
             actor: Option<uuid::Uuid>,
             project: uuid::Uuid,
             roles: &[i32],
         ) -> (bool, bool, bool) {
             let allowed =
-                fetch_project_has_allowed_role(&mut *conn, actor, "fx2-workspace", project, roles)
+                fetch_project_has_allowed_role(db, actor, "fx2-workspace", project, roles)
                     .await
                     .expect("allowed");
-            let member = fetch_project_is_member(&mut *conn, actor, "fx2-workspace", project)
+            let member = fetch_project_is_member(db, actor, "fx2-workspace", project)
                 .await
                 .expect("member");
-            let admin = fetch_workspace_admin_by_slug(&mut *conn, actor, "fx2-workspace")
+            let admin = fetch_workspace_admin_by_slug(db, actor, "fx2-workspace")
                 .await
                 .expect("admin");
             (allowed, member, admin)
         }
-        let (allowed, is_member, is_admin) = project_facts(&mut tx, Some(member), fx2, &[15]).await;
+        let (allowed, is_member, is_admin) = project_facts(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(member),
+            fx2,
+            &[15],
+        )
+        .await;
         assert!(decide(allowed, is_member, is_admin, true)); // member15 allowed=[15]
-        let (allowed, is_member, is_admin) = project_facts(&mut tx, Some(member), fx2, &[20]).await;
+        let (allowed, is_member, is_admin) = project_facts(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(member),
+            fx2,
+            &[20],
+        )
+        .await;
         assert!(!decide(allowed, is_member, is_admin, true)); // member15 allowed=[20]
         assert!(!decide(allowed, is_member, is_admin, false)); // ... no-bypass
-        let (allowed, is_member, is_admin) = project_facts(&mut tx, Some(admin), fx2, &[15]).await;
+        let (allowed, is_member, is_admin) = project_facts(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(admin),
+            fx2,
+            &[15],
+        )
+        .await;
         assert!(decide(allowed, is_member, is_admin, true)); // admin5 allowed=[15] bypass
         assert!(!decide(allowed, is_member, is_admin, false)); // ... no-bypass
-        let (allowed, is_member, is_admin) =
-            project_facts(&mut tx, Some(guest), fx2, &[15, 20]).await;
+        let (allowed, is_member, is_admin) = project_facts(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(guest),
+            fx2,
+            &[15, 20],
+        )
+        .await;
         assert!(!decide(allowed, is_member, is_admin, true)); // guest5 bypass denied
-        let (allowed, is_member, is_admin) =
-            project_facts(&mut tx, Some(outsider), fx2, &[5, 15, 20]).await;
+        let (allowed, is_member, is_admin) = project_facts(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(outsider),
+            fx2,
+            &[5, 15, 20],
+        )
+        .await;
         assert!(!decide(allowed, is_member, is_admin, true)); // outsider denied
-        let (allowed, is_member, is_admin) = project_facts(&mut tx, None, fx2, &[15]).await;
+        let (allowed, is_member, is_admin) =
+            project_facts(&crate::orm_tx::TxConn::new(&mut tx), None, fx2, &[15]).await;
         assert!(!allowed && !is_member && !is_admin); // anonymous: no facts
         assert!(!decide(allowed, is_member, is_admin, true));
         // Empty allowed-roles: no query, `false`.
-        assert!(
-            !fetch_project_has_allowed_role(&mut *tx, Some(member), "fx2-workspace", fx2, &[])
-                .await
-                .expect("empty")
-        );
+        assert!(!fetch_project_has_allowed_role(
+            &crate::orm_tx::TxConn::new(&mut tx),
+            Some(member),
+            "fx2-workspace",
+            fx2,
+            &[]
+        )
+        .await
+        .expect("empty"));
     }
 }

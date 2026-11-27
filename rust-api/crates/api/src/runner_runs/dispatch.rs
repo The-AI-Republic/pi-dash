@@ -6,9 +6,11 @@
 //!
 //! * direct (`:238-345`) → [`post_direct`]: `validate_run_creation`
 //!   (§6.5) over a pool-backed [`PoolRunCreationStore`], the
-//!   `execution_fields` + `AgentRun` insert + `build_direct_turn` +
-//!   prompt-cap + `dispatch_after_commit` transaction, then the
-//!   `AgentRunSerializer` 201.
+//!   `execution_fields` + `AgentRun` insert + `dispatch_after_commit`
+//!   transaction, then the `AgentRunSerializer` 201. (P3 step B: the
+//!   cloud `build_direct_turn` compose and the prompt-size cap died
+//!   with the cloud direct-run plane; the prompt passes through
+//!   verbatim with a null manifest.)
 //! * `run_ai` (`:347-388`) → [`post_run_ai`] and `comment_and_run`
 //!   (`:420-466`) → [`post_comment_and_run`]: the issue-bound prefix
 //!   (falsy `work_item` 400, unknown issue / non-member 404) plus the
@@ -33,45 +35,45 @@
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::redis::client_from_settings;
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_jobs::dispatch::{
+use pidash_jobs::orchestration::LiveCreationStore;
+use pidash_jobs::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
-    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
-use pidash_jobs::orchestration::LiveCreationStore;
-use pidash_services::assistant::seams as assistant_seams;
-use pidash_services::dispatch::policy::{resolve_executor_kind, UserFlags};
-use pidash_services::dispatch::{consume_admission_token, DeferredConsume, LlmProfile};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
-use pidash_services::orchestration::creation::{
-    parent_done_payload, tick_value, CreationSeam, PROMPT_UPDATE_SQL,
-};
+use pidash_services::orchestration::creation::CreationSeam;
 use pidash_services::orchestration::dispatch::DispatchSeam;
-use pidash_services::prompting::context as prompting_context;
+use pidash_services::run_creation::executor_policy::UserFlags;
+use pidash_services::run_creation::{ExecutionFieldsError, ExecutionInputs, ProjectScope};
 use pidash_services::runner_enroll::validation::{
     self, IssueProbe, RunCreationError, RunCreationStore, StoreError, ValidatedRunContext,
     ValidationError,
 };
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
-    is_ticking_state, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
+    stage_runs_automatically, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
 };
+use pidash_types::runner_runs::AgentRunStatus;
 
 use super::runs::{
-    binding_detail_for, decode_run, fetch_guarded_run, is_workspace_member, issue_lookup_sql,
-    parse_py_uuid, pod_mini_for, py_truthy_json, render_detail, run_detail_sql, tool_calls_for,
-    workspace_role, ISSUE_NOT_FOUND_BODY,
+    binding_detail_for, fetch_guarded_run, is_workspace_member, issue_lookup, parse_py_uuid,
+    pod_mini_for, py_truthy_json, render_detail, run_from_model, tool_calls_for, workspace_role,
+    ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
-use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 use crate::v1_work_items::handlers_actions::{dispatch_deps, draw_jitter, fetch_project, IssueRow};
 
@@ -86,13 +88,124 @@ pub const COMMENT_RUN_DISPATCH_FAILED_BODY: &str = r#"{"error":"could not dispat
 /// Direct-create lost the active-run race (`runs.py:335-339`).
 pub const ACTIVE_RUN_EXISTS_BODY: &str =
     r#"{"error":"work item already has an active run","code":"active_run_exists"}"#;
-/// Cloud prompt over the execution limit (`runs.py:330-334`).
-pub const PROMPT_TOO_LARGE_BODY: &str =
-    r#"{"error":"prompt exceeds Cloud Agent limit","code":"prompt_too_large"}"#;
 /// Queued-entry detail (`runs.py:410-417`): the `reason` key varies, the
 /// `detail` sentence is fixed.
 pub const QUEUED_ENTRY_DETAIL: &str =
     "a run is active on this work item; the next run is queued and starts when it ends";
+
+/// The run blocking a dispatch (NEWPIDASH-251): the newest active run
+/// occupying the one-active-run slot, so the 409 can name it instead
+/// of refusing silently. Shape is additive — existing keys are kept.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockingRun {
+    pub id: Uuid,
+    pub status: String,
+    pub runner_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub age_seconds: i64,
+}
+
+/// Render the blocking run for the `active_run` refusal block.
+pub fn blocking_run_json(run: &BlockingRun) -> Value {
+    use pidash_services::integrations::serializers::isoformat;
+
+    serde_json::json!({
+        "id": run.id.to_string(),
+        "status": run.status,
+        "runner_id": run.runner_id.map(|id| id.to_string()),
+        "created_at": isoformat(&run.created_at),
+        "assigned_at": run.assigned_at.as_ref().map(isoformat),
+        "started_at": run.started_at.as_ref().map(isoformat),
+        "age_seconds": run.age_seconds,
+    })
+}
+
+/// Fetch the newest active run for `work_item_id`, or `None` when the
+/// item has no run in an active status (or the fetch fails — the
+/// caller falls back to the un-enriched body).
+pub async fn fetch_blocking_run(pool: &PgPool, work_item_id: Option<Uuid>) -> Option<BlockingRun> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+    let work_item_id = work_item_id?;
+    let statuses: Vec<String> = [
+        AgentRunStatus::Queued,
+        AgentRunStatus::Assigned,
+        AgentRunStatus::WaitingForWorktree,
+        AgentRunStatus::Running,
+        AgentRunStatus::CancelRequested,
+        AgentRunStatus::AwaitingApproval,
+        AgentRunStatus::AwaitingReauth,
+    ]
+    .iter()
+    .map(|status| status.value().to_owned())
+    .collect();
+    #[derive(Debug, sea_orm::FromQueryResult)]
+    struct Row {
+        id: Uuid,
+        status: String,
+        runner_id: Option<Uuid>,
+        created_at: sea_orm::prelude::DateTimeWithTimeZone,
+        assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    }
+
+    let row = orm::agent_run::Entity::find()
+        .select_only()
+        .column_as(orm::agent_run::Column::Id, "id")
+        .column_as(orm::agent_run::Column::Status, "status")
+        .column_as(orm::agent_run::Column::RunnerId, "runner_id")
+        .column_as(orm::agent_run::Column::CreatedAt, "created_at")
+        .column_as(orm::agent_run::Column::AssignedAt, "assigned_at")
+        .column_as(orm::agent_run::Column::StartedAt, "started_at")
+        .filter(orm::agent_run::Column::WorkItemId.eq(work_item_id))
+        .filter(orm::agent_run::Column::Status.is_in(statuses))
+        .order_by_desc(orm::agent_run::Column::CreatedAt)
+        .into_model::<Row>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .ok()??;
+    let created_at = row.created_at.with_timezone(&Utc);
+    Some(BlockingRun {
+        id: row.id,
+        status: row.status,
+        runner_id: row.runner_id,
+        created_at,
+        assigned_at: row.assigned_at.map(|at| at.with_timezone(&Utc)),
+        started_at: row.started_at.map(|at| at.with_timezone(&Utc)),
+        age_seconds: (Utc::now() - created_at).num_seconds().max(0),
+    })
+}
+
+/// Merge the blocking-run block into a refusal body: the fallback
+/// bytes are kept verbatim when there is no blocker (never
+/// reserialized — pinned cases stay byte-identical), and get an
+/// additive `active_run` key when one exists.
+pub fn enrich_with_active_run(fallback: &str, run: Option<&BlockingRun>) -> String {
+    let Some(run) = run else {
+        return fallback.to_owned();
+    };
+    let parsed: Result<Value, _> = serde_json::from_str(fallback);
+    match parsed {
+        Ok(Value::Object(mut map)) => {
+            map.insert("active_run".to_owned(), blocking_run_json(run));
+            serde_json::to_string(&Value::Object(map)).expect("enriched refusal body")
+        }
+        _ => fallback.to_owned(),
+    }
+}
+
+/// Refusal body for an active-run 409: the fallback plus the blocking
+/// run, when one can be named.
+pub async fn active_run_enriched_body(
+    pool: &PgPool,
+    work_item_id: Option<Uuid>,
+    fallback: &str,
+) -> String {
+    let run = fetch_blocking_run(pool, work_item_id).await;
+    enrich_with_active_run(fallback, run.as_ref())
+}
 
 /// `run_kind` stamped on direct dispatches (`runs.py:266`).
 const RUN_KIND_DIRECT: &str = "direct";
@@ -185,18 +298,6 @@ pub fn coerce_filter_uuid(value: Option<&Value>) -> UuidCoerce {
     }
 }
 
-/// True for Postgres integrity-constraint violations (SQLSTATE class
-/// 23): Django's `except IntegrityError` (`runs.py:335`), which answers
-/// 409 `active_run_exists` for *any* of them — including a mid-flight FK
-/// break the message mislabels.
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .map(|code| code.starts_with("23"))
-        .unwrap_or(false)
-}
-
 /// Truncate to microseconds: Postgres `timestamptz` and Python datetimes
 /// both stop there, and `Utc::now()` carries nanos.
 fn now_micros() -> DateTime<Utc> {
@@ -208,8 +309,9 @@ fn now_micros() -> DateTime<Utc> {
 // `RunCreationStore` over the pool (D-15 consumer, PIDASHCONV-1041)
 // ---------------------------------------------------------------------------
 
-/// The §6.5 reads over a pool handle: executes the validation `*_SQL`
-/// consts verbatim, in the order [`validate_run_creation`] issues them.
+/// The §6.5 reads over a pool handle: the validation `*_SQL` consts'
+/// statements as SeaORM selects, in the order [`validate_run_creation`]
+/// issues them (same scopes, ordering and `LIMIT`s).
 pub struct PoolRunCreationStore<'a> {
     pool: &'a PgPool,
 }
@@ -219,9 +321,38 @@ impl<'a> PoolRunCreationStore<'a> {
         PoolRunCreationStore { pool }
     }
 
-    fn db(error: sqlx::Error) -> StoreError {
-        StoreError::Db(error.to_string())
+    fn db(error: sea_orm::DbErr) -> StoreError {
+        StoreError::Db(pidash_db::orm_tx::into_sqlx(error).to_string())
     }
+}
+
+/// The L2 [`Pod`] off a SeaORM model.
+fn pod_from_model(model: orm::pod::Model) -> Pod {
+    Pod {
+        id: model.id,
+        workspace_id: model.workspace_id,
+        project_id: model.project_id,
+        name: model.name,
+        description: model.description,
+        created_by_id: model.created_by_id,
+        is_default: model.is_default,
+        deleted_at: model.deleted_at.map(|at| at.with_timezone(&Utc)),
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+    }
+}
+
+/// `Pod.objects` (the `PodManager` scope: soft-deleted pods read as
+/// missing) with the model ordering (`-is_default`, `created_at`),
+/// first row ([`validation::POD_BY_ID_SQL`] /
+/// [`validation::DEFAULT_POD_FOR_PROJECT_SQL`]).
+fn pod_scope() -> sea_orm::Select<orm::pod::Entity> {
+    use orm::pod::{Column, Entity};
+    Entity::find()
+        .filter(Column::DeletedAt.is_null())
+        .order_by_desc(Column::IsDefault)
+        .order_by_asc(Column::CreatedAt)
+        .limit(1)
 }
 
 impl RunCreationStore for PoolRunCreationStore<'_> {
@@ -230,60 +361,87 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
         user_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<Option<i32>, StoreError> {
+        use orm::workspace_members::{Column, Entity};
         // `role` is a `smallint`: decode `i16`, widen to the trait's `i32`.
-        let role: Option<i16> = sqlx::query_scalar(validation::WORKSPACE_ROLE_SQL)
-            .bind(user_id)
-            .bind(workspace_id)
-            .fetch_optional(self.pool)
+        // [`validation::WORKSPACE_ROLE_SQL`]: live + active, `-created_at`.
+        let role = Entity::find()
+            .select_only()
+            .column(Column::Role)
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::IsActive.eq(true))
+            .filter(Column::MemberId.eq(user_id))
+            .filter(Column::WorkspaceId.eq(workspace_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .into_tuple::<i16>()
+            .one(&sea_orm_connection(self.pool))
             .await
             .map_err(Self::db)?;
         Ok(role.map(i32::from))
     }
 
     async fn issue_probe(&self, work_item_id: Uuid) -> Result<Option<IssueProbe>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(validation::ISSUE_PROBE_SQL)
-            .bind(work_item_id)
-            .fetch_optional(self.pool)
+        use orm::issues::{Column, Entity};
+        // [`validation::ISSUE_PROBE_SQL`]: the plain soft-delete scope,
+        // `-created_at`, first row.
+        let row = Entity::find()
+            .select_only()
+            .columns([
+                Column::WorkspaceId,
+                Column::AssignedPodId,
+                Column::ProjectId,
+            ])
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::Id.eq(work_item_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .into_tuple::<(Uuid, Option<Uuid>, Uuid)>()
+            .one(&sea_orm_connection(self.pool))
             .await
             .map_err(Self::db)?;
-        row.map(|row| {
-            Ok(IssueProbe {
-                workspace_id: row.try_get("workspace_id").map_err(Self::db)?,
-                assigned_pod_id: row.try_get("assigned_pod_id").map_err(Self::db)?,
-                project_id: row.try_get("project_id").map_err(Self::db)?,
-            })
-        })
-        .transpose()
+        Ok(
+            row.map(|(workspace_id, assigned_pod_id, project_id)| IssueProbe {
+                workspace_id,
+                assigned_pod_id,
+                project_id: Some(project_id),
+            }),
+        )
     }
 
     async fn pod_by_id(&self, pod_id: Uuid) -> Result<Option<Pod>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(validation::POD_BY_ID_SQL)
-            .bind(pod_id)
-            .fetch_optional(self.pool)
+        Ok(pod_scope()
+            .filter(orm::pod::Column::Id.eq(pod_id))
+            .one(&sea_orm_connection(self.pool))
             .await
-            .map_err(Self::db)?;
-        row.map(|row| pidash_db::runner_runs::pod::pod_from_row(&row).map_err(Self::db))
-            .transpose()
+            .map_err(Self::db)?
+            .map(pod_from_model))
     }
 
     async fn default_pod_for_project(&self, project_id: Uuid) -> Result<Option<Pod>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(validation::DEFAULT_POD_FOR_PROJECT_SQL)
-                .bind(project_id)
-                .fetch_optional(self.pool)
-                .await
-                .map_err(Self::db)?;
-        row.map(|row| pidash_db::runner_runs::pod::pod_from_row(&row).map_err(Self::db))
-            .transpose()
+        Ok(pod_scope()
+            .filter(orm::pod::Column::IsDefault.eq(true))
+            .filter(orm::pod::Column::ProjectId.eq(project_id))
+            .one(&sea_orm_connection(self.pool))
+            .await
+            .map_err(Self::db)?
+            .map(pod_from_model))
     }
 
     async fn project_ids_for_workspace(&self, workspace_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let ids: Vec<Uuid> = sqlx::query_scalar(validation::PROJECT_IDS_FOR_WORKSPACE_SQL)
-            .bind(workspace_id)
-            .fetch_all(self.pool)
+        use orm::projects::{Column, Entity};
+        // [`validation::PROJECT_IDS_FOR_WORKSPACE_SQL`]: soft-delete scope,
+        // `-created_at`, the first two.
+        Entity::find()
+            .select_only()
+            .column(Column::Id)
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::WorkspaceId.eq(workspace_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(2)
+            .into_tuple::<Uuid>()
+            .all(&sea_orm_connection(self.pool))
             .await
-            .map_err(Self::db)?;
-        Ok(ids)
+            .map_err(Self::db)
     }
 }
 
@@ -291,71 +449,224 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
 // Direct create (`runs.py:238-345`)
 // ---------------------------------------------------------------------------
 
-/// The direct-create INSERT: Django's `AgentRun.objects.create` at
+/// The direct-create `INSERT`: Django's `AgentRun.objects.create` at
 /// `runs.py:281-292` inserts every concrete column (model order, the
 /// three generated `usage` columns and the generated `refusal_category`
-/// excluded), so this lists them all
-/// with model defaults as literals. `$1..$12` carry the caller-supplied
-/// fields; `trigger` is the `'direct'` model default and `phase_kind`
-/// stays `''` (the view passes neither — the `phase_kind` stamp is an
+/// excluded), so the active model sets them all with the model defaults;
+/// `trigger` is the `'direct'` model default and `phase_kind` stays `''`
+/// (the view passes neither — the `phase_kind` stamp is an
 /// orchestration-creation behavior, not a direct one).
-const DIRECT_RUN_INSERT_SQL: &str =
-    "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
-    pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
-    tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $9, \
-    NULL, NULL, '', 'direct', NULL, '', $10, $11, '', '{}', NULL, NULL, $8, '', '{}', $12, \
-    NULL, NULL, NULL)";
+struct DirectRunInsert<'a> {
+    run_id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Uuid,
+    pod_id: Uuid,
+    pinned_runner_id: Option<Uuid>,
+    /// `AgentRun.pin_kind` (runner 0039, design §6.4).
+    pin_kind: &'a str,
+    work_item_id: Option<Uuid>,
+    executor_kind: &'a str,
+    error_details: &'a Value,
+    tool_plan: &'a Value,
+    run_config: &'a Value,
+    required_capabilities: &'a Value,
+    created_at: DateTime<Utc>,
+}
+
+impl DirectRunInsert<'_> {
+    fn active_model(&self) -> orm::agent_run::ActiveModel {
+        orm::agent_run::ActiveModel {
+            id: Set(self.run_id),
+            status: Set(AgentRunStatus::Queued.value().to_owned()),
+            prompt: Set(String::new()),
+            run_config: Set(self.run_config.clone()),
+            required_capabilities: Set(self.required_capabilities.clone()),
+            thread_id: Set(String::new()),
+            lease_expires_at: Set(None),
+            done_payload: Set(None),
+            created_at: Set(self.created_at.into()),
+            assigned_at: Set(None),
+            started_at: Set(None),
+            ended_at: Set(None),
+            owner_id: Set(None),
+            workspace_id: Set(self.workspace_id),
+            runner_id: Set(None),
+            work_item_id: Set(self.work_item_id),
+            parent_run_id: Set(None),
+            pod_id: Set(self.pod_id),
+            created_by_id: Set(self.created_by_id),
+            pinned_runner_id: Set(self.pinned_runner_id),
+            pin_kind: Set(self.pin_kind.to_owned()),
+            scheduler_binding_id: Set(None),
+            llm_model: Set(String::new()),
+            trigger: Set(TRIGGER_DIRECT.to_owned()),
+            prompt_manifest: Set(None),
+            executor_kind: Set(self.executor_kind.to_owned()),
+            dispatch_attempts: Set(0),
+            cancel_requested_at: Set(None),
+            cancel_reason: Set(String::new()),
+            tool_plan: Set(self.tool_plan.clone()),
+            terminal_hooks_applied_at: Set(None),
+            terminal_capacity_released_at: Set(None),
+            phase_kind: Set(String::new()),
+            // No stamp on direct runs (the model default).
+            work_type: Set(String::new()),
+            agent_metadata: Set(Value::Object(Default::default())),
+            usage: Set(Value::Object(Default::default())),
+            error_details: Set(self.error_details.clone()),
+            failure_reason: Set(String::new()),
+            // Generated columns take their defaults.
+            input_tokens: sea_orm::NotSet,
+            output_tokens: sea_orm::NotSet,
+            total_tokens: sea_orm::NotSet,
+            refusal_category: sea_orm::NotSet,
+            assignment_token: Set(None),
+            assignment_protocol: Set(0),
+            capacity_wait: Set(None),
+        }
+    }
+}
 
 /// The `requested` override read (`runs.py:273-279`):
 /// `Issue.objects.filter(pk).values_list("agent_executor").first()` —
 /// the default manager, so a soft-deleted issue reads as `None`.
-const DIRECT_REQUESTED_SQL: &str =
-    "SELECT agent_executor FROM issues WHERE deleted_at IS NULL AND id = $1 LIMIT 1";
+fn direct_requested_select(
+    work_item_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<String>>> {
+    use orm::issues::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::AgentExecutor)
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::Id.eq(work_item_id))
+        .limit(1)
+        .into_tuple::<Option<String>>()
+}
 
-/// The execution-scope project row (`ctx.pod.project`, `runs.py:265`).
-const DIRECT_PROJECT_SQL: &str =
-    "SELECT id, workspace_id, default_agent_executor FROM projects WHERE id = $1 LIMIT 1";
+/// The execution-scope project row (`ctx.pod.project`, `runs.py:265`):
+/// `(id, workspace_id, default_agent_executor)`.
+fn direct_project_select(
+    project_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Uuid, String)>> {
+    use orm::projects::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::WorkspaceId,
+            Column::DefaultAgentExecutor,
+        ])
+        .filter(Column::Id.eq(project_id))
+        .limit(1)
+        .into_tuple::<(Uuid, Uuid, String)>()
+}
 
-/// The creator flags (`actor`, `runs.py:269/271`).
-const DIRECT_ACTOR_SQL: &str = "SELECT is_active, is_bot FROM users WHERE id = $1 LIMIT 1";
+/// The creator flags (`actor`, `runs.py:269/271`): `(is_active, is_bot)`.
+fn direct_actor_select(
+    user_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(bool, bool)>> {
+    use orm::users::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::IsActive, Column::IsBot])
+        .filter(Column::Id.eq(user_id))
+        .limit(1)
+        .into_tuple::<(bool, bool)>()
+}
 
 /// The creator's BYOK key presence (`user_has_llm_config`,
 /// `agent_execution.py:69-80`, via the assistant gate's read).
-const DIRECT_LLM_CONFIG_SQL: &str =
-    "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1";
+fn direct_llm_config_select(
+    user_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<Vec<u8>>>> {
+    use orm::assistant_user_llm_config::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::ApiKeyEncrypted)
+        .filter(Column::UserId.eq(user_id))
+        .limit(1)
+        .into_tuple::<Option<Vec<u8>>>()
+}
 
-/// The free-form cloud-context workspace row (`composer.py:477`).
-const DIRECT_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1 LIMIT 1";
+/// The v1 `IssueRow` columns ([`dispatch_issue_select`]).
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+struct DispatchIssueRow {
+    id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Option<Uuid>,
+    agent_executor: Option<String>,
+    state_id: Option<Uuid>,
+    state_name: Option<String>,
+    state_group: Option<String>,
+}
 
-/// The free-form cloud-context project row (`composer.py:476`).
-const DIRECT_CONTEXT_PROJECT_SQL: &str =
-    "SELECT id, identifier, name, description FROM projects WHERE id = $1 LIMIT 1";
+impl DispatchIssueRow {
+    fn into_issue_row(self) -> IssueRow {
+        IssueRow {
+            id: self.id,
+            project_id: Some(self.project_id),
+            workspace_id: self.workspace_id,
+            created_by_id: self.created_by_id,
+            agent_executor: self.agent_executor,
+            state_id: self.state_id,
+            state_name: self.state_name,
+            state_group: self.state_group,
+        }
+    }
+}
 
 /// The v1 `IssueRow` for the web dispatch tails: the issue plus its
-/// state names, `all_objects` scope (no deleted guard —
-/// `runs.py:365/437`), by id.
-const DISPATCH_ISSUE_SQL: &str = "SELECT i.id, i.project_id, i.workspace_id, i.created_by_id, \
-    i.agent_executor, i.state_id, s.name AS state_name, s.group AS state_group \
-    FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1 LIMIT 1";
+/// state names (`LEFT JOIN states`), `all_objects` scope (no deleted
+/// guard — `runs.py:365/437`), by id.
+fn dispatch_issue_select(
+    issue_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<DispatchIssueRow>> {
+    use orm::issues::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::ProjectId,
+            Column::WorkspaceId,
+            Column::CreatedById,
+            Column::AgentExecutor,
+            Column::StateId,
+        ])
+        .column_as(orm::states::Column::Name, "state_name")
+        .column_as(orm::states::Column::Group, "state_group")
+        .join(
+            JoinType::LeftJoin,
+            Entity::belongs_to(orm::states::Entity)
+                .from(Column::StateId)
+                .to(orm::states::Column::Id)
+                .into(),
+        )
+        .filter(Column::Id.eq(issue_id))
+        .limit(1)
+        .into_model::<DispatchIssueRow>()
+}
+
+/// `run.save(update_fields=["prompt", "prompt_manifest"])`
+/// (`orchestration::creation::PROMPT_UPDATE_SQL`): the rendered prompt
+/// and its manifest stamp (`NULL` without one).
+fn prompt_update_statement(
+    run_id: Uuid,
+    prompt: &str,
+    manifest: Option<&Value>,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Prompt, Expr::value(prompt.to_owned()))
+        .col_expr(Column::PromptManifest, Expr::value(manifest.cloned()))
+        .filter(Column::Id.eq(run_id))
+}
 
 /// Ordered `{"error","code"}` (struct order, not `json!` — maps sort keys).
 #[derive(serde::Serialize)]
 struct ErrorCode<'a> {
     error: &'a str,
     code: &'a str,
-}
-
-/// Ordered 429 (`runs.py:313-318`).
-#[derive(serde::Serialize)]
-struct Throttled<'a> {
-    error: &'a str,
-    code: &'a str,
-    retry_after_seconds: i64,
 }
 
 /// Ordered 202 (`runs.py:410-417`).
@@ -380,92 +691,21 @@ fn run_creation_denial(error: &RunCreationError) -> Response {
 }
 
 /// Map one `execution_fields` failure onto the direct-create arms
-/// (`runs.py:310-329`): `code = getattr(exc, "code", str(exc))`, then
-/// quota → 429, admission-down → 503, capability → 422, else 409.
+/// (`runs.py:310-329`): `code = getattr(exc, "code", str(exc))`.
+/// (P3 step B: the cloud quota/admission/capability arms died with
+/// the cloud creation path; Resolve → 409, Db → 500 remain.)
 /// The transaction is already rolled back by the caller.
 fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
-    let quota = pidash_services::dispatch::admission::CloudAgentAdmissionError::RUN_QUOTA_EXCEEDED;
-    let down =
-        pidash_services::dispatch::admission::CloudAgentAdmissionError::ADMISSION_UNAVAILABLE;
+    // P3 step B: the cloud admission/capability/limit arms died with
+    // the cloud creation path; only Resolve and Db remain.
     match error {
-        ExecutionFieldsError::Admission(admission) => {
-            let code = admission.code().to_owned();
-            let detail = admission.detail().to_owned();
-            if code == quota {
-                match admission.retry_after_seconds() {
-                    Some(retry) => {
-                        let body = serde_json::to_value(&Throttled {
-                            error: &detail,
-                            code: &code,
-                            retry_after_seconds: retry.max(1),
-                        })
-                        .expect("serializable throttle")
-                        .to_string();
-                        json_response(StatusCode::TOO_MANY_REQUESTS, body)
-                    }
-                    // `max(1, None)` raises `TypeError` in Python — a 500.
-                    None => server_error(),
-                }
-            } else if code == down {
-                let body = serde_json::to_value(&ErrorCode {
-                    error: &detail,
-                    code: &code,
-                })
-                .expect("serializable denial")
-                .to_string();
-                json_response(StatusCode::SERVICE_UNAVAILABLE, body)
-            } else {
-                let body = serde_json::to_value(&ErrorCode {
-                    error: &detail,
-                    code: &code,
-                })
-                .expect("serializable denial")
-                .to_string();
-                json_response(StatusCode::CONFLICT, body)
-            }
-        }
-        ExecutionFieldsError::Capability(capability) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: capability.message(),
-                code: capability.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
-        }
-        ExecutionFieldsError::Unavailable(unavailable) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: unavailable.message(),
-                code: unavailable.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::CONFLICT, body)
-        }
-        ExecutionFieldsError::Managed(managed) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: &managed.to_string(),
-                code: managed.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::CONFLICT, body)
-        }
         ExecutionFieldsError::Resolve(resolve) => {
+            // P1: only `UnknownExecutor` remains — cloud resolves to local.
             let (error, code) = match resolve {
-                pidash_services::dispatch::policy::ResolveExecutorError::UnknownExecutor => (
+                pidash_services::run_creation::executor_policy::ResolveExecutorError::UnknownExecutor => (
                     "unknown agent executor".to_owned(),
                     "unknown agent executor".to_owned(),
                 ),
-                pidash_services::dispatch::policy::ResolveExecutorError::CloudAgent(
-                    unavailable,
-                ) => (
-                    unavailable.message().to_owned(),
-                    unavailable.code().to_owned(),
-                ),
-                pidash_services::dispatch::policy::ResolveExecutorError::ManagedRunner(managed) => {
-                    (managed.to_string(), managed.code().to_owned())
-                }
             };
             let body = serde_json::to_value(&ErrorCode {
                 error: &error,
@@ -476,34 +716,6 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
             json_response(StatusCode::CONFLICT, body)
         }
         ExecutionFieldsError::Db(_) => server_error(),
-    }
-}
-
-/// Convert `required_capabilities` for the cloud tool planner
-/// (`policy.py:97-134`): `set(...)` over the raw value. Only the cloud
-/// path inspects it — local/managed runs store the value verbatim and
-/// never look — so this runs only past a cloud resolution. `Err` is the
-/// `TypeError` Django raises (a 500): non-string members break the
-/// `sorted`/`join`, non-iterables break `set()` itself. Strings iterate
-/// to chars, dicts to keys, exactly like `set()`.
-fn convert_capabilities(raw: &Value) -> Result<Vec<String>, ()> {
-    if !py_truthy_json(Some(raw)) {
-        return Ok(Vec::new());
-    }
-    match raw {
-        Value::String(text) => Ok(text.chars().map(|c| c.to_string()).collect()),
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    Value::String(text) => out.push(text.clone()),
-                    _ => return Err(()),
-                }
-            }
-            Ok(out)
-        }
-        Value::Object(map) => Ok(map.keys().cloned().collect()),
-        _ => Err(()),
     }
 }
 
@@ -529,17 +741,11 @@ async fn rollback_then(tx: DbTransaction<'_>, response: Response) -> Response {
 async fn drain_direct_dispatch(
     pool: &PgPool,
     state: &AppState,
-    cloud: &pidash_db::config::CloudAgentSettings,
-    cache: &RedisAdmissionCache,
     dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
     now: DateTime<Utc>,
 ) -> Result<(), Response> {
-    for consume in &deferred {
-        consume_admission_token(cache, consume);
-    }
     for run_id in dispatches {
-        match dispatch_agent_run(pool, cloud, run_id, now).await {
+        match dispatch_agent_run(pool, run_id, now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
                 if crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id)
                     .await
@@ -589,7 +795,10 @@ async fn render_created_snapshot(pool: &PgPool, run: &AgentRun) -> Response {
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    let payload = render_detail(run, &pod, &tool_calls, binding.as_ref());
+    let payload = match render_detail(pool, run, &pod, &tool_calls, binding.as_ref(), None).await {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
     json_response(StatusCode::CREATED, payload.to_string())
 }
 
@@ -598,15 +807,14 @@ async fn render_created_snapshot(pool: &PgPool, run: &AgentRun) -> Response {
 /// a read error is a 500 — the caller rolls the transaction back, as
 /// Django's `atomic` block would on the same failure.
 async fn fetch_created_run(tx: &mut DbTransaction<'_>, run_id: Uuid) -> Result<AgentRun, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&run_detail_sql())
-        .bind(run_id)
-        .fetch_optional(&mut **tx.inner())
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&TxConn::new(tx.inner()))
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Err(server_error());
     };
-    decode_run(&row, 0).map_err(|_| server_error())
+    run_from_model(row).map_err(|_| server_error())
 }
 
 /// The direct-create reads `execution_fields` needs beyond the §6.5
@@ -617,6 +825,9 @@ struct DirectScope {
     project_workspace_id: Uuid,
     default_agent_executor: String,
     actor_flags: UserFlags,
+    // Read for the scope shape; the cloud llm gate that consumed it
+    // died in P3 step B.
+    #[allow(dead_code)]
     has_llm_key: bool,
     requested: Option<String>,
 }
@@ -629,34 +840,29 @@ async fn load_direct_scope(
     pool: &PgPool,
     ctx: &ValidatedRunContext,
 ) -> Result<DirectScope, Response> {
-    let project: Option<(Uuid, Uuid, String)> = sqlx::query_as(DIRECT_PROJECT_SQL)
-        .bind(ctx.pod.project_id)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    let project = direct_project_select(ctx.pod.project_id)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     let Some((project_id, project_workspace_id, default_agent_executor)) = project else {
         return Err(server_error());
     };
-    let flags: Option<(bool, bool)> = sqlx::query_as(DIRECT_ACTOR_SQL)
-        .bind(ctx.created_by)
-        .fetch_optional(pool)
+    let flags = direct_actor_select(ctx.created_by)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     let Some((is_active, is_bot)) = flags else {
         return Err(server_error());
     };
-    let key: Option<(Option<Vec<u8>>,)> = sqlx::query_as(DIRECT_LLM_CONFIG_SQL)
-        .bind(ctx.created_by)
-        .fetch_optional(pool)
+    let key = direct_llm_config_select(ctx.created_by)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let has_llm_key = key
-        .and_then(|(key,)| key)
-        .is_some_and(|key| !key.is_empty());
-    let requested: Option<(Option<String>,)> = match ctx.work_item_id {
-        Some(work_item_id) => sqlx::query_as(DIRECT_REQUESTED_SQL)
-            .bind(work_item_id)
-            .fetch_optional(pool)
+    let has_llm_key = key.flatten().is_some_and(|key| !key.is_empty());
+    let requested: Option<Option<String>> = match ctx.work_item_id {
+        Some(work_item_id) => direct_requested_select(work_item_id)
+            .one(&db)
             .await
             .map_err(|_| server_error())?,
         None => None,
@@ -667,7 +873,7 @@ async fn load_direct_scope(
         default_agent_executor,
         actor_flags: UserFlags { is_active, is_bot },
         has_llm_key,
-        requested: requested.and_then(|(requested,)| requested),
+        requested: requested.flatten(),
     })
 }
 
@@ -860,304 +1066,7 @@ fn py_repr_json(raw: &Value) -> String {
     }
 }
 
-/// Render the cloud prompt for an issue-bound direct run
-/// (`composer.py:459-514` with `issue is not None`): the full
-/// `build_context` over the seam-loaded bundle, composed as
-/// `KIND_DIRECT` with the user task wrapped as inert data. Returns the
-/// prompt text plus the v2 manifest stamp. Runs inside the insertion
-/// transaction (the bundle's prior-run count sees the new row, exactly
-/// like Django's in-`atomic` read).
-#[allow(clippy::too_many_arguments)]
-async fn render_cloud_issue_prompt<'a>(
-    state: &'a AppState,
-    pool: &'a PgPool,
-    tx: DbTransaction<'a>,
-    issue_id: Uuid,
-    run_id: Uuid,
-    actor_id: Uuid,
-    raw_prompt: &'a str,
-    tool_plan: &'a Value,
-    now_unix_secs: i64,
-) -> Result<(DbTransaction<'a>, String, Value), Response> {
-    use pidash_services::orchestration::creation::RenderBundle;
-    use pidash_services::prompting::recipes;
-
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DISPATCH_ISSUE_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        let _ = tx.rollback().await;
-        return Err(server_error());
-    };
-    let issue_row = IssueRow {
-        id: row.try_get("id").map_err(|_| server_error())?,
-        project_id: row.try_get("project_id").map_err(|_| server_error())?,
-        workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-        created_by_id: row.try_get("created_by_id").map_err(|_| server_error())?,
-        agent_executor: row.try_get("agent_executor").map_err(|_| server_error())?,
-        state_id: row.try_get("state_id").map_err(|_| server_error())?,
-        state_name: row.try_get("state_name").map_err(|_| server_error())?,
-        state_group: row.try_get("state_group").map_err(|_| server_error())?,
-    };
-    let Some(project_id) = issue_row.project_id else {
-        let _ = tx.rollback().await;
-        return Err(server_error());
-    };
-    let project_row = match fetch_project(pool, &project_id).await {
-        Ok(Some(project_row)) => project_row,
-        Ok(None) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let (deps, _matcher) = match dispatch_deps(
-        state,
-        pool,
-        actor_id,
-        &issue_row,
-        &project_row,
-        now_unix_secs,
-    )
-    .await
-    {
-        Ok(deps) => deps,
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let mut store = LiveCreationStore::new(tx, pool, deps);
-    let bundle: RenderBundle = match CreationSeam::render_bundle(
-        &mut store,
-        issue_id,
-        run_id,
-        None,
-        TRIGGER_DIRECT,
-        actor_id,
-    )
-    .await
-    {
-        Ok(bundle) => bundle,
-        Err(_) => {
-            let (tx, _, _, _, _, _) = store.into_parts();
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    // The `render_first_turn` assembly with `KIND_DIRECT`: same context
-    // keys Django's `build_context(issue, run)` produces for the direct
-    // row (`trigger="direct"`, `phase_kind=""`).
-    let issue = &bundle.issue;
-    let project = &bundle.project;
-    let related = prompting_context::related_context(
-        &issue.id.to_string(),
-        &bundle.relation_rows,
-        &bundle.refs,
-    );
-    let by_type = prompting_context::directional_relations_context(
-        &issue.id.to_string(),
-        &bundle.relation_rows,
-        &bundle.directional_refs,
-    );
-    let relations = prompting_context::relations_context(&by_type);
-    let repo = prompting_context::repo_context(
-        &prompting_context::ProjectRepoView {
-            url: project.repo_url.clone(),
-            base_branch: project.base_branch.clone(),
-        },
-        issue.git_work_branch.as_deref(),
-        bundle.remote.as_ref(),
-        bundle.adapter.as_ref(),
-    );
-    let extra_toolsets_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let schema_tool = if extra_toolsets_enabled {
-        state.toolsets().schema_tool_name().to_owned()
-    } else {
-        String::new()
-    };
-    let input = prompting_context::IssueContextInput {
-        issue_id: issue.id.to_string(),
-        project_identifier: project.identifier.clone(),
-        sequence_id: i64::from(issue.sequence_id),
-        title: issue.name.clone(),
-        description_stripped: issue.description_stripped.clone(),
-        state_name: bundle.state.as_ref().map(|state| state.name.clone()),
-        state_group: bundle.state.as_ref().map(|state| state.group.clone()),
-        priority: issue.priority.clone(),
-        labels: bundle.labels.clone(),
-        assignees: bundle.assignees.clone(),
-        target_date_iso: issue
-            .target_date
-            .map(|date| date.format("%Y-%m-%d").to_string()),
-        project_states: bundle.project_states.clone(),
-        workspace_slug: bundle.workspace_slug.clone(),
-        workspace_name: bundle.workspace_name.clone(),
-        project_id: project.id.to_string(),
-        project_name: project.name.clone(),
-        project_description: project.description.clone(),
-        repo,
-        code_reviews: prompting_context::code_reviews_context(&bundle.reviews),
-        parent: bundle.parent.clone(),
-        ancestors: bundle.lineage.clone(),
-        children: Value::Array(prompting_context::children_context(&bundle.children)),
-        related: Value::Array(related),
-        relations,
-        run_id: run_id.to_string(),
-        run_template_name: recipes::KIND_DIRECT.to_owned(),
-        attempt: prompting_context::compute_attempt(bundle.prior_run_count),
-        trigger: Some(TRIGGER_DIRECT.to_owned()),
-        executor_kind: AgentExecutorKind::CloudAgent.value().to_owned(),
-        available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
-        unavailable_capabilities: tool_plan
-            .get("unavailable_capabilities")
-            .cloned()
-            .unwrap_or(Value::Null),
-        extra_toolsets_enabled,
-        extra_toolsets_schema_tool: schema_tool,
-        limits: tool_plan.get("limits").cloned().unwrap_or(Value::Null),
-        tick: tick_value(
-            bundle.ticker.as_ref(),
-            project.pool,
-            project.interval_impl,
-            project.interval_review,
-            project.interval_test,
-            bundle.state.as_ref(),
-        ),
-        comments_section: prompting_context::comments_section(&bundle.comments),
-        parent_done_payload: parent_done_payload(
-            bundle.direct_parent_payload.as_ref(),
-            bundle.has_parent_run,
-            bundle.ticker_parent_payload.as_ref(),
-        ),
-        workpad_body: issue.workpad.clone().unwrap_or_default(),
-    };
-    let context_value = prompting_context::build_context(&input);
-    let catalog_version = tool_plan
-        .get("catalog_version")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    let turn = match prompting_context::build_direct_turn(
-        raw_prompt,
-        Some(&context_value),
-        Some(AgentExecutorKind::CloudAgent.value()),
-        catalog_version,
-    ) {
-        Ok(turn) => turn,
-        Err(_) => {
-            let (tx, _, _, _, _, _) = store.into_parts();
-            let _ = tx.rollback().await;
-            return Err(server_error());
-        }
-    };
-    let (tx, _, _, _, _, _) = store.into_parts();
-    let manifest = turn
-        .manifest
-        .as_ref()
-        .map(|manifest| manifest.to_json())
-        .unwrap_or(Value::Null);
-    Ok((tx, turn.text, manifest))
-}
-
-/// Render the cloud prompt for a free-form direct run
-/// (`composer.py:475-498`): the small inline context (workspace slug +
-/// name, project id/identifier/name/description, the `direct` run
-/// block, tools, limits), composed as `KIND_DIRECT`.
-async fn render_cloud_free_prompt(
-    state: &AppState,
-    pool: &PgPool,
-    run_id: Uuid,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    raw_prompt: &str,
-    tool_plan: &Value,
-) -> Result<(String, Value), Response> {
-    let workspace: Option<(String, String)> = sqlx::query_as(DIRECT_WORKSPACE_SQL)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some((workspace_slug, workspace_name)) = workspace else {
-        return Err(server_error());
-    };
-    let project: Option<(Uuid, String, String, Option<String>)> =
-        sqlx::query_as(DIRECT_CONTEXT_PROJECT_SQL)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    let Some((project_id, project_identifier, project_name, project_description)) = project else {
-        return Err(server_error());
-    };
-    let extra_toolsets_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // `extra_toolsets_vars(run)` (`context.py:514-517`): consulted only
-    // when the plan enables them; CE names none.
-    let schema_tool = if extra_toolsets_enabled {
-        state.toolsets().schema_tool_name().to_owned()
-    } else {
-        String::new()
-    };
-    let input = prompting_context::DirectContextInput {
-        run_id: run_id.to_string(),
-        workspace_slug,
-        workspace_name,
-        project_id: project_id.to_string(),
-        project_identifier,
-        project_name,
-        project_description,
-        trigger: Some(TRIGGER_DIRECT.to_owned()),
-        available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
-        unavailable_capabilities: tool_plan
-            .get("unavailable_capabilities")
-            .cloned()
-            .unwrap_or(Value::Null),
-        extra_toolsets_enabled,
-        extra_toolsets_schema_tool: schema_tool,
-        limits: tool_plan.get("limits").cloned().unwrap_or(Value::Null),
-    };
-    let context_value = prompting_context::direct_context(&input);
-    let catalog_version = tool_plan
-        .get("catalog_version")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    let turn = match prompting_context::build_direct_turn(
-        raw_prompt,
-        Some(&context_value),
-        Some(AgentExecutorKind::CloudAgent.value()),
-        catalog_version,
-    ) {
-        Ok(turn) => turn,
-        Err(_) => return Err(server_error()),
-    };
-    let manifest = turn
-        .manifest
-        .as_ref()
-        .map(|manifest| manifest.to_json())
-        .unwrap_or(Value::Null);
-    Ok((turn.text, manifest))
-}
-
-/// The direct-create llm gate through the installed assistant seam
-/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
-/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
-/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
-async fn direct_gate_allows(state: &AppState, actor_id: Uuid, has_key: bool) -> bool {
-    state
-        .assistant_seam()
-        .has_usable_llm_config(actor_id, has_key)
-        .await
-}
+// B cloud prompt renders deleted (render_cloud_*).
 
 /// Direct create (`runs.py:238-345`): the falsy-prompt 400 is answered
 /// by the caller; everything from `validate_run_creation` down runs
@@ -1165,6 +1074,134 @@ async fn direct_gate_allows(state: &AppState, actor_id: Uuid, has_key: bool) -> 
 /// probed), §6.5 validation with the raw-text comparison post-check,
 /// then the `execution_fields` + insert + prompt + cap transaction,
 /// post-commit dispatch, and the 201.
+/// The direct tail's pin decision (`runs.py:258-284`): the `pod_once`
+/// gate, the H-11 refusal, then the pin resolver. Returns the
+/// `(pinned_runner_id, pin_kind)` the insert binds, or the refusal
+/// `Response` to answer with.
+async fn resolve_direct_pin(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+    pod_once: bool,
+    pod_id: Uuid,
+    pod_name: &str,
+) -> Result<(Option<Uuid>, &'static str), Response> {
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    match work_item_id {
+        Some(work_item_id) => {
+            let Some(issue) = pidash_db::entity::issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .map_err(|_| server_error())?
+            else {
+                return Err(server_error());
+            };
+            if pod_once {
+                // The one-shot pod path (`:264-274`): decided by the
+                // view (this tail), before reconcile. Auth first, the
+                // pod gate second; `no_eligible_runner_in_pod` is a
+                // preflight outcome, not an auth code.
+                if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+                    &orm_pool,
+                    &issue,
+                    Some(actor_id),
+                )
+                .await
+                .map_err(|_| server_error())?
+                {
+                    let detail = match code {
+                        "pod_once_not_applicable" => {
+                            "pod_once requires a dedicated runner on the issue"
+                        }
+                        _ => "only the issue's creator and assignees may use pod_once",
+                    };
+                    let status = if code == "pod_once_not_applicable" {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::FORBIDDEN
+                    };
+                    return Err(json_response(
+                        status,
+                        serde_json::to_string(&serde_json::json!({"error": detail, "code": code}))
+                            .expect("serializable refusal"),
+                    ));
+                }
+                let pod_has = pidash_services::runner_sessions::pod_match::pod_has_runner_for_issue_principal(
+                    &orm_pool,
+                    pod_id,
+                    work_item_id,
+                    Some(actor_id),
+                    true,
+                    true,
+                )
+                .await
+                .map_err(|_| server_error())?;
+                if !pod_has {
+                    return Err(json_response(
+                        StatusCode::CONFLICT,
+                        serde_json::to_string(&serde_json::json!({"error": format!("no eligible runner in pod {}", pod_name), "code": "no_eligible_runner_in_pod"}))
+                            .expect("serializable refusal"),
+                    ));
+                }
+                Ok((
+                    None,
+                    pidash_services::domain::issue_assignment::PIN_LOCALITY,
+                ))
+            } else {
+                // H-11 (§11.2): a person's run on an offline/paused
+                // dedicated runner is refused at creation, before
+                // reconcile, with the full §11.2 body.
+                if let Some(code) =
+                    pidash_services::domain::issue_assignment::dedicated_run_refusal(
+                        &orm_pool,
+                        &issue,
+                        true,
+                        Some(actor_id),
+                        false,
+                    )
+                    .await
+                    .map_err(|_| server_error())?
+                {
+                    let refusal =
+                        pidash_services::domain::issue_assignment::dedicated_refusal_body(
+                            &orm_pool, &issue, code,
+                        )
+                        .await
+                        .map_err(|_| server_error())?;
+                    return Err(json_response(StatusCode::CONFLICT, refusal.to_string()));
+                }
+                // For a dedicated issue the pin is
+                // `issue.assigned_runner` (§9.1); otherwise the
+                // locality pin — with `fresh_session` or no parent
+                // the locality pin is `None`, matching Django
+                // (`runs.py:281-284` passes `parent=None` here).
+                let resolved = pidash_services::domain::issue_assignment::resolve_run_pin(
+                    &orm_pool,
+                    &pidash_services::domain::issue_assignment::ResolvePinArgs {
+                        issue: &issue,
+                        parent: None,
+                        pod_id,
+                        fresh_session: false,
+                        creator_id: Some(actor_id),
+                        trigger: pidash_types::runner_runs::AgentRunTrigger::Direct,
+                        pod_once: false,
+                        actor_id,
+                    },
+                )
+                .await
+                .map_err(|_| server_error())?;
+                let pin_id = resolved.runner.as_ref().map(|r| r.id);
+                let kind = resolved.pin_kind;
+                Ok((pin_id, kind))
+            }
+        }
+        None => Ok((
+            None,
+            pidash_services::domain::issue_assignment::PIN_LOCALITY,
+        )),
+    }
+}
+
 pub async fn post_direct(
     state: &AppState,
     pool: &PgPool,
@@ -1246,6 +1283,64 @@ pub async fn post_direct(
         Ok(scope) => scope,
         Err(response) => return response,
     };
+    // NEWPIDASH-261: a direct run bound to a work item is gated by the
+    // project's `issue_run_policy` before the pin/insert; scheduler
+    // runs (no work item) keep the current rule.
+    if let Some(work_item_id) = ctx.work_item_id {
+        let orm_pool = sea_orm_connection(pool);
+        let issue_entity = match orm::issues::Entity::find_by_id(work_item_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let project_entity = match orm::projects::Entity::find_by_id(issue_entity.project_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let allowed = match pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            actor_id,
+            &issue_entity,
+            &project_entity,
+        )
+        .await
+        {
+            Ok(allowed) => allowed,
+            Err(_) => return server_error(),
+        };
+        if !allowed {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            );
+        }
+    }
+    // The pin (design §9.1) + the H-11 refusal (§11) + `pod_once`
+    // (§23.3), all before the insert exactly as Django's direct tail
+    // (`runs.py:258-284`): the H-11 refusal is checked before reconcile
+    // and fires without creating, the pod_once gate before that for
+    // the one-shot path, the resolver last for this tail.
+    let pod_once = body.get("pin").and_then(Value::as_str).unwrap_or("").trim() == "pod_once";
+    let (pinned_runner_id, pin_kind) = match resolve_direct_pin(
+        pool,
+        actor_id,
+        ctx.work_item_id,
+        pod_once,
+        ctx.pod.id,
+        &ctx.pod.name,
+    )
+    .await
+    {
+        Ok(pin) => pin,
+        Err(response) => return response,
+    };
     // `request.data.get("run_config") or {}` /
     // `request.data.get("required_capabilities") or []` (`:287-288`):
     // stored verbatim, falsy → the default.
@@ -1273,73 +1368,17 @@ pub async fn post_direct(
         id: actor_id,
         flags: scope.actor_flags,
     };
-    let cloud = state.settings().cloud_agent.clone();
-    let managed = state.settings().managed_runner.clone();
-    // Only the cloud planner inspects capabilities: pre-resolve the
-    // executor and convert strictly on the cloud path (a `TypeError`
-    // there is Django's 500); anywhere else the raw value is stored
-    // and never looked at.
-    let pre_resolved = resolve_executor_kind(
-        scope.requested.as_deref(),
-        &project.default_agent_executor,
-        &cloud,
-        &managed,
-    )
-    .ok();
-    let capabilities: Vec<String> = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
-        match convert_capabilities(&required_raw) {
-            Ok(capabilities) => capabilities,
-            Err(()) => return rollback_then(tx, server_error()).await,
-        }
-    } else {
-        Vec::new()
-    };
-    let capability_refs: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-    // Only the cloud arm consults the llm gate (`creation.py:33-39`):
-    // like capabilities above, consult the installed seam only when
-    // the pre-resolve lands on the cloud path, so local and managed
-    // creates never pay for the overlay's reads (and a resolution
-    // failure still raises in the driver before any gate verdict).
-    let has_llm = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
-        direct_gate_allows(state, actor_id, scope.has_llm_key).await
-    } else {
-        false
-    };
-    let profile = assistant_seams::agent_model_profile_for_user(scope.has_llm_key);
-    let llm_profile = LlmProfile {
-        available: profile.available,
-        reason_code: profile.reason_code,
-    };
     let inputs = ExecutionInputs {
         project: &project,
         run_kind: RUN_KIND_DIRECT,
         has_issue: ctx.work_item_id.is_some(),
-        required_capabilities: &capability_refs,
+        required_capabilities: &[],
         actor: Some(&actor),
         automatic: false,
         requested: scope.requested.as_deref(),
         now_unix_secs: now.timestamp(),
     };
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
-    let mut deferred: Vec<DeferredConsume> = Vec::new();
-    let mut collect = |consume: DeferredConsume| deferred.push(consume);
-    let fields = match resolve_execution_fields(
-        &mut tx,
-        &inputs,
-        &cloud,
-        &managed,
-        &cache,
-        &mut collect,
-        ExecutionSeams {
-            has_usable_llm_config: move || has_llm,
-            toolsets: state.toolsets().clone(),
-            llm_profile: move || llm_profile,
-        },
-    )
-    .await
-    {
+    let fields = match resolve_execution_fields(&inputs).await {
         Ok(fields) => fields,
         Err(error) => {
             let denial = execution_fields_denial(&error);
@@ -1353,99 +1392,60 @@ pub async fn post_direct(
     let error_details = pidash_services::orchestration::initial_error_details(
         fields.error_code.as_deref().unwrap_or_default(),
     );
-    let insert = sqlx::query(DIRECT_RUN_INSERT_SQL)
-        .bind(run_id)
-        .bind(ctx.workspace_id)
-        .bind(ctx.created_by)
-        .bind(ctx.pod.id)
-        .bind(fields.pinned_runner_id)
-        .bind(ctx.work_item_id)
-        .bind(executor_kind.as_str())
-        .bind(&error_details)
-        .bind(&fields.tool_plan)
-        .bind(&run_config)
-        .bind(&required_raw)
-        .bind(now)
-        .execute(&mut **tx.inner())
-        .await;
+    let insert = orm::agent_run::Entity::insert(
+        DirectRunInsert {
+            run_id,
+            workspace_id: ctx.workspace_id,
+            created_by_id: ctx.created_by,
+            pod_id: ctx.pod.id,
+            // The resolved pin (dedicated or locality, §9.2) is what
+            // Django's `AgentRun.objects.create(pinned_runner=...)`
+            // passes; the execution-fields pick (managed) only fills an
+            // unpinned run.
+            pinned_runner_id: pinned_runner_id.or(fields.pinned_runner_id),
+            pin_kind,
+            work_item_id: ctx.work_item_id,
+            executor_kind: executor_kind.as_str(),
+            error_details: &error_details,
+            tool_plan: &fields.tool_plan,
+            run_config: &run_config,
+            required_capabilities: &required_raw,
+            created_at: now,
+        }
+        .active_model(),
+    )
+    .exec(&TxConn::new(tx.inner()))
+    .await;
     if let Err(error) = insert {
         // `except IntegrityError` → 409, whatever the constraint.
-        let denial = if is_integrity_violation(&error) {
-            json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
+        let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
+            // The aborted tx cannot query; answer from the pool
+            // (a separate connection) so the 409 names the blocker.
+            let body =
+                active_run_enriched_body(pool, ctx.work_item_id, ACTIVE_RUN_EXISTS_BODY).await;
+            json_response(StatusCode::CONFLICT, body)
         } else {
             server_error()
         };
         return rollback_then(tx, denial).await;
     }
-    // `build_direct_turn` (`:293-299`): local and managed runs keep the
-    // raw prompt verbatim with a null manifest; cloud runs compose.
+    // B: local and managed runs keep the raw prompt verbatim with a
+    // null manifest (the cloud composes are gone).
     let prompt_text = py_str_json(&prompt_raw);
-    let (mut tx, prompt, manifest) = if fields.executor_kind == AgentExecutorKind::CloudAgent {
-        let outcome = match ctx.work_item_id {
-            Some(work_item_id) => {
-                render_cloud_issue_prompt(
-                    state,
-                    pool,
-                    tx,
-                    work_item_id,
-                    run_id,
-                    actor_id,
-                    &prompt_text,
-                    &fields.tool_plan,
-                    now.timestamp(),
-                )
-                .await
-            }
-            None => match render_cloud_free_prompt(
-                state,
-                pool,
-                run_id,
-                ctx.workspace_id,
-                scope.project_id,
-                &prompt_text,
-                &fields.tool_plan,
-            )
-            .await
-            {
-                Ok((prompt, manifest)) => Ok((tx, prompt, manifest)),
-                Err(response) => return rollback_then(tx, response).await,
-            },
-        };
-        match outcome {
-            Ok(outcome) => outcome,
-            Err(response) => return response,
-        }
-    } else {
-        (tx, prompt_text, Value::Null)
-    };
-    // The prompt-size cap is a Cloud Agent execution limit
-    // (`:300-308`); local runs stream the prompt verbatim.
-    if fields.executor_kind == AgentExecutorKind::CloudAgent
-        && prompt.len() > state.settings().cloud_agent.max_prompt_bytes.max(0) as usize
-    {
-        return rollback_then(
-            tx,
-            json_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                PROMPT_TOO_LARGE_BODY.to_owned(),
-            ),
-        )
-        .await;
-    }
+    let (mut tx, prompt, manifest) = (tx, prompt_text, Value::Null);
     let manifest_bind = if manifest.is_null() {
         None
     } else {
         Some(&manifest)
     };
-    if let Err(error) = sqlx::query(PROMPT_UPDATE_SQL)
-        .bind(prompt.as_str())
-        .bind(manifest_bind)
-        .bind(run_id)
-        .execute(&mut **tx.inner())
+    if let Err(error) = prompt_update_statement(run_id, &prompt, manifest_bind)
+        .exec(&TxConn::new(tx.inner()))
         .await
     {
-        let denial = if is_integrity_violation(&error) {
-            json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
+        let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
+            let body =
+                active_run_enriched_body(pool, ctx.work_item_id, ACTIVE_RUN_EXISTS_BODY).await;
+            json_response(StatusCode::CONFLICT, body)
         } else {
             server_error()
         };
@@ -1456,10 +1456,26 @@ pub async fn post_direct(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) =
-        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
-    {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
+    }
+    // The one-shot pod path records its system comment on commit
+    // (`runs.py:417-420` calls `_post_pod_once_started_comment`).
+    if pod_once {
+        if let Some(work_item_id) = ctx.work_item_id {
+            let orm = pidash_db::pool::sea_orm_connection(pool);
+            if pidash_services::domain::issue_assignment::post_pod_once_started_comment(
+                &orm,
+                work_item_id,
+                &ctx.pod.name,
+                actor_id,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+        }
     }
     render_created_run(pool, run_id).await
 }
@@ -1501,26 +1517,13 @@ impl IssueDispatchMode {
     }
 }
 
-/// Fetch the v1 `IssueRow` for the dispatch tails ([`DISPATCH_ISSUE_SQL`]).
+/// Fetch the v1 `IssueRow` for the dispatch tails ([`dispatch_issue_select`]).
 async fn fetch_dispatch_issue(pool: &PgPool, issue_id: Uuid) -> Result<Option<IssueRow>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DISPATCH_ISSUE_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    Ok(dispatch_issue_select(issue_id)
+        .one(&sea_orm_connection(pool))
         .await
-        .map_err(|_| server_error())?;
-    row.map(|row| {
-        Ok(IssueRow {
-            id: row.try_get("id").map_err(|_| server_error())?,
-            project_id: row.try_get("project_id").map_err(|_| server_error())?,
-            workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-            created_by_id: row.try_get("created_by_id").map_err(|_| server_error())?,
-            agent_executor: row.try_get("agent_executor").map_err(|_| server_error())?,
-            state_id: row.try_get("state_id").map_err(|_| server_error())?,
-            state_name: row.try_get("state_name").map_err(|_| server_error())?,
-            state_group: row.try_get("state_group").map_err(|_| server_error())?,
-        })
-    })
-    .transpose()
+        .map_err(|_| server_error())?
+        .map(DispatchIssueRow::into_issue_row))
 }
 
 /// Shared body of `_post_run_ai` and `_post_comment_and_run`: the
@@ -1549,17 +1552,19 @@ async fn post_issue_dispatch(
     // `Issue.all_objects.filter(pk=work_item_id).first()` (`:365/437`):
     // same `filter()` coercion as the direct path (ints coerce via
     // `UUID(int=)`, garbage → 500 — probed), no soft-delete scope.
+    // `pod_once = (request.data.get("pin") or "").strip() == "pod_once"`
+    // (`runs.py:483/577`). `pod_once` suppresses the queued 202
+    // (`_human_run_clock`), fires the dedicated-refusal bodies
+    // (`:492-532`), and bypasses the dedicated pin for this run
+    // only (§23.3).
+    let pod_once = body.get("pin").and_then(Value::as_str).unwrap_or("").trim() == "pod_once";
     let work_item_id = match coerce_filter_uuid(raw_work_item) {
         UuidCoerce::Id { id, .. } => id,
         UuidCoerce::Absent | UuidCoerce::Invalid => return server_error(),
     };
-    let row: Option<(Uuid, Uuid)> = match sqlx::query_as(&issue_lookup_sql())
-        .bind(work_item_id)
-        .fetch_optional(pool)
-        .await
-    {
+    let row = match issue_lookup(pool, work_item_id).await {
         Ok(row) => row,
-        Err(_) => return server_error(),
+        Err(response) => return response,
     };
     let Some((_, workspace_id)) = row else {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
@@ -1588,6 +1593,45 @@ async fn post_issue_dispatch(
         Ok(None) => return server_error(),
         Err(_) => return server_error(),
     };
+    // NEWPIDASH-261: gate the human trigger (Run AI / Comment & Run)
+    // by the project's `issue_run_policy` before any transaction, so
+    // neither the run nor the comment-and-run comment is written.
+    {
+        let orm_pool = sea_orm_connection(pool);
+        let issue_entity = match orm::issues::Entity::find_by_id(work_item_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let project_entity = match orm::projects::Entity::find_by_id(project_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let allowed = match pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            actor_id,
+            &issue_entity,
+            &project_entity,
+        )
+        .await
+        {
+            Ok(allowed) => allowed,
+            Err(_) => return server_error(),
+        };
+        if !allowed {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            );
+        }
+    }
     let state_ref = match (
         issue_row.state_group.as_deref(),
         issue_row.state_name.as_deref(),
@@ -1595,10 +1639,11 @@ async fn post_issue_dispatch(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    // `_human_run_clock` only runs while the issue ticks
-    // (`agent_phases.is_ticking_state`, `runs.py:404`); otherwise the
-    // clock is untouched and the dispatch runs bare.
-    let ticking = is_ticking_state(state_ref.as_ref());
+    // `_human_run_clock` only runs while the issue ticks (`runs.py:404`)
+    // — a stage that runs automatically in this project; otherwise
+    // (including a stage switched off) the clock is untouched and the
+    // dispatch runs bare.
+    let ticking = stage_runs_automatically(state_ref.as_ref(), project_row.policy.stage_switches());
     let now = now_micros();
     let jitter = draw_jitter(&issue_row, &project_row.policy);
     let (deps, matcher) = match dispatch_deps(
@@ -1614,7 +1659,6 @@ async fn post_issue_dispatch(
         Ok(deps) => deps,
         Err(_) => return server_error(),
     };
-    let cloud = state.settings().cloud_agent.clone();
 
     let tx = match DbTransaction::begin(pool).await {
         Ok(tx) => tx,
@@ -1624,7 +1668,7 @@ async fn post_issue_dispatch(
     // Smallest failing unit first: the store comes apart for rollback.
     macro_rules! rollback_500 {
         () => {{
-            let (tx, _, _, _, _, _) = store.into_parts();
+            let (tx, _, _, _) = store.into_parts();
             return rollback_then(tx, server_error()).await;
         }};
     }
@@ -1688,9 +1732,9 @@ async fn post_issue_dispatch(
                 }
             }
         }
-        if outcome.decision.queued {
+        if outcome.decision.queued && !pod_once {
             // The queued entry commits (`:373-374/409-417`): no dispatch.
-            let (tx, _, _, _, _, _) = store.into_parts();
+            let (tx, _, _, _) = store.into_parts();
             if tx.commit().await.is_err() {
                 return server_error();
             }
@@ -1704,20 +1748,22 @@ async fn post_issue_dispatch(
             return json_response(StatusCode::ACCEPTED, body);
         }
     }
-    // `dispatch_run_ai_run` / `dispatch_continuation_run` (`:375/447`).
-    let run_id = match mode {
+    // `dispatch_run_ai_run_with_reason` / `dispatch_continuation_run`
+    // (`:375/447`).
+    let (run_id, run_ai_reason) = match mode {
         IssueDispatchMode::RunAi => {
-            match pidash_services::orchestration::dispatch::dispatch_run_ai_run(
+            match pidash_services::orchestration::dispatch::dispatch_run_ai_run_with_reason(
                 &mut store,
                 work_item_id,
                 Some(actor_id),
+                pod_once,
                 &matcher,
                 now,
                 jitter,
             )
             .await
             {
-                Ok(outcome) => outcome.run_id,
+                Ok(outcome) => (outcome.run_id, outcome.reason),
                 Err(_) => rollback_500!(),
             }
         }
@@ -1727,26 +1773,42 @@ async fn post_issue_dispatch(
                 work_item_id,
                 mode.trigger(),
                 Some(actor_id),
+                pod_once,
+                false,
                 &matcher,
                 now,
                 jitter,
             )
             .await
             {
-                Ok(outcome) => outcome.run_id,
+                Ok(outcome) => (outcome.run_id, None),
                 Err(_) => rollback_500!(),
             }
         }
     };
-    let (mut tx, pool, cache, dispatches, deferred, _terminal) = store.into_parts();
+    let (mut tx, pool, dispatches, _terminal) = store.into_parts();
     let Some(run_id) = run_id else {
         // `transaction.set_rollback(True)` (`:379/453`): the re-time and
-        // any bounce writes vanish with the failed dispatch.
-        return rollback_then(
-            tx,
-            json_response(StatusCode::CONFLICT, mode.dispatch_failed_body().to_owned()),
+        // any bounce writes vanish with the failed dispatch. The
+        // dedicated refusal / pod_once bodies are built first (`:492-520`).
+        let response = refusal_response_for_status(
+            pool,
+            work_item_id,
+            actor_id,
+            pod_once,
+            run_ai_reason.as_deref(),
+            mode,
         )
         .await;
+        let Some(response) = response else {
+            // Generic dispatch failure: when a run occupies the slot
+            // the 409 names it (NEWPIDASH-251); the fallback body is
+            // byte-identical otherwise.
+            let fallback = mode.dispatch_failed_body();
+            let body = active_run_enriched_body(pool, Some(work_item_id), fallback).await;
+            return rollback_then(tx, json_response(StatusCode::CONFLICT, body)).await;
+        };
+        return rollback_then(tx, response).await;
     };
     // Snapshot the created row before commit and drain: Django answers
     // these tails with the pre-dispatch in-memory instance (no
@@ -1758,12 +1820,160 @@ async fn post_issue_dispatch(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if let Err(response) =
-        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
-    {
+    if let Err(response) = drain_direct_dispatch(pool, state, dispatches, now).await {
         return response;
     }
     render_created_snapshot(pool, &snapshot).await
+}
+
+/// The dedicated / pod_once 409/403/400 body for a failed issue
+/// dispatch (`runs.py:492-520` for run_ai, `:577-620` for
+/// comment_and_run): the comment&run tail re-probes the refusal
+/// (Django's `dispatch_continuation_run` returns None without a
+/// The dedicated / pod_once 409/403/400 body for a failed issue
+/// dispatch (`runs.py:492-520` for run_ai, `:577-620` for
+/// comment_and_run): the comment&run tail re-probes the refusal
+/// (Django's `dispatch_continuation_run` returns None without a
+/// reason); the run_ai tail maps the dispatch's reason code.
+async fn refusal_response_for_status(
+    pool: &PgPool,
+    work_item_id: Uuid,
+    actor_id: Uuid,
+    pod_once: bool,
+    reason: Option<&str>,
+    mode: IssueDispatchMode,
+) -> Option<Response> {
+    use pidash_db::entity::issues;
+
+    // The comment&run tail re-probes first (`:577-620`); the run_ai
+    // tail maps the dispatch's reason (`:492-520`).
+    let code = match mode {
+        IssueDispatchMode::RunAi => reason,
+        IssueDispatchMode::CommentAndRun if !pod_once => {
+            let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+            let issue = issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .ok()
+                .flatten()?;
+            return match pidash_services::domain::issue_assignment::dedicated_run_refusal(
+                &orm_pool,
+                &issue,
+                true,
+                Some(actor_id),
+                false,
+            )
+            .await
+            .ok()
+            .flatten()
+            {
+                Some(code) => Some(dedicated_code_response(pool, work_item_id, code).await),
+                None => None,
+            };
+        }
+        IssueDispatchMode::CommentAndRun => {
+            // pod_once: the else maps to `no_eligible_runner_in_pod`
+            // (`:603-607`).
+            let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+            let issue = issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .ok()
+                .flatten()?;
+            let code = pidash_services::domain::issue_assignment::pod_once_auth_code(
+                &orm_pool,
+                &issue,
+                Some(actor_id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or("no_eligible_runner_in_pod");
+            return Some(pod_once_code_response(code));
+        }
+    };
+    // run_ai maps its dispatch's reason (`:492-520`).
+    match mode {
+        IssueDispatchMode::RunAi => {
+            let code_owned = code.map(|code| code.to_owned())?;
+            let code = code_owned;
+            match code.as_str() {
+                "assigned_runner_offline"
+                | "assigned_runner_paused"
+                | "assigned_runner_not_owner" => {
+                    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+                    let issue = issues::Entity::find_by_id(work_item_id)
+                        .one(&orm_pool)
+                        .await
+                        .ok()
+                        .flatten()?;
+                    let code_s: &'static str = match code.as_str() {
+                        "assigned_runner_offline" => "assigned_runner_offline",
+                        "assigned_runner_paused" => "assigned_runner_paused",
+                        _ => "assigned_runner_not_owner",
+                    };
+                    let body = pidash_services::domain::issue_assignment::dedicated_refusal_body(
+                        &orm_pool, &issue, code_s,
+                    )
+                    .await
+                    .ok()?;
+                    Some(json_response(StatusCode::CONFLICT, body.to_string()))
+                }
+                "pod_once_not_allowed"
+                | "pod_once_not_applicable"
+                | "no_eligible_runner_in_pod" => Some(pod_once_code_response(code.as_str())),
+                _ => None,
+            }
+        }
+        IssueDispatchMode::CommentAndRun => None,
+    }
+}
+
+/// The §11.2 dedicated full body for `code` (409).
+async fn dedicated_code_response(pool: &PgPool, work_item_id: Uuid, code: &str) -> Response {
+    let code: &'static str = match code {
+        "assigned_runner_offline" => "assigned_runner_offline",
+        "assigned_runner_paused" => "assigned_runner_paused",
+        "assigned_runner_not_owner" => "assigned_runner_not_owner",
+        _ => "assigned_runner_offline",
+    };
+    use pidash_db::entity::issues;
+
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    let Some(issue) = issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return server_error();
+    };
+    match pidash_services::domain::issue_assignment::dedicated_refusal_body(&orm_pool, &issue, code)
+        .await
+    {
+        Ok(body) => json_response(StatusCode::CONFLICT, body.to_string()),
+        Err(_) => server_error(),
+    }
+}
+
+/// The pod_once ref-descriptor (`runs.py` the 403/400/409 bodies).
+fn pod_once_code_response(code: &str) -> Response {
+    let (status, error) = match code {
+        "pod_once_not_allowed" => (
+            StatusCode::FORBIDDEN,
+            "only the issue's creator and assignees may use pod_once",
+        ),
+        "pod_once_not_applicable" => (
+            StatusCode::BAD_REQUEST,
+            "pod_once requires a dedicated runner on the issue",
+        ),
+        _ => (StatusCode::CONFLICT, "no eligible runner in the pod"),
+    };
+    json_response(
+        status,
+        serde_json::to_string(&serde_json::json!({"error": error, "code": code}))
+            .expect("serializable refusal"),
+    )
 }
 
 /// `_post_run_ai` (`runs.py:347-388`).
@@ -1908,80 +2118,36 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn capability_conversion_matches_set_semantics() {
-        assert_eq!(
-            convert_capabilities(&json!(null)).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            convert_capabilities(&json!([])).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            convert_capabilities(&json!("abc")).unwrap(),
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
-        );
-        assert_eq!(
-            convert_capabilities(&json!(["x", "y"])).unwrap(),
-            vec!["x".to_owned(), "y".to_owned()]
-        );
-        assert_eq!(
-            convert_capabilities(&json!({"a": 1})).unwrap(),
-            vec!["a".to_owned()]
-        );
-        assert!(convert_capabilities(&json!(5)).is_err());
-        assert!(convert_capabilities(&json!([5])).is_err());
-        assert!(convert_capabilities(&json!([{"a": 1}])).is_err());
+    fn enrich_keeps_fallback_bytes_without_blocker() {
+        // No blocker: byte-identical fallback (pinned cases hold).
+        let body = enrich_with_active_run(ACTIVE_RUN_EXISTS_BODY, None);
+        assert_eq!(body, ACTIVE_RUN_EXISTS_BODY);
     }
 
-    /// Overlay-shaped seam: a keyless user still counts as configured
-    /// (the gateway lane, not BYOK).
-    #[derive(Debug)]
-    struct GatewaySeam;
-
-    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
-        fn has_usable_llm_config(
-            &self,
-            user_id: Uuid,
-            has_api_key: bool,
-        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
-            Box::pin(async move { true })
-        }
-
-        fn generate_title(
-            &self,
-            request: pidash_services::extensions::TitleRequest,
-        ) -> pidash_services::extensions::SeamFuture<
-            '_,
-            Result<String, pidash_services::extensions::TitleError>,
-        > {
-            let _ = request;
-            Box::pin(async move { Ok("seam title".to_owned()) })
-        }
-    }
-
-    #[tokio::test]
-    async fn direct_gate_uses_the_installed_seam() {
-        let state = AppState::new("test").with_assistant_seam(std::sync::Arc::new(GatewaySeam));
-        assert!(
-            direct_gate_allows(&state, Uuid::new_v4(), false).await,
-            "an installed seam that accepts the user must open the gate without a key"
+    #[test]
+    fn enrich_adds_active_run_block_keeping_keys() {
+        let run = BlockingRun {
+            id: Uuid::new_v4(),
+            status: "running".to_string(),
+            runner_id: Some(Uuid::new_v4()),
+            created_at: chrono::Utc::now(),
+            assigned_at: None,
+            started_at: Some(chrono::Utc::now()),
+            age_seconds: 42,
+        };
+        let body = enrich_with_active_run(ACTIVE_RUN_EXISTS_BODY, Some(&run));
+        let parsed: Value = serde_json::from_str(&body).expect("enriched body is JSON");
+        assert_eq!(
+            parsed["error"].as_str().unwrap(),
+            "work item already has an active run"
         );
-    }
-
-    #[tokio::test]
-    async fn direct_gate_keeps_the_ce_default() {
-        // No `with_assistant_seam`: the default CE seam answers the key
-        // bit exactly like the pre-seam free function did.
-        let state = AppState::new("test");
-        assert!(
-            direct_gate_allows(&state, Uuid::new_v4(), true).await,
-            "CE still admits a keyed creator"
+        assert_eq!(parsed["code"].as_str().unwrap(), "active_run_exists");
+        assert_eq!(
+            parsed["active_run"]["id"].as_str().unwrap(),
+            run.id.to_string()
         );
-        assert!(
-            !direct_gate_allows(&state, Uuid::new_v4(), false).await,
-            "CE still refuses a keyless creator (the 409 path)"
-        );
+        assert_eq!(parsed["active_run"]["status"].as_str().unwrap(), "running");
+        assert_eq!(parsed["active_run"]["age_seconds"].as_i64().unwrap(), 42);
+        assert!(parsed["active_run"]["assigned_at"].is_null());
     }
 }

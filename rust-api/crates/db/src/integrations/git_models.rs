@@ -251,6 +251,8 @@ pub mod git_provider_account {
         "workspace_integration_id",
         "status",
         "verified_at",
+        "suspended_at",
+        "last_checked_at",
         "last_check_error",
         "metadata",
     ];
@@ -302,8 +304,137 @@ pub mod git_provider_account {
         pub workspace_integration_id: Option<uuid::Uuid>,
         pub status: String,
         pub verified_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
         pub last_check_error: String,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_provider_accounts::Model> for GitProviderAccount {
+        fn from(row: crate::entity::git_provider_accounts::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                workspace_id: row.workspace_id,
+                provider: row.provider,
+                host_url: row.host_url,
+                auth_type: row.auth_type,
+                external_account_id: row.external_account_id,
+                external_account_login: row.external_account_login,
+                display_name: row.display_name,
+                capabilities: row.capabilities,
+                credential_config: row.credential_config,
+                workspace_integration_id: row.workspace_integration_id,
+                status: row.status,
+                verified_at: row.verified_at.map(at),
+                suspended_at: row.suspended_at.map(at),
+                last_checked_at: row.last_checked_at.map(at),
+                last_check_error: row.last_check_error,
+                metadata: row.metadata,
+            }
+        }
+    }
+}
+
+/// `git_provider_install_sessions` table (`git.py`, PDASHOSS01-356).
+/// Provider-neutral install sessions: `provider` names the app
+/// (`github`) and `external_account_id` carries the provider's
+/// installation id as a string (`str(installation_id)`), mirroring
+/// `git_provider_accounts.external_account_id`.
+pub mod git_provider_install_session {
+    use super::OnDelete;
+    use serde::{Deserialize, Serialize};
+
+    /// Default `status` (`Status.STARTED`).
+    pub const DEFAULT_STATUS: &str = "started";
+
+    /// Django table name (`Meta.db_table`).
+    pub const TABLE: &str = "git_provider_install_sessions";
+
+    /// Default `ORDER BY` (`Meta.ordering = ("-created_at",)`).
+    pub const ORDERING: &str = "-created_at";
+
+    /// Columns in Django `_meta` field order.
+    pub const COLUMNS: &[&str] = &[
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by_id",
+        "updated_by_id",
+        "deleted_at",
+        "state",
+        "provider",
+        "workspace_id",
+        "actor_id",
+        "external_account_id",
+        "account_login",
+        "status",
+        "expires_at",
+        "completed_at",
+        "error",
+    ];
+
+    /// `state` is column-level `unique=True`.
+    pub const UNIQUE_COLUMNS: &[&str] = &["state"];
+
+    /// `workspace` FK: `CASCADE`, `related_name="git_provider_install_sessions"`.
+    pub const WORKSPACE_ON_DELETE: OnDelete = OnDelete::Cascade;
+    pub const WORKSPACE_RELATED_NAME: &str = "git_provider_install_sessions";
+
+    /// `actor` FK: `CASCADE`, `related_name="git_provider_install_sessions"`.
+    pub const ACTOR_ON_DELETE: OnDelete = OnDelete::Cascade;
+    pub const ACTOR_RELATED_NAME: &str = "git_provider_install_sessions";
+
+    /// One `GitProviderInstallSession` row. `external_account_id` is
+    /// nullable (the session has no installation until the callback
+    /// completes) and carries the provider installation id as a string.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct GitProviderInstallSession {
+        pub id: uuid::Uuid,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+        pub updated_at: chrono::DateTime<chrono::Utc>,
+        pub created_by_id: Option<uuid::Uuid>,
+        pub updated_by_id: Option<uuid::Uuid>,
+        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub state: String,
+        pub provider: String,
+        pub workspace_id: uuid::Uuid,
+        pub actor_id: uuid::Uuid,
+        pub external_account_id: Option<String>,
+        pub account_login: String,
+        pub status: String,
+        pub expires_at: chrono::DateTime<chrono::Utc>,
+        pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub error: String,
+    }
+
+    impl From<crate::entity::git_provider_install_sessions::Model> for GitProviderInstallSession {
+        fn from(row: crate::entity::git_provider_install_sessions::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                state: row.state,
+                provider: row.provider,
+                workspace_id: row.workspace_id,
+                actor_id: row.actor_id,
+                external_account_id: row.external_account_id,
+                account_login: row.account_login,
+                status: row.status,
+                expires_at: at(row.expires_at),
+                completed_at: row.completed_at.map(at),
+                error: row.error,
+            }
+        }
     }
 }
 
@@ -382,6 +513,32 @@ pub mod git_repository {
         pub default_branch: String,
         pub is_private: bool,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_repositories::Model> for GitRepository {
+        fn from(row: crate::entity::git_repositories::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                provider: row.provider,
+                host_url: row.host_url,
+                external_id: row.external_id,
+                namespace: row.namespace,
+                name: row.name,
+                full_name: row.full_name,
+                web_url: row.web_url,
+                clone_url_http: row.clone_url_http,
+                clone_url_ssh: row.clone_url_ssh,
+                default_branch: row.default_branch,
+                is_private: row.is_private,
+                metadata: row.metadata,
+            }
+        }
     }
 }
 
@@ -481,6 +638,30 @@ pub mod git_repository_binding {
         pub last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
         pub last_sync_error: String,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_repository_bindings::Model> for GitRepositoryBinding {
+        fn from(row: crate::entity::git_repository_bindings::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                repository_id: row.repository_id,
+                provider_account_id: row.provider_account_id,
+                actor_id: row.actor_id,
+                is_sync_enabled: row.is_sync_enabled,
+                clone_auth_mode: row.clone_auth_mode,
+                last_synced_at: row.last_synced_at.map(at),
+                last_sync_error: row.last_sync_error,
+                metadata: row.metadata,
+            }
+        }
     }
 }
 
@@ -799,6 +980,37 @@ pub mod git_code_review_link {
         pub remote_updated_at: Option<chrono::DateTime<chrono::Utc>>,
         pub metadata: serde_json::Value,
     }
+
+    impl From<crate::entity::git_code_review_links::Model> for GitCodeReviewLink {
+        fn from(row: crate::entity::git_code_review_links::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                issue_id: row.issue_id,
+                provider: row.provider,
+                host_url: row.host_url,
+                namespace: row.namespace,
+                repo_name: row.repo_name,
+                repo_external_id: row.repo_external_id,
+                external_id: row.external_id,
+                external_iid: row.external_iid,
+                url: row.url,
+                title: row.title,
+                state: row.state,
+                merged: row.merged,
+                draft: row.draft,
+                remote_updated_at: row.remote_updated_at.map(at),
+                metadata: row.metadata,
+            }
+        }
+    }
 }
 
 /// `git_webhook_deliveries` table (`git.py:272-315`).
@@ -996,6 +1208,27 @@ mod tests {
 
     fn constraint_names(constraints: &[(&str, &[&str])]) -> Vec<String> {
         constraints.iter().map(|(n, _)| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn install_session_columns_match_fixture() {
+        assert_table(
+            "GitProviderInstallSession",
+            git_provider_install_session::TABLE,
+            git_provider_install_session::ORDERING,
+        );
+        assert_columns(
+            "GitProviderInstallSession",
+            "BaseModel",
+            git_provider_install_session::COLUMNS,
+        );
+        let table: &str = git_provider_install_session::TABLE;
+        assert_eq!(table, "git_provider_install_sessions");
+        assert_eq!(git_provider_install_session::DEFAULT_STATUS, "started");
+        assert_eq!(
+            ts::owned_columns(git_provider_install_session::UNIQUE_COLUMNS),
+            vec!["state"]
+        );
     }
 
     #[test]

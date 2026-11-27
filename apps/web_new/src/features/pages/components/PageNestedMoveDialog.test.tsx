@@ -8,7 +8,7 @@
 // parent paths, refuses a target that would cycle, and hands the chosen
 // container to the host.
 
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -93,13 +93,31 @@ describe("PageNestedMoveDialog", () => {
   it("filters by title and by parent path", async () => {
     const user = userEvent.setup();
     renderDialog();
-    await user.type(screen.getByRole("searchbox", { name: PAGE_MOVE_SEARCH_PLACEHOLDER }), "other");
+    const field = screen.getByRole("searchbox", { name: PAGE_MOVE_SEARCH_PLACEHOLDER });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "other");
     expect(screen.getByRole("option", { name: /Other/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Handbook/ })).not.toBeInTheDocument();
-    await user.clear(screen.getByRole("searchbox"));
-    await user.type(screen.getByRole("searchbox"), "handbook");
+    await user.clear(field);
+    await user.type(field, "handbook");
     expect(screen.getByRole("option", { name: /Policies/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Other/ })).not.toBeInTheDocument();
+  });
+
+  it("hands the open-time focus to the search field", async () => {
+    renderDialog();
+    const field = screen.getByRole("searchbox", { name: PAGE_MOVE_SEARCH_PLACEHOLDER });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const field = screen.getByRole("searchbox", { name: PAGE_MOVE_SEARCH_PLACEHOLDER });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "other");
+    expect(field).toHaveValue("other");
   });
 
   it("says when nothing matches", async () => {

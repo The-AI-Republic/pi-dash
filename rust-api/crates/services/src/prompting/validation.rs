@@ -11,7 +11,9 @@
 //!   (`_scheduler_sample`) — [`sample_contexts`]: the sample contexts
 //!   mirror the keys emitted by the context builders; values are ported
 //!   literally (`None` → `null`, empty containers stay empty).
-//! * `validation.py:285-294` (`kinds_for_section`) — [`kinds_for_section`].
+//! * `validation.py` `compositions_for_section` / `kinds_for_section` —
+//!   [`compositions_for_section`] / [`kinds_for_section`] (work-type aware,
+//!   PDASHOSS01-234).
 //! * `validation.py:297-320` (`_compose_with_candidate`) —
 //!   `compose_with_candidate` (private): other sections resolve through
 //!   the passed override index rather than per-section direct queries —
@@ -36,7 +38,7 @@
 //! deliberately cannot see the locked Cloud tables — observed Python
 //! behavior, ported as-is.
 
-use super::{composer, recipes, registry, renderer};
+use super::{composer, recipes, registry, renderer, work_types};
 
 /// Mirrors `registry::MAX_SECTION_BODY_LENGTH` — restated for the
 /// validator's own error message (`validation.py:33-35`).
@@ -67,6 +69,9 @@ impl OverrideValidationError {
 /// (`validation.py:42-220`). `kind` lands in `run.kind`, as in Python.
 fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
     if populated {
+        // The populated sample carries an agent's finishing comment too,
+        // so the size-budget test sees a realistic thread.
+        let comments_section = "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.\n\n### Comment 2 — AI Agent: Sample at 2026-01-01\nAgent run: 00000000-0000-0000-0000-000000000003\n\nOpened https://example.com/pr/1 with the sample change.";
         serde_json::json!({
             "issue": {
                 "id": "00000000-0000-0000-0000-000000000001",
@@ -84,6 +89,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                     {"name": "In Progress", "group": "started", "description": "Active"},
                     {"name": "In Review", "group": "review", "description": "Awaiting human review"},
                     {"name": "In Test", "group": "test", "description": "Testing / QA"},
+                    {"name": "AI Completed", "group": "completed", "description": "Finished by the agent"},
                     {"name": "Done", "group": "completed", "description": "Finished"},
                 ],
             },
@@ -94,6 +100,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "name": "Sample Project",
                 "description": "Sample project description.",
             },
+            "work_type": {"key": "software", "title": "Software"},
             "repo": {
                 "url": "https://example.com/repo.git",
                 "base_branch": "main",
@@ -158,6 +165,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "turn_number": 1,
                 "trigger": "tick",
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -181,9 +189,21 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "interval_seconds": 10800,
                 "interval_human": "3 hours",
             },
-            "comments_section": "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.",
+            "comments_section": comments_section,
             "parent_done_payload": "{\n  \"pr_url\": \"https://example.com/pr/1\"\n}",
-            "workpad_body": "### Phase\n- investigating",
+            "workpad_body": "### Keep in mind\n- PR https://example.com/pr/1, branch `sample-1`; check with `make test`.\n- Open: the empty-input path is untested.\n- The sample service needs `SAMPLE_ENV=dev` locally.\n\n### Log\n- 2026-01-01 in progress: opened the sample PR.",
+            "stages": {
+                "agent_decides": true,
+                "review": true,
+                "test": true,
+                "path": ["In Progress", "In Review", "In Test", "AI Completed"],
+                "current_runs_automatically": true,
+                "current_stage_switched_off": false,
+                "final_state": "AI Completed",
+            },
+            // Removed by the unified workpad (U2); always empty until cleanup.
+            "handoff": "",
+            "stage_history": "- 2026-01-01 In Progress: done — opened the sample PR",
         })
     } else {
         // Minimal: every key present, all optionals empty/`None`
@@ -205,6 +225,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             },
             "workspace": {"slug": "sample-ws", "name": ""},
             "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": ""},
+            "work_type": {"key": "general", "title": "General"},
             "repo": {
                 "url": null,
                 "base_branch": null,
@@ -232,6 +253,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "turn_number": 1,
                 "trigger": "state_transition",
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -242,6 +264,17 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             "comments_section": "(no comments on this issue yet)",
             "parent_done_payload": "(no parent run done payload available)",
             "workpad_body": "",
+            "stages": {
+                "agent_decides": false,
+                "review": false,
+                "test": false,
+                "path": [],
+                "current_runs_automatically": false,
+                "current_stage_switched_off": false,
+                "final_state": null,
+            },
+            "handoff": "",
+            "stage_history": "",
         })
     }
 }
@@ -269,6 +302,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
                 "attempt": 1,
                 "turn_number": 1,
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -292,6 +326,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
                 "attempt": 1,
                 "turn_number": 1,
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -314,32 +349,56 @@ pub fn sample_contexts(kind: &str) -> Vec<serde_json::Value> {
     }
 }
 
-/// All recipe kinds whose ordered section list contains `section_key`
-/// (`validation.py:285-294`): local recipes, then managed (an alias —
-/// contributes nothing new), then Cloud, each deduplicated in order.
+/// All `(kind, work_type)` compositions containing `section_key`
+/// (`validation.py` `compositions_for_section`).
+///
+/// Recipes carry work-type slots, so membership depends on the work type: a
+/// core section appears for every work type, a work-type section
+/// (`software.execute`) only where its work type fills the slot. Order:
+/// local recipes, then managed (an alias — contributes nothing new); work
+/// types key-sorted; each combination deduplicated in order. (The cloud
+/// recipes went with the retired cloud plane in P3 step B.)
+pub fn compositions_for_section(section_key: &str) -> Vec<(&'static str, &'static str)> {
+    let mut combos: Vec<(&'static str, &'static str)> = Vec::new();
+    for table in [recipes::RECIPES, recipes::MANAGED_RECIPES] {
+        for (kind, entries) in table {
+            for work_type in work_types::keys() {
+                let combo = (*kind, work_type);
+                if combos.contains(&combo) {
+                    continue;
+                }
+                let expanded = work_types::expand(entries, work_type)
+                    .expect("registered work types always expand");
+                if expanded.contains(&section_key) {
+                    combos.push(combo);
+                }
+            }
+        }
+    }
+    combos
+}
+
+/// All recipe kinds whose recipe can contain `section_key` under any work
+/// type (`validation.py` `kinds_for_section`), deduplicated in
+/// [`compositions_for_section`] order.
 pub fn kinds_for_section(section_key: &str) -> Vec<&'static str> {
     let mut kinds: Vec<&'static str> = Vec::new();
-    for table in [
-        recipes::RECIPES,
-        recipes::MANAGED_RECIPES,
-        recipes::CLOUD_RECIPES,
-    ] {
-        for (kind, keys) in table {
-            if keys.contains(&section_key) && !kinds.contains(kind) {
-                kinds.push(*kind);
-            }
+    for (kind, _work_type) in compositions_for_section(section_key) {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
         }
     }
     kinds
 }
 
-/// Assemble `kind` with `section_key` forced to `candidate_body`
-/// (`validation.py:297-320`). Other sections resolve normally (existing
+/// Assemble `kind` (for `work_type`) with `section_key` forced to
+/// `candidate_body` (`validation.py` `_compose_with_candidate`). Other sections resolve normally (existing
 /// overrides + defaults) so the candidate is validated in the real
 /// assembled context, not in isolation. The candidate is labeled
 /// `"candidate"` at version 0, exactly like Python.
 fn compose_with_candidate(
     kind: &str,
+    work_type: &str,
     section_key: &str,
     candidate_body: &str,
     workspace_id: Option<&str>,
@@ -350,9 +409,11 @@ fn compose_with_candidate(
         .map_err(|e| OverrideValidationError::new(e.message()))?;
     let recipe =
         recipes::recipe_for(kind, None).map_err(|e| OverrideValidationError::new(e.message()))?;
+    let recipe = work_types::expand(recipe, work_type)
+        .map_err(|e| OverrideValidationError::new(e.message()))?;
     let mut resolved: Vec<composer::ResolvedSection> = Vec::with_capacity(recipe.len());
     for key in recipe {
-        if *key == section_key {
+        if key == section_key {
             resolved.push(composer::ResolvedSection {
                 key: section.key.to_owned(),
                 title: section.title.to_owned(),
@@ -405,8 +466,8 @@ pub fn validate_override(
         )));
     }
 
-    let kinds = kinds_for_section(section_key);
-    if kinds.is_empty() {
+    let combos = compositions_for_section(section_key);
+    if combos.is_empty() {
         // Fail closed: a section present in the registry but in no recipe
         // would otherwise be saved with zero render validation, and
         // silently become live if a future recipe adds it. Refuse rather
@@ -416,9 +477,10 @@ pub fn validate_override(
              it cannot be overridden until a recipe references it"
         )));
     }
-    for kind in kinds {
+    for (kind, work_type) in combos {
         let template_body = compose_with_candidate(
             kind,
+            work_type,
             section_key,
             candidate_body,
             workspace_id,
@@ -429,7 +491,7 @@ pub fn validate_override(
             if let Err(err) = renderer::render(&template_body, &ctx) {
                 return Err(OverrideValidationError::new(format!(
                     "override for section '{section_key}' fails to render \
-                     as part of the '{kind}' prompt: {}",
+                     as part of the '{kind}' prompt (work type '{work_type}'): {}",
                     err.message()
                 )));
             }
@@ -537,17 +599,8 @@ mod tests {
             .map(|k| k.as_str().expect("kind").to_owned())
             .collect();
         assert_eq!(kinds, expected);
-        let kinds: Vec<String> = kinds_for_section("cloud-intro")
-            .iter()
-            .map(|k| k.to_string())
-            .collect();
-        let expected: Vec<String> = data["kinds_for_cloud_intro"]
-            .as_array()
-            .expect("array")
-            .iter()
-            .map(|k| k.as_str().expect("kind").to_owned())
-            .collect();
-        assert_eq!(kinds, expected);
+        // P3 step B: the cloud intro check died with the cloud
+        // recipes (a deleted section key yields no kinds).
         assert!(kinds_for_section("definitely-not-a-registry-key").is_empty());
         assert_eq!(
             kinds_for_section("no-such-key").len(),

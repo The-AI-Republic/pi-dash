@@ -35,10 +35,11 @@
 //!   the isolation loop (re-render each non-default section alone; the
 //!   first failure is the culprit), which is also Python's path for the
 //!   common `UndefinedError` case that carries no lineno.
-//! * `composer.py:286-321` (`compose`), `324-344` (`compose_cloud`),
-//!   `347-364` (`compile_template`) — [`compose`], [`compose_cloud`],
-//!   [`compile_template`]. `compose_cloud` drops Python's
-//!   accepted-and-ignored `workspace` / `project` parameters.
+//! * `composer.py:286-321` (`compose`), `347-364` (`compile_template`)
+//!   — [`compose`], [`compile_template`].
+//!
+//! P3 step B deleted `compose_cloud` (`composer.py:324-344`) with
+//! the retired cloud plane.
 //! * `composer.py:372-380` (`_user_for_run`) — [`user_id_for_run`]: the
 //!   `run_is_human_triggered` predicate owns to the runner layer, so this
 //!   takes its boolean result plus the triggering user's id.
@@ -63,7 +64,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use super::{recipes, registry, renderer};
+use super::{recipes, registry, renderer, work_types};
 
 /// Manifest/source label for a registry-default section body
 /// (`composer.py:32`).
@@ -403,6 +404,22 @@ fn attributed_detail(
     detail.to_owned()
 }
 
+/// The recipe for `kind` on `executor_kind` with its slots filled for
+/// `work_type` (`work_types.expand(recipes.recipe_for(...), work_type or
+/// DEFAULT_WORK_TYPE)`).
+fn expanded_recipe(
+    kind: &str,
+    executor_kind: Option<&str>,
+    work_type: Option<&str>,
+) -> Result<Vec<&'static str>, PromptComposeError> {
+    let recipe = recipes::recipe_for(kind, executor_kind)
+        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let work_type = work_type
+        .filter(|key| !key.is_empty())
+        .unwrap_or(work_types::DEFAULT_WORK_TYPE);
+    work_types::expand(recipe, work_type).map_err(|e| PromptComposeError::new(e.message()))
+}
+
 /// Resolve, assemble, and render the recipe for `kind`
 /// (`composer.py:286-321`). Raises [`PromptComposeError`] (attributed to
 /// the failing section) when rendering fails.
@@ -413,10 +430,14 @@ fn attributed_detail(
 /// draft_overrides:`). A draft keeps its resolved version and is labeled
 /// [`SOURCE_DRAFT`].
 ///
-/// Unknown kinds / sections surface message-preserving
+/// `work_type` fills the recipe's slots ([`work_types::expand`]); `None`
+/// means the default work type.
+///
+/// Unknown kinds / sections / work types surface message-preserving
 /// [`PromptComposeError`]s (Python propagates `RecipeNotFound` /
-/// `PromptRegistryError` as-is; there are no typed catchers yet, so the
-/// message is the contract).
+/// `PromptRegistryError` / `WorkTypeError` as-is; there are no typed
+/// catchers yet, so the message is the contract).
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     kind: &str,
     workspace_id: Option<&str>,
@@ -425,9 +446,9 @@ pub fn compose(
     context: &serde_json::Value,
     draft_overrides: Option<&HashMap<String, String>>,
     executor_kind: Option<&str>,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe = recipes::recipe_for(kind, executor_kind)
-        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, executor_kind, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -462,55 +483,14 @@ pub fn compose(
     }
 }
 
-/// Compose an immutable Cloud recipe without user/workspace overrides
-/// (`composer.py:324-344`).
-pub fn compose_cloud(
-    kind: &str,
-    context: &serde_json::Value,
-) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::cloud_recipe_for(kind).map_err(|e| PromptComposeError::new(e.message()))?;
-    let mut resolved = Vec::with_capacity(recipe.len());
-    for key in recipe {
-        let section =
-            registry::get_section(key).map_err(|e| PromptComposeError::new(e.message()))?;
-        resolved.push(ResolvedSection {
-            key: key.to_string(),
-            title: section.title.to_owned(),
-            customizable: section.customizable.to_owned(),
-            body: section.default_body.clone(),
-            source: SOURCE_DEFAULT.to_owned(),
-            version: 0,
-        });
-    }
-    let (template_body, manifest) = assemble(&resolved);
-    match renderer::render(&template_body, context) {
-        Ok(text) => Ok(ComposedPrompt {
-            text,
-            manifest,
-            template_body,
-            resolved,
-        }),
-        Err(err) => Err(PromptComposeError::new(attributed_detail(
-            err.message(),
-            &manifest,
-            &resolved,
-            Some(context),
-        ))),
-    }
-}
-
-/// Assemble the recipe for `kind` **without rendering** (Jinja markers
-/// intact), powering the "see the final template" view
-/// (`composer.py:347-364`). The returned `text` is the raw assembled body.
 pub fn compile_template(
     kind: &str,
     workspace_id: Option<&str>,
     user_id: Option<&str>,
     index: &OverrideIndex,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::recipe_for(kind, None).map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, None, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -545,6 +525,8 @@ pub fn user_id_for_run(human_triggered: bool, created_by_user_id: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::project_settings::{AgentStages, AgentStagesMode};
+    use crate::prompting::context;
     use serde_json::Value;
 
     const WORKSPACE_ID: &str = "204fd67f-6485-47a0-98e2-079bd6b34202";
@@ -855,6 +837,7 @@ mod tests {
             &populated_issue_context(),
             None,
             None,
+            None,
         )
         .expect("defaults compose");
         assert_eq!(
@@ -901,6 +884,7 @@ mod tests {
             &populated_issue_context(),
             Some(&drafts),
             None,
+            None,
         )
         .expect("draft composes");
         assert!(composed.text.contains("Hello sample-ws!"));
@@ -919,6 +903,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&HashMap::new()),
+            None,
             None,
         )
         .expect("empty drafts compose");
@@ -940,6 +925,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&drafts),
+            None,
             None,
         )
         .expect_err("bad draft fails");
@@ -982,29 +968,12 @@ mod tests {
             Some(WORKSPACE_ID),
             Some(USER_ID),
             &index,
+            None,
         )
         .expect("compiles");
         assert!(compiled.text.contains("{{"));
         assert_eq!(compiled.text, compiled.template_body);
         assert_eq!(compiled.manifest.len(), compiled.resolved.len());
-    }
-
-    #[test]
-    fn compose_cloud_resolves_defaults_only() {
-        // `FIX-compose / compose.cloud_direct_*`.
-        let ctx = crate::prompting::validation::sample_contexts(recipes::KIND_DIRECT)
-            .into_iter()
-            .next()
-            .expect("direct sample");
-        let composed = compose_cloud(recipes::KIND_DIRECT, &ctx).expect("cloud composes");
-        assert!(composed.manifest.iter().all(|e| e.source == SOURCE_DEFAULT));
-        assert!(composed.manifest.iter().all(|e| e.version == 0));
-        assert_eq!(
-            composed.manifest.len(),
-            recipes::cloud_recipe_for(recipes::KIND_DIRECT)
-                .expect("direct cloud recipe")
-                .len()
-        );
     }
 
     #[test]
@@ -1015,6 +984,7 @@ mod tests {
             Some(USER_ID),
             &OverrideIndex::new(),
             &populated_issue_context(),
+            None,
             None,
             None,
         )
@@ -1037,129 +1007,777 @@ mod tests {
             .into_iter()
             .next()
             .expect("populated sample first");
-        compose(kind, None, None, &OverrideIndex::new(), &ctx, None, None)
-            .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
-            .text
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
     }
 
-    // Ticking semantics: outcomes are informational; only --stop-ticking
-    // stops the clock (PDASHOSS01-250, 07bb896a). Ports of the new and
-    // changed cases in `test_composer.py`.
-
     #[test]
-    fn ending_run_outcomes_never_stop_the_clock() {
-        for kind in [
-            recipes::KIND_CODING_TASK,
-            recipes::KIND_REVIEW,
-            recipes::KIND_TEST,
-        ] {
-            let body = composed_text(kind);
-            assert!(
-                body.contains("No outcome stops the issue's ticking clock"),
-                "{kind} says no outcome stops the clock"
-            );
-            assert!(
-                body.contains("**this run's turn is done**"),
-                "{kind} defines done as this run's turn"
-            );
-            assert!(body.contains("--stop-ticking"), "{kind} names the flag");
-            assert!(
-                body.contains("### Stopping the clock — `--stop-ticking`"),
-                "{kind} carries the stop block"
-            );
-            assert!(
-                body.contains("Never send it while work remains that a later run could pick up."),
-                "{kind} carries the never-send rule"
-            );
-            // The legacy inference lines are gone.
-            for stale in [
-                "the clock stops until a human acts",
-                "The clock for this stage stops",
-                "it is approved / verified and stays where it is",
-                "Without it the clock guesses",
-            ] {
+    fn scheduler_prompt_documents_run_yield_without_the_ticking_clock() {
+        // A scheduler run may report its outcome (PDASHOSS01-276) but has no
+        // issue clock: the scheduler variant must not mention --stop-ticking
+        // at all (lean workflow), nor carry the issue-run wording.
+        let body = composed_text(recipes::KIND_SCHEDULER);
+        assert!(body.contains("pidash run yield --outcome"));
+        assert!(body.contains(r#""run_kind": "scheduler""#));
+        assert!(body.contains("nothing it reports disables the schedule"));
+        assert!(!body.contains("--stop-ticking"));
+        assert!(!body.contains("the issue's ticking clock"));
+        assert!(!body.contains("pidash run finish"));
+    }
+
+    fn composed_text_with_work_type(kind: &str, work_type: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose_ctx(kind, work_type, &ctx)
+    }
+
+    fn compose_ctx(kind: &str, work_type: &str, ctx: &Value) -> String {
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            ctx,
+            None,
+            None,
+            Some(work_type),
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
+    }
+
+    const ISSUE_KINDS: [&str; 3] = [
+        recipes::KIND_CODING_TASK,
+        recipes::KIND_REVIEW,
+        recipes::KIND_TEST,
+    ];
+
+    /// Lean workflow acceptance (design §13 issue C): no built-in issue-run
+    /// section mentions `--stop-ticking` or `parent_done_payload`, every
+    /// issue run carries the workpad (unified workpad design U1), and
+    /// `pidash run yield` survives
+    /// only in the lifecycle's old-runner fallback line (D11).
+    #[test]
+    fn issue_run_prompts_drop_the_retired_end_of_run_commands() {
+        for kind in ISSUE_KINDS {
+            for work_type in work_types::keys() {
+                let body = composed_text_with_work_type(kind, work_type);
+                // `--stop-ticking` survives only in the old-runner fallback
+                // (D11), where `yield` is the only way to stop the clock.
+                for line in body.lines().filter(|line| line.contains("--stop-ticking")) {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
                 assert!(
-                    !body.contains(stale),
-                    "{kind} dropped the legacy line: {stale}"
+                    body.contains("pidash run finish --to"),
+                    "{kind}/{work_type}"
                 );
+                let yield_lines: Vec<&str> = body
+                    .lines()
+                    .filter(|line| line.contains("pidash run yield"))
+                    .collect();
+                assert_eq!(yield_lines.len(), 1, "{kind}/{work_type}: {yield_lines:?}");
+                assert!(
+                    yield_lines[0].contains("If `pidash run finish` is not a known command"),
+                    "{kind}/{work_type}: yield only in the fallback"
+                );
+                // Every issue run reads and writes the workpad.
+                assert!(body.contains("pidash workpad update"), "{kind}/{work_type}");
+                assert!(body.contains("### Keep in mind"), "{kind}/{work_type}");
+                assert!(!body.contains("workpad_body"), "{kind}/{work_type}");
+                let template =
+                    compile_template(kind, None, None, &OverrideIndex::new(), Some(work_type))
+                        .expect("compiles")
+                        .text;
+                // The stage hand-off is gone from every template. The
+                // in-flight sentence in review and test (an earlier run's
+                // hand-off comment) is the only mention left.
+                for retired in [
+                    "--handoff-file",
+                    "{{ handoff }}",
+                    "### Hand-off",
+                    "### Path to done",
+                ] {
+                    assert!(!template.contains(retired), "{kind}/{work_type}: {retired}");
+                }
+                for line in body.lines().filter(|line| line.contains("hand-off")) {
+                    assert!(
+                        kind != recipes::KIND_CODING_TASK
+                            && line.contains(
+                                "an earlier run may have posted a hand-off in the comments"
+                            ),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
+                assert!(
+                    !template.contains("parent_done_payload"),
+                    "{kind}/{work_type}"
+                );
+                for line in template
+                    .lines()
+                    .filter(|line| line.contains("--stop-ticking"))
+                {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
             }
         }
     }
 
+    /// The fallback for a runner without `finish` still stops the clock for
+    /// `waiting_on_human` / `blocked`, and posts no hand-off for any kind.
     #[test]
-    fn waiting_on_external_applies_in_every_stage() {
-        for kind in [
-            recipes::KIND_CODING_TASK,
-            recipes::KIND_REVIEW,
-            recipes::KIND_TEST,
-        ] {
-            let body = composed_text(kind);
-            assert!(
-                body.contains("applies in **every** stage"),
-                "{kind} documents every-stage waits"
-            );
-            assert!(
-                !body.contains("In Progress is waiting on CI or a merge"),
-                "{kind} dropped the In-Progress-only line"
-            );
+    fn old_runner_fallback_stops_the_clock() {
+        let coding = composed_text_with_work_type(recipes::KIND_CODING_TASK, "software");
+        let fallback = coding
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(fallback.contains("pidash run yield --outcome <result>"));
+        assert!(fallback.contains(
+            "adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`"
+        ));
+        assert!(
+            !fallback.contains("hand-off"),
+            "no hand-off since the unified workpad"
+        );
+        let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        let fallback = review
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(!fallback.contains("hand-off"), "no stage writes one");
+    }
+
+    /// Auto never offers a stage the project lacks (it would cost the agent
+    /// a refused `finish` and a retry).
+    #[test]
+    fn auto_does_not_offer_a_missing_stage() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let no_test = vec![
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("AI Completed", "completed"),
+        ];
+        let ctx = stages_context(
+            &AgentStages::default(),
+            &no_test,
+            Some("In Progress"),
+            Some("started"),
+        );
+        assert_eq!(ctx["review"], Value::Bool(true));
+        assert_eq!(ctx["test"], Value::Bool(false));
+        assert_eq!(
+            ctx["path"],
+            serde_json::json!(["In Progress", "In Review", "AI Completed"])
+        );
+        let mut sample = crate::prompting::validation::sample_contexts(recipes::KIND_CODING_TASK)
+            .into_iter()
+            .next()
+            .expect("sample");
+        sample["stages"] = ctx;
+        let body = compose_ctx(recipes::KIND_CODING_TASK, "software", &sample);
+        assert!(body.contains("- **In Review** — the work product can be wrong"));
+        assert!(!body.contains("- **In Test** — the work product has behaviour"));
+    }
+
+    /// The five project settings of design §7 as `(label, stages,
+    /// enabled stage names)`.
+    fn five_settings() -> Vec<(&'static str, AgentStages, Vec<&'static str>)> {
+        let custom = |review, test| AgentStages {
+            mode: AgentStagesMode::Custom,
+            review,
+            test,
+        };
+        vec![
+            ("custom, both off", custom(false, false), vec![]),
+            (
+                "custom, review only",
+                custom(true, false),
+                vec!["In Review"],
+            ),
+            ("custom, test only", custom(false, true), vec!["In Test"]),
+            (
+                "custom, both on",
+                custom(true, true),
+                vec!["In Review", "In Test"],
+            ),
+            ("auto", AgentStages::default(), vec!["In Review", "In Test"]),
+        ]
+    }
+
+    /// The populated sample for `kind`, sitting in that kind's stage, with
+    /// `stages` built from `agent_stages` and every other mention of a
+    /// stage name in the sample data neutralised (so the assertions below
+    /// see only what the sections themselves say).
+    fn stage_context(kind: &str, agent_stages: &AgentStages, final_state: bool) -> Value {
+        let mut ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        let (state, group) = match kind {
+            recipes::KIND_REVIEW => ("In Review", "review"),
+            recipes::KIND_TEST => ("In Test", "test"),
+            _ => ("In Progress", "started"),
+        };
+        ctx["issue"]["state"] = Value::from(state);
+        ctx["issue"]["state_group"] = Value::from(group);
+        if !final_state {
+            let states: Vec<Value> = ctx["issue"]["project_states"]
+                .as_array()
+                .expect("states")
+                .iter()
+                .filter(|s| s["name"] != "AI Completed")
+                .cloned()
+                .collect();
+            ctx["issue"]["project_states"] = Value::Array(states);
+        }
+        let views: Vec<context::ProjectStateView> = ctx["issue"]["project_states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .map(|s| context::ProjectStateView {
+                name: s["name"].as_str().expect("name").to_owned(),
+                group: s["group"].as_str().expect("group").to_owned(),
+                description: None,
+            })
+            .collect();
+        ctx["stages"] = context::stages_context(agent_stages, &views, Some(state), Some(group));
+        ctx["parent"]["state"] = Value::from("Todo");
+        ctx["blocked_by"][0]["state"] = Value::from("Todo");
+        // Neutralise the sample comments, like every other stage-name
+        // mention in the sample data.
+        ctx["comments_section"] =
+            Value::from("### Comment 1 — Human: Sample at 2026-01-01\n\nHello.");
+        ctx
+    }
+
+    /// Drop the "Available states" listing: it is project data (every
+    /// state the project has), not a section naming a stage.
+    fn without_state_listing(body: &str) -> String {
+        body.lines()
+            .filter(|line| !(line.starts_with("- **") && line.contains("** (group: `")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Design §10.1: for each of the five settings, the composed coding,
+    /// review and test prompts name exactly the enabled stages; a disabled
+    /// stage's name appears nowhere in the lifecycle section; the manual
+    /// branch renders in a stage whose runs are switched off.
+    #[test]
+    fn composed_prompts_name_exactly_the_enabled_stages() {
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        for (label, agent_stages, enabled) in five_settings() {
+            for kind in ISSUE_KINDS {
+                let ctx = stage_context(kind, &agent_stages, true);
+                let mut path = vec!["In Progress"];
+                path.extend(enabled.iter().copied());
+                path.push("AI Completed");
+                let path_line = format!("Path in this project: {}.", path.join(" → "));
+                let section = renderer::render(lifecycle, &ctx).expect("lifecycle renders");
+                assert!(section.contains(&path_line), "{label}/{kind}: {section}");
+                let own_state = ctx["issue"]["state"].as_str().expect("state");
+                let runs_here = ctx["stages"]["current_runs_automatically"]
+                    .as_bool()
+                    .expect("bool");
+                assert_eq!(
+                    runs_here,
+                    own_state == "In Progress" || enabled.contains(&own_state),
+                    "{label}/{kind}"
+                );
+                assert_eq!(
+                    section.contains("Agent runs are switched off for this stage"),
+                    !runs_here,
+                    "{label}/{kind}: manual-run branch"
+                );
+                for work_type in work_types::keys() {
+                    let body = without_state_listing(&compose_ctx(kind, work_type, &ctx));
+                    for stage in ["In Review", "In Test"] {
+                        // A manual run in a disabled stage names the stage it
+                        // sits in ("You are in …"), and nothing else does.
+                        let expected = enabled.contains(&stage) || stage == own_state;
+                        assert_eq!(
+                            body.contains(stage),
+                            expected,
+                            "{label}/{kind}/{work_type}: {stage}"
+                        );
+                        if !enabled.contains(&stage) {
+                            let mentions = section.matches(stage).count();
+                            let allowed = usize::from(stage == own_state);
+                            assert_eq!(mentions, allowed, "{label}/{kind}: {stage} in lifecycle");
+                        }
+                    }
+                }
+            }
         }
     }
 
+    /// NEWPIDASH-338 item 2: a run in a non-stage state is not told
+    /// agent runs are "switched off" for the stage. That paragraph is
+    /// only for a registered stage the project switched off; Todo,
+    /// Backlog, Paused and custom states get no such sentence.
     #[test]
-    fn review_kind_splits_external_wait_from_human_wait() {
-        let body = composed_text(recipes::KIND_REVIEW);
-        assert!(body.contains("**waiting on CI or the PR**"));
-        assert!(body.contains("**keep the clock ticking**"));
-        assert!(body.contains("`waiting_on_human --stop-ticking`"));
-        assert!(body.contains("`done --stop-ticking`"));
-        assert!(!body.contains("waiting on a human reviewer / nothing changed"));
-    }
-
-    #[test]
-    fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
-        let body = composed_text(recipes::KIND_TEST);
-        assert!(body.contains("`done --stop-ticking`"));
-        assert!(body.contains("explicitly lets agents merge and close"));
-        assert!(!body.contains("--state \"Done\""));
-        assert!(body.contains("**nothing changed, waiting on CI or a dependency**"));
-        assert!(body.contains("**nothing changed, waiting on a human**"));
-        assert!(body.contains("`waiting_on_external`"));
-    }
-
-    #[test]
-    fn blocking_flow_stops_clock_for_humans_not_issues() {
-        for kind in [
-            recipes::KIND_CODING_TASK,
-            recipes::KIND_REVIEW,
-            recipes::KIND_TEST,
-        ] {
-            let body = composed_text(kind);
-            assert!(
-                body.contains("--outcome blocked --stop-ticking"),
-                "{kind} stops the clock for human blocks"
-            );
-            assert!(
-                body.contains("When what blocks you is **another issue**, do not stop the clock"),
-                "{kind} keeps ticking for issue blocks"
+    fn non_stage_states_are_not_called_switched_off() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let states = vec![
+            state("Todo", "unstarted"),
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("In Test", "test"),
+            state("AI Completed", "completed"),
+        ];
+        let custom = |review: bool, test: bool| AgentStages {
+            mode: AgentStagesMode::Custom,
+            review,
+            test,
+        };
+        // (state, group, stages, runs_automatically, switched_off)
+        let cases = vec![
+            ("Todo", "unstarted", AgentStages::default(), false, false),
+            ("Backlog", "backlog", AgentStages::default(), false, false),
+            ("Paused", "backlog", AgentStages::default(), false, false),
+            ("Triage X", "triage", AgentStages::default(), false, false),
+            ("Done", "completed", AgentStages::default(), false, false),
+            ("In Review", "review", custom(false, true), false, true),
+            ("In Test", "test", custom(true, false), false, true),
+            ("In Review", "review", AgentStages::default(), true, false),
+            ("In Progress", "started", custom(false, false), true, false),
+        ];
+        for (name, group, stages, runs, off) in cases {
+            let ctx = stages_context(&stages, &states, Some(name), Some(group));
+            assert_eq!(ctx["current_runs_automatically"], Value::Bool(runs));
+            assert_eq!(
+                ctx["current_stage_switched_off"],
+                Value::Bool(off),
+                "{name}"
             );
         }
+        // The Done-when case: a coding-task prompt rendered for an issue
+        // in Todo contains no "switched off".
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        let mut ctx = stage_context(recipes::KIND_CODING_TASK, &AgentStages::default(), true);
+        ctx["issue"]["state"] = Value::from("Todo");
+        ctx["issue"]["state_group"] = Value::from("unstarted");
+        let views: Vec<ProjectStateView> = ctx["issue"]["project_states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .map(|s| ProjectStateView {
+                name: s["name"].as_str().expect("name").to_owned(),
+                group: s["group"].as_str().expect("group").to_owned(),
+                description: None,
+            })
+            .collect();
+        ctx["stages"] = stages_context(
+            &AgentStages::default(),
+            &views,
+            Some("Todo"),
+            Some("unstarted"),
+        );
+        let section = renderer::render(lifecycle, &ctx).expect("lifecycle renders");
+        assert!(
+            !section.contains("switched off"),
+            "Todo prompt names no switched-off stage"
+        );
     }
 
+    /// NEWPIDASH-305 fallback: with no "AI Completed" state the path ends
+    /// at the last enabled stage and the run is told to wait on a person.
     #[test]
-    fn session_framing_review_tick_routes_nothing_changed_by_cause() {
-        let body = composed_text(recipes::KIND_REVIEW);
-        assert!(body.contains("automatically by the issue's ticker"));
-        assert!(!body.contains("emit `noop`"));
-        assert!(body.contains("report the outcome that says *why* nothing changed"));
-        assert!(body.contains("keep the clock ticking so a later run re-checks"));
+    fn lifecycle_without_final_state_waits_on_a_person() {
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        for (label, agent_stages, _) in five_settings() {
+            let ctx = stage_context(recipes::KIND_CODING_TASK, &agent_stages, false);
+            assert!(ctx["stages"]["final_state"].is_null());
+            let section = renderer::render(lifecycle, &ctx).expect("renders");
+            assert!(!section.contains("→ AI Completed"), "{label}");
+            assert!(
+                section.contains("This project has no \"AI Completed\" state"),
+                "{label}"
+            );
+            assert!(
+                !section.contains("**none**"),
+                "{label}: no null leaks: {section}"
+            );
+        }
     }
 
     #[test]
     fn coding_task_split_gate_parks_parent_in_todo() {
         let body = composed_text(recipes::KIND_CODING_TASK);
-        assert!(body.contains("do **not** split a child further (depth 1)"));
-        assert!(body.contains("Move the parent to **Todo**"));
-        assert!(body.contains("the clock would keep ticking and burn the parent's budget"));
+        assert!(body.contains("no deeper splits unless a person asks"));
+        assert!(body.contains("finish with `--to \"Todo\" --result done`"));
+        assert!(
+            body.contains("could someone build child B correctly without seeing child A's work")
+        );
+    }
+
+    #[test]
+    fn coding_task_leaves_the_note() {
+        let body = composed_text(recipes::KIND_CODING_TASK);
+        assert!(body.contains("## Step 1 — Workpad"));
+        assert!(body.contains("### Step 7 — Leave the note"));
+        assert!(body.contains(
+            "A move to review or test is refused until this run has updated the workpad."
+        ));
+        assert!(!body.contains("--handoff-file"));
+    }
+
+    /// Unified workpad U1: review and test read the same workpad, and
+    /// the run history, with no hand-off block.
+    #[test]
+    fn review_and_test_read_the_workpad_and_history() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text(kind);
+            assert!(body.contains("\n## Workpad\n"), "{kind}");
+            assert!(!body.contains("Step 1 — Workpad"), "{kind}");
+            assert!(body.contains("The workpad so far:"), "{kind}");
+            assert!(body.contains("Runs so far on this issue"), "{kind}");
+            assert!(body.contains("- 2026-01-01 In Progress: done"), "{kind}");
+            assert!(
+                !body.contains("Hand-off from the In Progress run"),
+                "{kind}"
+            );
+            // Review and test are not gated: no refusal sentence.
+            assert!(!body.contains("refused until this run"), "{kind}");
+        }
+        // No workpad yet: the section says how to start one.
+        let mut ctx = crate::prompting::validation::sample_contexts(recipes::KIND_REVIEW)
+            .into_iter()
+            .next()
+            .expect("sample");
+        ctx["workpad_body"] = Value::from("");
+        let body = compose_ctx(recipes::KIND_REVIEW, "software", &ctx);
+        assert!(body.contains("There is no workpad yet."));
+        assert!(!body.contains("The workpad so far:"));
+    }
+
+    /// Design §9.1: the review and test rules that change behaviour on hard
+    /// work survive the rewrite.
+    #[test]
+    fn review_and_test_keep_the_behaviour_changing_rules() {
+        let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        let test = composed_text_with_work_type(recipes::KIND_TEST, "software");
+        for (kind, body) in [("review", &review), ("test", &test)] {
+            for phrase in [
+                "git fetch origin",
+                "git merge origin/<base>",
+                "never rebase, never force-push",
+                "send the issue back to In Progress",
+                "If nothing has changed since your last pass, write no comment.",
+                "Move back to In Progress",
+            ] {
+                assert!(body.contains(phrase), "{kind} carries {phrase:?}");
+            }
+        }
+        assert!(review.contains("Drop any you cannot confirm."));
+        assert!(test.contains("Drop what you cannot reproduce."));
+        assert!(test.contains("support a verdict but are not one"));
+        assert!(test.contains("discovered, never assumed"));
+    }
+
+    #[test]
+    fn general_review_and_test_have_no_sync_step() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text_with_work_type(kind, "general");
+            assert!(!body.contains("git fetch origin"), "{kind} has no fetch");
+            assert!(!body.contains("git merge origin"), "{kind} has no merge");
+        }
+    }
+
+    /// Rendered-size budgets for the software recipes, excluding the
+    /// rendered `pidash-cli` section (design §9.6). Lower a budget when a
+    /// section shrinks; do not raise one without a design note.
+    const SIZE_BUDGETS: [(&str, usize); 3] = [
+        (recipes::KIND_CODING_TASK, 26_000),
+        (recipes::KIND_REVIEW, 12_000),
+        (recipes::KIND_TEST, 13_000),
+    ];
+
+    /// `(kind, rendered bytes without pidash-cli, budget)`.
+    fn measured_sizes() -> Vec<(&'static str, usize, usize)> {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        SIZE_BUDGETS
+            .iter()
+            .map(|(kind, budget)| {
+                let ctx = crate::prompting::validation::sample_contexts(kind)
+                    .into_iter()
+                    .next()
+                    .expect("populated sample first");
+                let total = compose_ctx(kind, "software", &ctx).len();
+                let cli_len = renderer::render(cli, &ctx).expect("cli renders").len();
+                (*kind, total - cli_len, *budget)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rendered_prompts_stay_within_size_budgets() {
+        for (kind, size, budget) in measured_sizes() {
+            eprintln!("{kind}: {size} bytes without pidash-cli (budget {budget})");
+            assert!(
+                size <= budget,
+                "{kind}: {size} bytes exceeds budget {budget}"
+            );
+        }
+    }
+
+    /// Rendered `pidash-cli` section budget (NEWPIDASH-325 §6.6): the core
+    /// stays at most 6 KB for every kind, on the populated sample context.
+    const CLI_SECTION_BUDGET: usize = 6_000;
+
+    /// Whole-prompt budgets on the populated sample issue (NEWPIDASH-325
+    /// §6.6): the lean change shrank each step, and the CLI rewrite shrinks
+    /// them again (about 7k tokens per step). Lower a budget when the
+    /// prompt shrinks; do not raise one without a design note.
+    const WHOLE_PROMPT_BUDGETS: [(&str, usize); 3] = [
+        (recipes::KIND_CODING_TASK, 30_000),
+        (recipes::KIND_REVIEW, 18_000),
+        (recipes::KIND_TEST, 19_000),
+    ];
+
+    /// Rendered `pidash-cli` section bytes per kind.
+    fn measured_cli_sizes() -> Vec<(&'static str, usize)> {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+            recipes::KIND_SCHEDULER,
+        ]
+        .iter()
+        .map(|kind| {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let len = renderer::render(cli, &ctx).expect("cli renders").len();
+            (*kind, len)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn rendered_cli_section_stays_within_budget() {
+        for (kind, size) in measured_cli_sizes() {
+            eprintln!("{kind}: pidash-cli section {size} bytes (budget {CLI_SECTION_BUDGET})");
+            assert!(
+                size <= CLI_SECTION_BUDGET,
+                "{kind}: pidash-cli section {size} bytes exceeds budget {CLI_SECTION_BUDGET}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_whole_prompts_stay_within_budgets() {
+        for (kind, budget) in WHOLE_PROMPT_BUDGETS {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let size = compose_ctx(kind, "software", &ctx).len();
+            eprintln!("{kind}: whole prompt {size} bytes (budget {budget})");
+            assert!(
+                size <= budget,
+                "{kind}: whole prompt {size} bytes exceeds budget {budget}"
+            );
+        }
+    }
+
+    /// Rendered-prompt fixtures for the runner-side prompt↔CLI contract
+    /// test (NEWPIDASH-325 §6.9): one file per recipe kind, with stage
+    /// settings covering Auto and a switched-off stage (scheduler kinds
+    /// have no stages, so they render the populated and minimal samples).
+    /// The runner test parses every `pidash …` line in these files with the
+    /// real clap `Command`, so a prompt change that teaches an unparsable
+    /// command fails there. Regenerate with
+    /// `UPDATE_PROMPT_FIXTURES=1 cargo test -p pidash-services prompting::composer::`
+    /// after an intended prompt change; otherwise the checked-in files must
+    /// match byte for byte (`fixtures/prompting/rendered/`).
+    const RENDERED_ISSUE_KINDS: [&str; 3] = [
+        recipes::KIND_CODING_TASK,
+        recipes::KIND_REVIEW,
+        recipes::KIND_TEST,
+    ];
+
+    /// `(fixture file stem, kind, context)`: the Auto render plus the
+    /// switched-off-stage render per issue kind, and both scheduler
+    /// samples. The switched-off variant keeps the populated sample's
+    /// data and flips the stage settings (no review/test stages, and the
+    /// current-stage-switched-off branch for review/test), so the export
+    /// covers both lifecycle branches; `agent_decides` is false there so
+    /// the no-choice branch renders too.
+    fn rendered_fixture_cases() -> Vec<(String, &'static str, Value)> {
+        let mut cases = Vec::new();
+        for kind in RENDERED_ISSUE_KINDS {
+            let auto = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            cases.push((format!("{kind}-auto"), kind, auto.clone()));
+            let mut off = auto;
+            off["stages"] = serde_json::json!({
+                "agent_decides": false,
+                "review": false,
+                "test": false,
+                "path": ["In Progress", "AI Completed"],
+                "current_runs_automatically": false,
+                "current_stage_switched_off": kind != recipes::KIND_CODING_TASK,
+                "final_state": "AI Completed",
+            });
+            cases.push((format!("{kind}-switchedoff"), kind, off));
+        }
+        let mut scheduler = crate::prompting::validation::sample_contexts(recipes::KIND_SCHEDULER);
+        let minimal = scheduler.pop().expect("minimal scheduler sample");
+        let populated = scheduler.pop().expect("populated scheduler sample");
+        cases.push((
+            "scheduler-populated".to_owned(),
+            recipes::KIND_SCHEDULER,
+            populated,
+        ));
+        cases.push((
+            "scheduler-minimal".to_owned(),
+            recipes::KIND_SCHEDULER,
+            minimal,
+        ));
+        cases
+    }
+
+    fn rendered_fixture_path(stem: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "{}/../../fixtures/prompting/rendered/{stem}.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+    }
+
+    #[test]
+    fn rendered_prompts_match_fixtures() {
+        let regenerate = std::env::var("UPDATE_PROMPT_FIXTURES").as_deref() == Ok("1");
+        for (stem, kind, ctx) in rendered_fixture_cases() {
+            let text = compose(
+                kind,
+                None,
+                None,
+                &OverrideIndex::new(),
+                &ctx,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{stem} composes: {}", err.message()))
+            .text;
+            let path = rendered_fixture_path(&stem);
+            if regenerate {
+                std::fs::create_dir_all(path.parent().expect("rendered dir"))
+                    .expect("rendered dir creatable");
+                std::fs::write(&path, &text).expect("fixture writable");
+                eprintln!("{stem}: regenerated ({} bytes)", text.len());
+            } else {
+                let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                    panic!("{stem}: missing fixture; regenerate with UPDATE_PROMPT_FIXTURES=1")
+                });
+                assert_eq!(
+                    text, expected,
+                    "{stem}: rendered prompt changed; regenerate with UPDATE_PROMPT_FIXTURES=1"
+                );
+            }
+        }
+    }
+
+    /// Chat variant of the `pidash-cli` section (NEWPIDASH-402): the runner
+    /// renders the same source file with `run.kind == "chat"` and injects
+    /// it into the first turn of every runner chat session. The chat text
+    /// keeps the auth line, output contract, `pidash docs` pointer and
+    /// command index, and drops the run-only material (env defaults,
+    /// workpad, `run finish` / `run yield`, `issue wait`, lifecycle).
+    /// It renders from a minimal context — no issue or project — so an
+    /// unguarded `{{ issue.* }}` / `{{ project.* }}` reference in a
+    /// chat-taken branch fails here rather than in the runner.
+    #[test]
+    fn chat_cli_section_renders_without_issue_or_project() {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        let ctx = serde_json::json!({
+            "run": {
+                "kind": "chat",
+                "rendered_at": "2026-11-25T08:05:46Z",
+            },
+        });
+        let body = renderer::render(cli, &ctx).expect("chat renders");
+        for kept in [
+            "## Pi Dash CLI (`pidash`)",
+            "already authenticated **as this runner's owner**",
+            "Every command prints one JSON document",
+            "Run `pidash docs <topic>`",
+            "### Other commands",
+            "There is no current issue or run",
+            "Nothing is pre-loaded",
+            "state list unavailable",
+            "`pidash issue list --project <PROJ>",
+            "`pidash issue create --project <PROJ>",
+            "`pidash state list",
+            "say so in chat instead of calling it",
+        ] {
+            assert!(body.contains(kept), "chat carries {kept:?}");
+        }
+        for dropped in [
+            "PIDASH_ISSUE_IDENTIFIER",
+            "PIDASH_RUN_ID",
+            "plus this run's id",
+            "workpad",
+            "pidash run finish",
+            "pidash run yield",
+            "run_kind",
+            "issue wait",
+            "Blocking the run",
+            "Lifecycle",
+            "already shown below",
+        ] {
+            assert!(!body.contains(dropped), "chat drops {dropped:?}");
+        }
+        assert!(
+            body.len() <= CLI_SECTION_BUDGET,
+            "chat pidash-cli section {} bytes exceeds budget {CLI_SECTION_BUDGET}",
+            body.len()
+        );
     }
 
     #[test]

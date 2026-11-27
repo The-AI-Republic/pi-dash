@@ -92,7 +92,9 @@ export interface DuplicatePageVariables {
 /**
  * Copy a page into a standalone duplicate. The copy arrives through the
  * re-read, never through a client-side insertion, so the list keeps one
- * source of truth.
+ * source of truth. The duplicate can surface on any tab, in discovery or
+ * under an expanded parent, so the whole pages subtree is re-read, not
+ * just the flat list (NEWPIDASH-347).
  */
 export function useDuplicatePage(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();
@@ -104,7 +106,7 @@ export function useDuplicatePage(workspaceSlug: string, projectId: string) {
     onError: () => {
       notifyError(PAGE_DUPLICATE_FAILED_TITLE);
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: pageKeys.list(workspaceSlug, projectId) }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: pageKeys.all(workspaceSlug) }),
   });
 }
 
@@ -174,6 +176,9 @@ export function usePageFavorite(target: PageFavoriteTarget): {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: listKey });
       void queryClient.invalidateQueries({ queryKey: detailKey });
+      // The star also renders on discovery hits and expanded child rows,
+      // which read the forest and per-parent entries (NEWPIDASH-347).
+      void queryClient.invalidateQueries({ queryKey: pageKeys.all(workspaceSlug) });
       // The sidebar tree owns the favourites list; re-reading it lets the
       // section the first add just opened show the page.
       void queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(workspaceSlug) });

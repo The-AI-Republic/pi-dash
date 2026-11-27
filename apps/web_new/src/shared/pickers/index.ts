@@ -85,21 +85,15 @@ export { selectIntakeFallback } from "./intakeStates.js";
 export { PodPicker } from "./PodPicker.js";
 export type { PodPickerProps } from "./PodPicker.js";
 export {
-  AGENT_OPTION_PREFIX,
-  AGENT_ROW_LABELS,
-  CLOUD_EXECUTOR,
+  EXECUTION_TARGET_LABEL,
   LOCAL_EXECUTOR,
-  MANAGED_EXECUTOR,
   POD_OPTION_PREFIX,
   RUNNER_NOT_ASSIGNABLE_REASONS,
   RUNNER_OPTION_PREFIX,
   buildExecutionTargets,
   executionSelectionId,
-  executionTargetLabel,
   executionTargetPatch,
-  formatAvailabilityReason,
   formatRunnerSeenAgo,
-  isAgentRowKind,
   parseExecutionSelectionId,
   podOptionLabel,
   runnerReasonMessage,
@@ -112,7 +106,6 @@ export {
   selectTriggerText,
 } from "./pods.js";
 export type {
-  AgentRowKind,
   ExecutionSelection,
   ExecutionTarget,
   ExecutionTargetPatch,
