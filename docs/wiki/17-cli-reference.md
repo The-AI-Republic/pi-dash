@@ -313,6 +313,7 @@ Create a work item under a project.
 pidash issue create --title <TITLE> [--project <P>]
                     [--description <D> | --description-file <PATH>]
                     [--priority <P>] [--state <S>]
+                    [--output json|id]
 ```
 
 | Flag                        | Purpose                                                                                                                         |
@@ -323,12 +324,32 @@ pidash issue create --title <TITLE> [--project <P>]
 | `--description-file <PATH>` | Read the markdown description from a file; `-` reads stdin. Conflicts with `--description`. Empty input is an error (exit `2`). |
 | `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                                              |
 | `--state <S>`               | Initial state — name (case-insensitive) or UUID.                                                                                |
+| `--output <O>`              | `json` (default) prints the created work item; `id` prints only its identifier (`PROJ-123`) and a newline, for scripts.         |
 
 **How descriptions land.** The CLI sends the markdown as `description_markdown`, and the server converts it with the same markdown → rich-text converter the page commands use. Headings, nested lists, task-list checkboxes, fenced code blocks (with language) and tables keep their structure in the web editor. For a long or multi-line body, write it to a file or pipe it instead of quoting it on the command line:
 
 ```
 generate-body | pidash issue create --project ENG --title "Cold start: crate foo" --description-file -
 ```
+
+**Output.** With the default `--output json`, stdout is one JSON object: the server's work-item payload with an `identifier` added by the CLI. Fields a script can rely on:
+
+| Field         | Meaning                                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------------------- |
+| `identifier`  | Project-scoped key, `<PROJECT>-<sequence_id>` (e.g. `ENG-123`). Use it with `issue get`, `patch`, `relate`. |
+| `sequence_id` | The number part of the key (integer).                                                                       |
+| `url`         | Absolute web URL of the issue. Omitted when the deployment has no `WEB_URL` / `APP_BASE_URL` configured.    |
+| `id`          | Work-item UUID.                                                                                             |
+| `project`     | Project UUID.                                                                                               |
+
+The rest of the payload (`name`, `state`, `priority`, `labels`, …) is the same work-item shape the API returns. With `--output id`, stdout is only the identifier, so a script can capture it directly:
+
+```
+child=$(pidash issue create --project ENG --title "Follow-up: flaky test" --output id)
+pidash issue relate "$child" --blocked-by ENG-42
+```
+
+The project is resolved before the work item is created, so an unknown `--project` exits `4` without creating anything.
 
 ### `pidash issue list --project <P>`
 

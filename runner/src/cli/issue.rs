@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
 use crate::api_client::{
@@ -45,7 +45,11 @@ pub enum IssueCommand {
     },
     /// Create a new work item under a project. If `--project` is omitted,
     /// the CLI uses PIDASH_PROJECT_ID, local config default_project, or
-    /// the workspace default project from Pi Dash cloud.
+    /// the workspace default project from Pi Dash cloud. Prints the created
+    /// work item as JSON: the server payload (`id`, `project`, `sequence_id`,
+    /// `name`, `state`, …, and `url` when the deployment has a web base URL)
+    /// plus `identifier` (`PROJ-123`). `--output id` prints only the
+    /// identifier, for scripts.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
@@ -275,6 +279,19 @@ pub struct CreateArgs {
     /// `<name>`); without `--runner` this clears any dedicated runner.
     #[arg(long)]
     pub pod: Option<String>,
+
+    /// What to print: `json` (default) — the created work item, including
+    /// `identifier`, `sequence_id` and `url`; `id` — only the identifier
+    /// (`PROJ-123`) and a newline, for scripts.
+    #[arg(long, value_enum, default_value_t = CreateOutput::Json)]
+    pub output: CreateOutput,
+}
+
+/// Output shape of `pidash issue create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CreateOutput {
+    Json,
+    Id,
 }
 
 /// The description source shared by `create` and `patch`: inline or from a
@@ -576,6 +593,12 @@ async fn cmd_create(
     // fails fast without resolving the project.
     let description = load_description(&args.description, std::io::stdin())?;
     let project_ref = resolve_project_ref(client, paths, args.project.as_deref()).await?;
+    // Resolve the project before the POST: its canonical identifier builds
+    // the new item's `PROJ-123` key, and an unknown project fails here
+    // instead of after an issue was created.
+    let project_identifier = project::resolve_project(client, &project_ref)
+        .await?
+        .identifier;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
     // values to the pure body builder so the URL/body contract is unit-testable.
@@ -617,11 +640,47 @@ async fn cmd_create(
         client.env.workspace_slug, project_ref
     );
     let resp = client.post(&path, &Value::Object(body)).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
+    let created = with_identifier(resp, &project_identifier);
+    match args.output {
+        CreateOutput::Json => println!(
+            "{}",
+            serde_json::to_string(&created).expect("serialize JSON value")
+        ),
+        CreateOutput::Id => {
+            let identifier = created
+                .get("identifier")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+                    CliError::new(
+                        EXIT_SERVER,
+                        format!(
+                            "work item {id} was created, but the response carries no \
+                             sequence_id to build its identifier from"
+                        ),
+                    )
+                })?;
+            println!("{identifier}");
+        }
+    }
     Ok(())
+}
+
+/// Add the `PROJ-123` `identifier` to a created work item's payload, built
+/// from the project's identifier and the payload's `sequence_id`. A payload
+/// that already has an `identifier`, or has no `sequence_id`, is returned
+/// unchanged.
+fn with_identifier(mut created: Value, project_identifier: &str) -> Value {
+    if let Some(obj) = created.as_object_mut()
+        && !obj.contains_key("identifier")
+        && let Some(seq) = obj.get("sequence_id").and_then(Value::as_u64)
+    {
+        obj.insert(
+            "identifier".into(),
+            Value::String(format!("{project_identifier}-{seq}")),
+        );
+    }
+    created
 }
 
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
@@ -2109,6 +2168,44 @@ mod tests {
         ])
         .expect_err("--description and --description-file are mutually exclusive");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn create_output_defaults_to_json_and_accepts_id() {
+        let parsed = CreateArgsHarness::try_parse_from(["create", "--title", "T"]).unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Json);
+        let parsed =
+            CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "id"])
+                .unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Id);
+        let err = CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "yaml"])
+            .expect_err("unknown output");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn with_identifier_builds_proj_seq_and_keeps_the_payload() {
+        let created = with_identifier(
+            serde_json::json!({"id": "u", "sequence_id": 7, "url": "https://x/a/browse/ENG-7"}),
+            "ENG",
+        );
+        assert_eq!(
+            created,
+            serde_json::json!({
+                "id": "u",
+                "sequence_id": 7,
+                "url": "https://x/a/browse/ENG-7",
+                "identifier": "ENG-7",
+            })
+        );
+    }
+
+    #[test]
+    fn with_identifier_leaves_server_identifier_and_missing_sequence_alone() {
+        let server = serde_json::json!({"sequence_id": 7, "identifier": "OPS-7"});
+        assert_eq!(with_identifier(server.clone(), "ENG"), server);
+        let no_seq = serde_json::json!({"id": "u"});
+        assert_eq!(with_identifier(no_seq.clone(), "ENG"), no_seq);
     }
 
     #[test]

@@ -1831,6 +1831,30 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
 const ISSUE_ID: &str = "00000000-0000-0000-0000-000000000001";
 const ISSUE_PROJECT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
 const ISSUE_DETAIL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo"}"#;
+/// What the server answers a work-item POST with: the issue serializer,
+/// which carries `sequence_id` and (when the deployment has a web base URL)
+/// `url`, but no `identifier`.
+const ISSUE_CREATED: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo","sequence_id":123,"url":"https://app.example/acme/browse/ENG-123"}"#;
+const ISSUE_PROJECTS: &str =
+    r#"[{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}]"#;
+
+/// `issue create` resolves the project (GET `projects/`) before it POSTs.
+fn issue_create_handler() -> Handler {
+    Box::new(|req| {
+        if req.method == "GET" && req.path.ends_with("/projects/") {
+            CannedResponse::ok(ISSUE_PROJECTS)
+        } else {
+            created(ISSUE_CREATED)
+        }
+    })
+}
+
+/// The single work-item POST among the recorded requests.
+fn the_create_post(recorded: &[RecordedRequest]) -> RecordedRequest {
+    let posts: Vec<_> = recorded.iter().filter(|r| r.method == "POST").collect();
+    assert_eq!(posts.len(), 1, "exactly one POST: {recorded:?}");
+    posts[0].clone()
+}
 const LONG_BODY: &str = "# Cold start\n\n- [ ] fixtures\n  - nested\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
 
 /// An issue patch makes the by-identifier GET, then the PATCH; both can be
@@ -1841,7 +1865,7 @@ fn issue_patch_handler() -> Handler {
 
 #[tokio::test]
 async fn issue_create_description_file_sends_the_file_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("body.md");
     std::fs::write(&path, LONG_BODY).unwrap();
@@ -1864,21 +1888,20 @@ async fn issue_create_description_file_sends_the_file_as_markdown() {
 
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].method, "POST");
+    let post = the_create_post(&recorded);
     assert_eq!(
-        recorded[0].path,
+        post.path,
         "/api/v1/workspaces/acme/projects/ENG/work-items/"
     );
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&post),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_description_file_dash_reads_stdin() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
@@ -1899,14 +1922,14 @@ async fn issue_create_description_file_dash_reads_stdin() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_inline_description_is_sent_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
@@ -1927,8 +1950,85 @@ async fn issue_create_inline_description_is_sent_as_markdown() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": "## Hi"})
+    );
+}
+
+// ---- issue create output (PDASHOSS01-408) -------------------------------
+//
+// The JSON `issue create` prints is the server payload plus a CLI-built
+// `identifier` (`PROJ-123`); `--output id` prints only that identifier, for
+// scripts that file follow-ups and need the new key.
+
+#[tokio::test]
+async fn issue_create_prints_identifier_sequence_id_and_url() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "eng", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["sequence_id"], 123);
+    assert_eq!(printed["url"], "https://app.example/acme/browse/ENG-123");
+    assert_eq!(printed["id"], ISSUE_ID);
+    assert_eq!(printed["project"], ISSUE_PROJECT_ID);
+}
+
+#[tokio::test]
+async fn issue_create_output_id_prints_only_the_identifier() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&the_create_post(&recorded)),
+        serde_json::json!({"name": "X"})
+    );
+}
+
+#[tokio::test]
+async fn issue_create_unknown_project_exits_not_found_without_creating() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "NOPE", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(EXIT_NOT_FOUND), "stderr: {}", out.stderr);
+    assert!(
+        fake.recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.method != "POST"),
+        "no issue is created for a project that does not resolve"
     );
 }
 
