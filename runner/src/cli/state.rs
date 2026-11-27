@@ -199,6 +199,7 @@ fn state_list_target(
 #[cfg(test)]
 mod tests {
     use super::{StateListTarget, state_list_target};
+    use crate::api_client::EXIT_INVALID;
 
     fn issue(target: &StateListTarget) -> &str {
         match target {
@@ -246,6 +247,18 @@ mod tests {
     fn state_list_falls_back_to_current_project_env() {
         let target = state_list_target(None, None, None, Some("ENG")).expect("target");
         assert_eq!(project(&target), "ENG");
+    }
+
+    #[test]
+    fn state_list_rejects_a_supplied_blank_target_even_with_run_context() {
+        for blank in ["", "   "] {
+            let err = state_list_target(None, Some(blank), Some("ENG-7"), Some("ENG"))
+                .expect_err("blank positional");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            let err = state_list_target(Some(blank), None, Some("ENG-7"), Some("ENG"))
+                .expect_err("blank --project");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+        }
     }
 
     #[test]
