@@ -99,6 +99,24 @@ jobs:
           fi
           echo "Tag-triggered release detected: $TAG -> $VERSION"
 
+      - name: Checkout package.json for the release version check
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            package.json
+            .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Check release version matches package.json
+        run: |
+          # A platform release must carry the version RELEASING.md bumps in
+          # the root package.json. Plain builds are not releases; skip them.
+          if [ "${BUILD_TYPE}" != "Release" ]; then
+            echo "Not a release build; skipping the version check."
+            exit 0
+          fi
+          node .github/scripts/check-release-version.mjs "${RELEASE_VERSION}"
+
       - id: set_env_variables
         name: Set Environment Variables
         run: |
