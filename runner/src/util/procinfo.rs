@@ -88,6 +88,17 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
     imp::info(pid)
 }
 
+/// [`info`] plus the process's parent pid, read from the same kernel
+/// record, so the parent belongs to exactly the process identified. Crash
+/// recovery (part 3, `group_recovery`) uses it to tell an anchor whose
+/// daemon died (it was reparented) from one a live daemon still owns.
+pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
+    if pid <= 0 {
+        return None;
+    }
+    imp::info_with_parent(pid)
+}
+
 /// Every process currently in group `pgid`, zombies included.
 ///
 /// `Ok(empty)` means the kernel confirmed the group has no member; `Err`
@@ -117,6 +128,14 @@ pub fn parse_linux_stat(stat: &[u8]) -> Option<(char, i32, u64, String)> {
     let pgid = fields.get(2)?.parse().ok()?;
     let start = fields.get(19)?.parse().ok()?;
     Some((state, pgid, start, comm))
+}
+
+/// The parent pid (field 4) of a Linux `/proc/<pid>/stat` record, counted
+/// from the last `)` like [`parse_linux_stat`].
+pub fn parse_linux_ppid(stat: &[u8]) -> Option<i32> {
+    let close = stat.iter().rposition(|b| *b == b')')?;
+    let rest = std::str::from_utf8(&stat[close + 1..]).ok()?;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// How many times a list fetch is retried when the list outgrew the buffer
@@ -351,6 +370,20 @@ mod imp {
         read_info(pid).ok().flatten()
     }
 
+    pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+        let (state, pgid, start, name) = parse_linux_stat(&stat)?;
+        let ppid = super::parse_linux_ppid(&stat)?;
+        let info = ProcInfo {
+            pid,
+            pgid,
+            start,
+            zombie: exited(state) && !has_live_thread(pid),
+            name,
+        };
+        Some((info, ppid))
+    }
+
     /// `Ok(None)` when the process is gone; `Err` when it exists but its
     /// record cannot be read or parsed.
     fn read_info(pid: i32) -> std::io::Result<Option<ProcInfo>> {
@@ -510,25 +543,30 @@ mod imp {
     const _: () = assert!(std::mem::offset_of!(ExternProc, p_stat) == 36);
     const _: () = assert!(std::mem::offset_of!(ExternProc, p_pid) == 40);
     const _: () = assert!(std::mem::offset_of!(Eproc, e_ucred) == 120);
+    const _: () = assert!(std::mem::offset_of!(Eproc, e_ppid) == 264);
     const _: () = assert!(std::mem::offset_of!(Eproc, e_pgid) == 268);
     const _: () = assert!(super::MACOS_SZOMB == libc::SZOMB);
 
-    fn convert(k: &KinfoProc) -> ProcInfo {
+    fn convert(k: &KinfoProc) -> (ProcInfo, libc::pid_t) {
         let tv = k.kp_proc.p_starttime;
         let comm = &k.kp_proc.p_comm;
         let len = comm.iter().position(|c| *c == 0).unwrap_or(comm.len());
         let name: Vec<u8> = comm[..len].iter().map(|c| *c as u8).collect();
-        ProcInfo {
+        let info = ProcInfo {
             pid: k.kp_proc.p_pid,
             pgid: k.kp_eproc.e_pgid,
             start: (tv.tv_sec as u64) * 1_000_000 + tv.tv_usec as u64,
             zombie: super::macos_exited_or_exiting(k.kp_proc.p_stat as u32, k.kp_proc.p_flag),
             name: String::from_utf8_lossy(&name).into_owned(),
-        }
+        };
+        (info, k.kp_eproc.e_ppid)
     }
 
     /// `sysctl({CTL_KERN, KERN_PROC, which, arg})` as a list of entries.
-    fn query(which: libc::c_int, arg: libc::c_int) -> std::io::Result<Vec<ProcInfo>> {
+    fn query(
+        which: libc::c_int,
+        arg: libc::c_int,
+    ) -> std::io::Result<Vec<(ProcInfo, libc::pid_t)>> {
         let mib = [libc::CTL_KERN, libc::KERN_PROC, which, arg];
         let entry = std::mem::size_of::<KinfoProc>();
         let needed = || {
@@ -578,15 +616,20 @@ mod imp {
     }
 
     pub fn info(pid: i32) -> Option<ProcInfo> {
+        info_with_parent(pid).map(|(p, _)| p)
+    }
+
+    pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
         query(libc::KERN_PROC_PID, pid)
             .ok()?
             .into_iter()
-            .find(|p| p.pid == pid)
+            .find(|(p, _)| p.pid == pid)
     }
 
     pub fn group_members(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
         Ok(query(libc::KERN_PROC_PGRP, pgid)?
             .into_iter()
+            .map(|(p, _)| p)
             .filter(|p| p.pgid == pgid)
             .collect())
     }
@@ -610,6 +653,10 @@ mod imp {
         None
     }
 
+    pub fn info_with_parent(_pid: i32) -> Option<(ProcInfo, i32)> {
+        None
+    }
+
     pub fn group_members(_pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -629,6 +676,28 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parent_pid_is_field_four_counted_from_the_last_paren() {
+        let line = b"42 (a) (b) c) S 7 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 1234 0 0";
+        assert_eq!(parse_linux_ppid(line), Some(7));
+        assert_eq!(parse_linux_ppid(b"garbage"), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_child_reports_this_process_as_its_parent() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let (info, ppid) = info_with_parent(pid).expect("child readable");
+        assert_eq!(info, super::info(pid).expect("child readable"));
+        assert_eq!(ppid, std::process::id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn a_child_hidden_by_a_racing_fork_is_found_by_the_settled_scan() {

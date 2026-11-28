@@ -35,6 +35,14 @@
 //! anchor is never signalled: nothing pins its id between the last proof
 //! and `killpg`.
 //!
+//! After a crash (part 3, [`crate::util::group_recovery`]). On macOS the
+//! anchor outlives a daemon that dies without cleaning up: once its stdin
+//! closes it `exec`s a `sleep` that never ends by itself, so it keeps
+//! holding the group id until a later daemon proves the group from the
+//! anchor's recorded identity and stops it ([`GroupOwner::adopt`]). An
+//! anchor whose daemon is never started again lingers until reboot; that
+//! is the price of never signalling an unpinned group.
+//!
 //! Scans are not atomic (Linux reads one `/proc/<pid>/stat` at a time), so
 //! a proven scan is accepted only if a process that anchored it is re-read
 //! *after* the scan with the same identity and group: that process was in
@@ -109,19 +117,34 @@ pub struct GroupOwner {
 struct Anchor {
     id: ProcId,
     child: Option<std::process::Child>,
+    /// Crash-recovery record of this group (part 3): removed once the
+    /// anchor is reaped, so it survives only a daemon that never got there.
+    record: Option<std::path::PathBuf>,
+}
+
+/// The anchor's shell script. With `linger` (macOS, where crashed groups
+/// are recovered) the anchor survives the daemon: when its stdin closes it
+/// becomes a `sleep` that keeps ignoring TERM, INT and HUP, so only SIGKILL
+/// ends it and the group id stays reserved for the next daemon's recovery.
+pub(crate) fn anchor_script(linger: bool) -> &'static str {
+    if linger {
+        "trap '' TERM INT HUP; read _; exec sleep 2147483647"
+    } else {
+        "trap '' TERM INT HUP; read _"
+    }
 }
 
 impl Anchor {
     /// Spawn the placeholder as the leader of a new process group. It
-    /// ignores SIGTERM, SIGINT and SIGHUP and exits when the daemon closes
-    /// its stdin (including when the daemon dies), so it never outlives the
-    /// daemon.
+    /// ignores SIGTERM, SIGINT and SIGHUP. Where crashed groups are not
+    /// recovered it exits when the daemon closes its stdin (including when
+    /// the daemon dies); on macOS it lingers instead ([`anchor_script`]).
     #[cfg(unix)]
     fn spawn_leader() -> Option<Self> {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "trap '' TERM INT HUP; read _"])
+            .args(["-c", anchor_script(crate::util::group_recovery::RECOVERS)])
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -136,6 +159,7 @@ impl Anchor {
             Some(p) => Some(Self {
                 id: ProcId::from(&p),
                 child: Some(child),
+                record: None,
             }),
             None => {
                 let _ = child.kill();
@@ -156,6 +180,11 @@ impl Drop for Anchor {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // Only once the anchor is gone: a record left by a crash must
+        // still find it lingering.
+        if let Some(record) = self.record.take() {
+            let _ = std::fs::remove_file(record);
         }
     }
 }
@@ -189,6 +218,35 @@ impl GroupOwner {
         })
     }
 
+    /// Claim a group a dead daemon left behind, from its crash-recovery
+    /// record: `anchor` is the identity the record holds, already matched
+    /// against the live process by the caller. The anchor is not this
+    /// daemon's child, so nothing reaps it here; it pins the group because
+    /// a lingering anchor ends only by SIGKILL.
+    pub fn adopt(pgid: i32, anchor: ProcId) -> Self {
+        Self {
+            pgid,
+            known: HashSet::new(),
+            anchor: Some(Anchor {
+                id: anchor,
+                child: None,
+                record: None,
+            }),
+        }
+    }
+
+    /// Identity of the anchor, for the crash-recovery record.
+    pub fn anchor_identity(&self) -> Option<ProcId> {
+        self.anchor_id()
+    }
+
+    /// Remove `record` once the anchor is reaped (spawned anchors only).
+    pub fn set_record(&mut self, record: std::path::PathBuf) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            anchor.record = Some(record);
+        }
+    }
+
     /// Whether an [`Anchor`] keeps the group id reserved.
     pub fn is_anchored(&self) -> bool {
         self.anchor.is_some()
@@ -203,7 +261,11 @@ impl GroupOwner {
     /// Treat `id` as the group's anchor without spawning one (tests only).
     #[cfg(test)]
     fn with_anchor_id(mut self, id: ProcId) -> Self {
-        self.anchor = Some(Anchor { id, child: None });
+        self.anchor = Some(Anchor {
+            id,
+            child: None,
+            record: None,
+        });
         self
     }
 

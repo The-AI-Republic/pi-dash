@@ -130,6 +130,13 @@ impl Supervisor {
         // execute run-end hooks such a daemon never got to (parity-stack
         // teardown survives a daemon crash through the hook file).
         containment::sweep_orphaned_run_groups().await;
+        // PDASHOSS01-417 part 3: process groups a dead daemon left (macOS)
+        // are recovered from their records, then this daemon records its own.
+        #[cfg(unix)]
+        {
+            crate::util::group_recovery::recover_orphaned_groups(&paths.data_dir).await;
+            crate::util::group_recovery::install(&paths.data_dir);
+        }
         for runner_cfg in &config.runners {
             containment::run_end_hook(&runner_cfg.workspace.working_dir).await;
         }

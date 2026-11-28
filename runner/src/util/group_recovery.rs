@@ -1,0 +1,611 @@
+//! Crash recovery for the process-group backend (PDASHOSS01-417, part 3).
+//!
+//! The cgroup backend recovers after a daemon crash by sweeping its
+//! leftover `pidash-run-*` cgroups. The process-group backend (macOS) had
+//! nothing: a group id is only a number, so a daemon that died mid-run left
+//! its agents' processes running, and a later daemon could not tell the
+//! run's group from a stranger's that reused the id.
+//!
+//! Each anchored run group (see [`crate::util::group_ownership`]) gets a
+//! record in `<data_dir>/run_groups/<run_id>.json`: the group id, the
+//! anchor's pid and exact start time, and the pid of the daemon that owns
+//! it. The record is removed once the anchor is reaped, so only a daemon
+//! that never finished cleanup leaves one behind. On macOS the anchor
+//! outlives such a daemon and keeps the group id reserved, because it ends
+//! only by SIGKILL ([`crate::util::group_ownership::anchor_script`]).
+//!
+//! At daemon start every record is judged before anything is signalled:
+//! * the anchor must still be alive with the recorded pid, exact start
+//!   time and group, or the group cannot be proven and is left running;
+//! * the anchor's parent must no longer be the recorded daemon. The anchor
+//!   is that daemon's direct child and is reparented only when it dies, so
+//!   a second daemon on the same data dir never stops the groups of a live
+//!   one. Such records are left for their owner.
+//!
+//! A proven group then gets the run-end treatment, TERM → grace → KILL,
+//! and every signal re-proves the group from a fresh snapshot first
+//! (review item 5 on #2952): the anchor is re-read after each scan with its
+//! exact identity, and a group that no longer proves is left running. The
+//! anchor itself is stopped last, after one more check of its identity, and
+//! the record is removed. A group that cannot be emptied keeps its record
+//! (and its anchor) for the next start.
+//!
+//! Only macOS recovers ([`RECOVERS`]). Linux exposes start times in clock
+//! ticks, which are a fingerprint, not proof (review of #3496), and an
+//! orphaned anchor is no longer anyone's unreaped child, so on Linux the
+//! anchor exits with its daemon and no record is written; Linux runs are
+//! recovered by the cgroup sweep.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::util::containment::CleanupOutcome;
+use crate::util::group_ownership::{GroupOwner, ProcId};
+use crate::util::procinfo::{self, ProcInfo};
+
+/// Whether this platform records anchored groups and recovers them after a
+/// crash (see the module doc).
+pub const RECOVERS: bool = cfg!(target_os = "macos");
+
+const RECORD_DIR: &str = "run_groups";
+
+static INSTALLED_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where records live under the daemon's data dir.
+pub fn record_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(RECORD_DIR)
+}
+
+/// Record every anchored group this daemon creates from now on in
+/// `data_dir`. Called once at daemon start; a no-op where groups are not
+/// recovered.
+pub fn install(data_dir: &Path) {
+    if RECOVERS {
+        let _ = INSTALLED_DIR.set(record_dir(data_dir));
+    }
+}
+
+/// A run group as the daemon that created it recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRecord {
+    pub run_id: Uuid,
+    pub pgid: i32,
+    pub anchor_pid: i32,
+    pub anchor_start: u64,
+    /// Pid of the daemon whose child the anchor is.
+    pub owner_pid: i32,
+}
+
+impl GroupRecord {
+    fn anchor(&self) -> ProcId {
+        ProcId {
+            pid: self.anchor_pid,
+            start: self.anchor_start,
+        }
+    }
+}
+
+/// Record a freshly anchored group if [`install`] was called. Dropping the
+/// owner's anchor removes the record.
+pub fn record_new_group(run_id: Uuid, owner: &mut GroupOwner) {
+    if let Some(dir) = INSTALLED_DIR.get() {
+        record_in(dir, run_id, owner);
+    }
+}
+
+/// [`record_new_group`] into `dir`. A record that cannot be written only
+/// costs recovery for this run; the run itself goes ahead.
+pub(crate) fn record_in(dir: &Path, run_id: Uuid, owner: &mut GroupOwner) {
+    let Some(anchor) = owner.anchor_identity() else {
+        return;
+    };
+    let record = GroupRecord {
+        run_id,
+        pgid: owner.pgid(),
+        anchor_pid: anchor.pid,
+        anchor_start: anchor.start,
+        owner_pid: std::process::id() as i32,
+    };
+    match write_record(dir, &record) {
+        Ok(path) => owner.set_record(path),
+        Err(e) => tracing::warn!(
+            run_id = %run_id, error = %e,
+            "run group record not written; this run's processes cannot be recovered after a crash"
+        ),
+    }
+}
+
+fn record_path(dir: &Path, run_id: Uuid) -> PathBuf {
+    dir.join(format!("{run_id}.json"))
+}
+
+/// Write atomically (temp file, then rename), so a crash never leaves a
+/// half-written record.
+fn write_record(dir: &Path, record: &GroupRecord) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let path = record_path(dir, record.run_id);
+    let tmp = dir.join(format!(".{}.tmp", record.run_id));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&serde_json::to_vec(record).map_err(std::io::Error::other)?)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Every record file in `dir`, parsed (`None`: unreadable or malformed).
+fn list_records(dir: &Path) -> Vec<(PathBuf, Option<GroupRecord>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .map(|p| {
+            let record = std::fs::read(&p)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok());
+            (p, record)
+        })
+        .collect()
+}
+
+/// What a record proves about its group right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The anchor still belongs to the live daemon that recorded it.
+    OwnerAlive,
+    /// The anchor is gone or is not the recorded process: the group cannot
+    /// be proven and is never signalled.
+    Unproven(&'static str),
+    /// The recorded anchor is alive, holds the group, and its daemon died.
+    Orphaned,
+}
+
+/// Judge `record` from one read of its anchor (`read`: process info and
+/// parent pid from the same kernel record).
+fn judge(record: &GroupRecord, read: impl Fn(i32) -> Option<(ProcInfo, i32)>) -> Verdict {
+    let Some((anchor, parent)) = read(record.anchor_pid) else {
+        return Verdict::Unproven("anchor is gone");
+    };
+    if ProcId::from(&anchor) != record.anchor()
+        || anchor.pgid != record.pgid
+        || anchor.pgid != anchor.pid
+    {
+        return Verdict::Unproven("anchor pid now belongs to another process");
+    }
+    if anchor.zombie {
+        return Verdict::Unproven("anchor has exited");
+    }
+    if parent == record.owner_pid {
+        return Verdict::OwnerAlive;
+    }
+    Verdict::Orphaned
+}
+
+/// What recovery did with one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// Its daemon is still alive: left to it, record kept.
+    LeftToOwner,
+    /// Ownership could not be proven: nothing signalled, record removed.
+    LeftRunning,
+    /// The orphaned group was stopped (or could not be emptied: then the
+    /// record is kept for the next start).
+    Stopped(CleanupOutcome),
+    /// The record could not be parsed: removed.
+    Discarded,
+}
+
+/// Recover every group a dead daemon left in `data_dir`. Runs at daemon
+/// start, before any run; a no-op where groups are not recovered.
+pub async fn recover_orphaned_groups(data_dir: &Path) {
+    if RECOVERS {
+        recover_dir(
+            record_dir(data_dir),
+            crate::util::containment::CLEANUP_GRACE,
+        )
+        .await;
+    }
+}
+
+/// [`recover_orphaned_groups`] for one record dir.
+/// Only one daemon recovers a record dir at a time (`.recovery.lock`, held
+/// for the pass): two daemons starting together after a crash would
+/// otherwise both adopt a group, and one could kill an anchor the other
+/// had just proven. A daemon that finds the lock held skips recovery.
+pub(crate) async fn recover_dir(dir: PathBuf, grace: Duration) -> Vec<(PathBuf, Recovery)> {
+    tokio::task::spawn_blocking(move || {
+        let Some(_lock) = recovery_lock(&dir) else {
+            return Vec::new();
+        };
+        list_records(&dir)
+            .into_iter()
+            .map(|(path, record)| {
+                let done = match record {
+                    Some(record) => recover_record(&path, &record, grace),
+                    None => {
+                        tracing::warn!(path = %path.display(), "unreadable run group record discarded");
+                        let _ = std::fs::remove_file(&path);
+                        Recovery::Discarded
+                    }
+                };
+                (path, done)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+const RECOVERY_LOCK: &str = ".recovery.lock";
+
+/// The exclusive recovery lock of `dir`; `None` when there is nothing to
+/// recover or another daemon holds it.
+fn recovery_lock(dir: &Path) -> Option<std::fs::File> {
+    use fs2::FileExt;
+    if !dir.is_dir() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(RECOVERY_LOCK))
+        .ok()?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Some(file),
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e,
+                "run group recovery skipped: another daemon is recovering");
+            None
+        }
+    }
+}
+
+fn recover_record(path: &Path, record: &GroupRecord, grace: Duration) -> Recovery {
+    match judge(record, procinfo::info_with_parent) {
+        Verdict::OwnerAlive => {
+            tracing::debug!(run_id = %record.run_id, owner_pid = record.owner_pid,
+                "run group belongs to a live daemon; left alone");
+            Recovery::LeftToOwner
+        }
+        Verdict::Unproven(why) => {
+            tracing::warn!(run_id = %record.run_id, pgid = record.pgid, reason = why,
+                "orphaned run group cannot be proven to belong to the run; left running");
+            let _ = std::fs::remove_file(path);
+            Recovery::LeftRunning
+        }
+        Verdict::Orphaned => Recovery::Stopped(stop_adopted(path, record, grace)),
+    }
+}
+
+/// Stop an orphaned group judged [`Verdict::Orphaned`]. Every signal
+/// re-proves the group from a fresh snapshot (`stop_owned_group`), so an
+/// anchor that changed after the judgement stops everything.
+fn stop_adopted(path: &Path, record: &GroupRecord, grace: Duration) -> CleanupOutcome {
+    let owner = Mutex::new(GroupOwner::adopt(record.pgid, record.anchor()));
+    let (stopped, outcome) =
+        crate::util::containment::stop_owned_group(record.run_id, &owner, grace);
+    crate::util::containment::cleanup_report(record.run_id, "process-group-recovery", &stopped);
+    if outcome != CleanupOutcome::Clean {
+        tracing::warn!(run_id = %record.run_id, pgid = record.pgid,
+            "orphaned run group could not be emptied; kept for the next daemon start");
+        return outcome;
+    }
+    // The group is empty but the lingering anchor may still hold it. Stop
+    // it only while it is still the recorded, orphaned anchor; it ends only
+    // by SIGKILL, so it cannot be replaced between this read and the kill.
+    if judge(record, procinfo::info_with_parent) == Verdict::Orphaned {
+        send_kill(record.anchor_pid);
+    }
+    let _ = std::fs::remove_file(path);
+    outcome
+}
+
+#[cfg(unix)]
+fn send_kill(pid: i32) {
+    if pid > 1 {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn send_kill(_pid: i32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec() -> GroupRecord {
+        GroupRecord {
+            run_id: Uuid::nil(),
+            pgid: 10,
+            anchor_pid: 10,
+            anchor_start: 500,
+            owner_pid: 77,
+        }
+    }
+
+    fn anchor(pid: i32, pgid: i32, start: u64, zombie: bool) -> ProcInfo {
+        ProcInfo {
+            pid,
+            pgid,
+            start,
+            zombie,
+            name: "sleep".into(),
+        }
+    }
+
+    #[test]
+    fn a_record_is_judged_from_its_anchor_identity_and_parent() {
+        let r = rec();
+        let read = |info: Option<(ProcInfo, i32)>| move |_pid: i32| info.clone();
+        assert_eq!(
+            judge(&r, read(Some((anchor(10, 10, 500, false), 1)))),
+            Verdict::Orphaned
+        );
+        assert_eq!(
+            judge(&r, read(Some((anchor(10, 10, 500, false), 77)))),
+            Verdict::OwnerAlive
+        );
+        assert!(matches!(judge(&r, read(None)), Verdict::Unproven(_)));
+        // A reused pid (another start), a moved process, an exited anchor.
+        for (info, parent) in [
+            (anchor(10, 10, 501, false), 1),
+            (anchor(10, 12, 500, false), 1),
+            (anchor(10, 10, 500, true), 1),
+        ] {
+            assert!(
+                matches!(judge(&r, read(Some((info, parent)))), Verdict::Unproven(_)),
+                "must not prove"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod process_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    const GRACE: Duration = Duration::from_millis(300);
+
+    /// A lingering anchor (as macOS spawns it) leading a new group.
+    fn spawn_anchor() -> (Child, ProcInfo) {
+        let child = Command::new("/bin/sh")
+            .args(["-c", crate::util::group_ownership::anchor_script(true)])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let info = procinfo::info(child.id() as i32).unwrap();
+        (child, info)
+    }
+
+    fn spawn_member(pgid: i32) -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .process_group(pgid)
+            .spawn()
+            .unwrap()
+    }
+
+    /// The pid of a process that has exited and been reaped: a daemon that
+    /// is gone.
+    fn dead_pid() -> i32 {
+        let mut c = Command::new("true").spawn().unwrap();
+        let pid = c.id() as i32;
+        c.wait().unwrap();
+        pid
+    }
+
+    /// Close the anchor's stdin, as a dying daemon does, and wait until it
+    /// has become its lingering `sleep`.
+    fn orphan(anchor: &mut Child) {
+        drop(anchor.stdin.take());
+        for _ in 0..50 {
+            if procinfo::info(anchor.id() as i32).is_some_and(|p| p.name == "sleep") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("anchor did not linger");
+    }
+
+    fn record_for(anchor: &ProcInfo, owner_pid: i32) -> GroupRecord {
+        GroupRecord {
+            run_id: Uuid::new_v4(),
+            pgid: anchor.pgid,
+            anchor_pid: anchor.pid,
+            anchor_start: anchor.start,
+            owner_pid,
+        }
+    }
+
+    fn running(child: &mut Child) -> bool {
+        child.try_wait().unwrap().is_none()
+    }
+
+    /// Reap `child`, killing it first if it is still running.
+    fn reap(child: &mut Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_group_is_stopped_at_start_and_its_record_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let mut member = spawn_member(a.pgid);
+        let record = record_for(&a, dead_pid());
+        let path = write_record(dir.path(), &record).unwrap();
+        orphan(&mut anchor);
+        // The lingering anchor ignores TERM: only KILL ends it.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(a.pid),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(running(&mut anchor), "the anchor must survive TERM");
+
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+
+        assert_eq!(
+            done,
+            vec![(path.clone(), Recovery::Stopped(CleanupOutcome::Clean))]
+        );
+        let status = member.wait().unwrap();
+        assert!(!status.success(), "the member must have been signalled");
+        let _ = anchor.wait();
+        assert!(!path.exists(), "the record must be removed");
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_anchor_alone_is_stopped_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let path = write_record(dir.path(), &record_for(&a, dead_pid())).unwrap();
+        orphan(&mut anchor);
+
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+
+        assert_eq!(
+            done,
+            vec![(path.clone(), Recovery::Stopped(CleanupOutcome::Clean))]
+        );
+        let status = anchor.wait().unwrap();
+        assert!(!status.success(), "the lingering anchor must be killed");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_group_whose_daemon_is_alive_is_left_alone() {
+        // A second daemon on the same data dir: the anchor's parent is the
+        // recorded owner, which is still alive (this test process).
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let mut member = spawn_member(a.pgid);
+        let path = write_record(dir.path(), &record_for(&a, std::process::id() as i32)).unwrap();
+
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+
+        assert_eq!(done, vec![(path.clone(), Recovery::LeftToOwner)]);
+        assert!(running(&mut member) && running(&mut anchor));
+        assert!(path.exists(), "a live owner's record is kept");
+        reap(&mut member);
+        reap(&mut anchor);
+    }
+
+    #[tokio::test]
+    async fn a_record_whose_anchor_was_replaced_is_never_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let mut member = spawn_member(a.pgid);
+        let mut record = record_for(&a, dead_pid());
+        record.anchor_start += 1; // the pid now belongs to another process
+        let path = write_record(dir.path(), &record).unwrap();
+        orphan(&mut anchor);
+
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+
+        assert_eq!(done, vec![(path.clone(), Recovery::LeftRunning)]);
+        assert!(running(&mut member) && running(&mut anchor));
+        assert!(!path.exists(), "an unprovable record is dropped");
+        reap(&mut member);
+        reap(&mut anchor);
+    }
+
+    #[test]
+    fn ownership_is_re_proven_before_sigterm() {
+        // Review item 5 on #2952: the record was judged orphaned, then the
+        // anchor went away before the first signal. The group is still
+        // held by the member, but nothing proves it is the run's any more.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let mut member = spawn_member(a.pgid);
+        let record = record_for(&a, dead_pid());
+        let path = write_record(dir.path(), &record).unwrap();
+        orphan(&mut anchor);
+        assert_eq!(
+            judge(&record, procinfo::info_with_parent),
+            Verdict::Orphaned
+        );
+        reap(&mut anchor);
+
+        let outcome = stop_adopted(&path, &record, GRACE);
+
+        assert_eq!(outcome, CleanupOutcome::Unresolved);
+        assert!(
+            running(&mut member),
+            "an unproven group must not be signalled"
+        );
+        reap(&mut member);
+    }
+
+    #[test]
+    fn a_spawned_group_is_recorded_until_its_anchor_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = GroupOwner::new_anchored().expect("anchored group");
+        let run_id = Uuid::new_v4();
+        record_in(dir.path(), run_id, &mut owner);
+        let path = record_path(dir.path(), run_id);
+        let record: GroupRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let anchor = owner.anchor_identity().unwrap();
+        assert_eq!(
+            record,
+            GroupRecord {
+                run_id,
+                pgid: owner.pgid(),
+                anchor_pid: anchor.pid,
+                anchor_start: anchor.start,
+                owner_pid: std::process::id() as i32,
+            }
+        );
+        drop(owner);
+        assert!(!path.exists(), "the record goes with the anchor");
+    }
+
+    #[tokio::test]
+    async fn recovery_is_skipped_while_another_daemon_recovers() {
+        use fs2::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let path = write_record(dir.path(), &record_for(&a, dead_pid())).unwrap();
+        orphan(&mut anchor);
+        let held = std::fs::File::create(dir.path().join(RECOVERY_LOCK)).unwrap();
+        held.lock_exclusive().unwrap();
+
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+
+        assert!(done.is_empty());
+        assert!(running(&mut anchor) && path.exists());
+        drop(held);
+        assert_eq!(
+            recover_dir(dir.path().to_path_buf(), GRACE).await,
+            vec![(path, Recovery::Stopped(CleanupOutcome::Clean))]
+        );
+        let _ = anchor.wait();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_record_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("junk.json");
+        std::fs::write(&path, b"{").unwrap();
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        assert_eq!(done, vec![(path.clone(), Recovery::Discarded)]);
+        assert!(!path.exists());
+    }
+}

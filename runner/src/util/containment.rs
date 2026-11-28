@@ -28,9 +28,12 @@
 //!   documented limit of this backend. Platforms without process
 //!   inspection (not Linux or macOS) could never prove a group empty, so
 //!   they get no containment (as if `off`), not a runner held forever.
-//!   Cleanup cannot sweep after a crash (a dead PGID can be
-//!   reused by the OS), so swept recovery only exists on the cgroup
-//!   backend.
+//!   After a crash, macOS recovers the run's group from a record the
+//!   daemon wrote when it created it: the anchor outlives the daemon and
+//!   still pins the group, and the next daemon stops the group only once
+//!   it has proven it from the anchor's exact identity (see
+//!   [`crate::util::group_recovery`]). Elsewhere a dead PGID can be reused
+//!   by the OS, so swept recovery only exists on the cgroup backend.
 //! * **none**: `PIDASH_CONTAINMENT=off` (diagnosis escape hatch) or
 //!   Windows, where this module only ensures `kill_on_drop`. The old
 //!   leak applies; the override is never recommended.
@@ -487,7 +490,7 @@ const INSPECT_ATTEMPTS: usize = 3;
 /// snapshot first; a group that stops being provable is left alone (and
 /// reported), never signalled.
 #[cfg(unix)]
-fn stop_owned_group(
+pub(crate) fn stop_owned_group(
     run_id: Uuid,
     owner: &Mutex<GroupOwner>,
     grace: Duration,
@@ -624,7 +627,7 @@ fn cgroup_populated(dir: &Path) -> Option<bool> {
 }
 
 /// One log line per run with the count and names of stopped processes.
-fn cleanup_report(run_id: Uuid, backend: &str, stopped: &[(u32, String)]) {
+pub(crate) fn cleanup_report(run_id: Uuid, backend: &str, stopped: &[(u32, String)]) {
     if stopped.is_empty() {
         tracing::info!(run_id = %run_id, backend, "run process cleanup: nothing to stop");
     } else {
@@ -706,7 +709,10 @@ fn process_group_unit(run_id: Uuid) -> RunGroup {
     #[cfg(unix)]
     {
         match GroupOwner::new_anchored() {
-            Some(owner) => group.owner = Some(Arc::new(Mutex::new(owner))),
+            Some(mut owner) => {
+                crate::util::group_recovery::record_new_group(run_id, &mut owner);
+                group.owner = Some(Arc::new(Mutex::new(owner)));
+            }
             None => tracing::warn!(
                 run_id = %run_id,
                 "run process group could not be anchored; its processes will not be signalled at run end"
@@ -754,8 +760,9 @@ async fn remove_cgroup_dir(dir: &Path) {
 /// a previous daemon left behind, then remove it. Runs at daemon start:
 /// no run is live yet, so every such cgroup is orphaned by construction.
 /// Each swept group gets the same TERM → grace → KILL treatment and log
-/// line as a normal run cleanup. Only the cgroup backend sweeps (see
-/// module docs); process-group PGIDs are never persisted across a crash.
+/// line as a normal run cleanup. Only the cgroup backend sweeps here (see
+/// module docs); process groups are recovered from their records by
+/// [`crate::util::group_recovery::recover_orphaned_groups`] (macOS).
 pub async fn sweep_orphaned_run_groups() {
     #[cfg(target_os = "linux")]
     {
