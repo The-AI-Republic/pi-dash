@@ -2,7 +2,9 @@
 //!
 //! Muse Code (Meta) is closed-source and its event schema is not publicly
 //! documented, so this module is modeled on frames captured from a real
-//! binary (`muse 1.3.0-R3401.1`) — see `runner/tests/fixtures/muse_code/`.
+//! binary (`muse 1.3.0-R3401.1`, plus the `run.usage` record `1.4.24` emits
+//! just before `run.terminal.completed`) — see
+//! `runner/tests/fixtures/muse_code/`.
 //! Every line is an event-sourced *record* envelope with no top-level `type`:
 //!
 //! ```json
