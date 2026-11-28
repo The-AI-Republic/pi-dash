@@ -303,6 +303,23 @@ pub async fn fetch_state_detail_parts(
         .await
 }
 
+/// The issue row an `expand=issue` nests, with its `state_detail` parts
+/// (PDASHOSS01-404), in one statement: the state is a LEFT JOIN on the
+/// issue read, so a page of expanded rows pays no per-row `states` lookup.
+/// Unscoped on both sides, like `select_related("issue")` and the FK
+/// descriptor Django reads `obj.state` through. `None` when the issue row
+/// is gone; the parts are `None` when the issue has no state.
+pub async fn fetch_issue_with_state_detail(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+) -> Result<Option<(issues::Model, Option<(String, String)>)>, sea_orm::DbErr> {
+    let found = issues::Entity::find_by_id(issue_id)
+        .find_also_related(states::Entity)
+        .one(db)
+        .await?;
+    Ok(found.map(|(row, state)| (row, state.map(|state| (state.name, state.group)))))
+}
+
 /// Owned `relations_summary` rows: `(identifier, state, state_group)`
 /// per direction plus the uncapped open flag. The shape borrows these;
 /// the caller holds them across the render.
@@ -2619,6 +2636,49 @@ mod live {
             .execute(&db)
             .await
             .expect("relations pool plans");
+    }
+
+    /// `expand=issue` reads the issue and its state in one statement
+    /// (PDASHOSS01-404): no separate `states` query per expanded row.
+    #[tokio::test]
+    async fn issue_with_state_detail_is_one_statement() {
+        use std::sync::{Arc, Mutex};
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let mut conn = pidash_db::pool::sea_orm_connection(&db);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        conn.set_metric_callback(move |info| {
+            sink.lock()
+                .expect("metric sink")
+                .push(info.statement.sql.clone());
+        });
+        let (row, parts) = fetch_issue_with_state_detail(&conn, world.issue_id)
+            .await
+            .expect("fetches")
+            .expect("issue exists");
+        assert_eq!(row.id, world.issue_id);
+        assert_eq!(
+            parts,
+            Some(("Seed Backlog".to_owned(), "backlog".to_owned()))
+        );
+        let statements = seen.lock().expect("metric sink").clone();
+        assert_eq!(statements.len(), 1, "{statements:?}");
+
+        sqlx::query("UPDATE issues SET state_id = NULL WHERE id = $1")
+            .bind(world.issue_id)
+            .execute(&db)
+            .await
+            .expect("clear state");
+        let (_, parts) = fetch_issue_with_state_detail(&conn, world.issue_id)
+            .await
+            .expect("fetches")
+            .expect("issue exists");
+        assert_eq!(parts, None);
+        assert!(fetch_issue_with_state_detail(&conn, Uuid::new_v4())
+            .await
+            .expect("fetches")
+            .is_none());
     }
 
     /// The relations pool is narrowed to the viewer's active project

@@ -1519,11 +1519,12 @@ async fn expand_issue(
     // soft-deletion scope, so a soft-deleted issue still renders (with its
     // `deleted_at`) instead of collapsing to null (PIDASHCONV-789#4,
     // live-probed).
-    let row = issues::Entity::find_by_id(*issue_id)
-        .one(&orm(pool))
+    // The state's name and group come from the same statement (a LEFT JOIN),
+    // so an expanded page adds no `states` query per row.
+    let found = pidash_services::read::fetch_issue_with_state_detail(&orm(pool), *issue_id)
         .await
         .map_err(|error| db_error(error, "expand-issue"))?;
-    let Some(row) = row else {
+    let Some((row, state_detail)) = found else {
         return Ok(Value::Null);
     };
     let id = row.id.to_string();
@@ -1561,12 +1562,6 @@ async fn expand_issue(
     let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
         &pidash_db::pool::sea_orm_connection(pool),
         row.assigned_runner_id,
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let state_detail = pidash_services::read::fetch_state_detail_parts(
-        &pidash_db::pool::sea_orm_connection(pool),
-        row.state_id,
     )
     .await
     .map_err(|_| Denial::ServerError)?;
