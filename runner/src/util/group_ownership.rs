@@ -21,16 +21,19 @@
 //! leader's exit; [`GroupOwner::observe`] is called periodically while the
 //! run is live for exactly that reason.
 //!
-//! Anchor (review of #3497). Right after the claim the daemon spawns a
-//! tiny placeholder process of its own into the group ([`Anchor`]) and
-//! does not reap it until the claim is dropped, after cleanup. An unreaped
-//! child keeps its group id reserved, so from the claim to the end of
-//! cleanup the id cannot be handed to anyone else, even when the agent's
-//! leader is reaped before any of its children was observed. While the
-//! anchor stands, every live member of the group is the run's. The anchor
-//! ignores SIGTERM (it must outlast the grace period) and dies with the
-//! group's SIGKILL; it is never counted or reported as a run process.
-//! When it cannot be spawned, proof falls back to remembered members.
+//! Anchor (reviews of #3497). Before the run's agent is spawned, the daemon
+//! spawns a tiny placeholder process of its own as the leader of a new
+//! group ([`Anchor`], [`GroupOwner::new_anchored`]) and does not reap it
+//! until the claim is dropped, after cleanup. Every agent of the run is
+//! spawned *into* that group, so the claim never depends on reading an
+//! agent's pid after spawn, which the bridge may already have reaped. An
+//! unreaped child keeps its group id reserved, so from before the first
+//! spawn to the end of cleanup the id cannot be handed to anyone else, and
+//! every live member of the group is the run's. The anchor ignores SIGTERM
+//! (it must outlast the grace period) and dies with the group's SIGKILL;
+//! it is never counted or reported as a run process. A group with no
+//! anchor is never signalled: nothing pins its id between the last proof
+//! and `killpg`.
 //!
 //! Scans are not atomic (Linux reads one `/proc/<pid>/stat` at a time), so
 //! a proven scan is accepted only if a process that anchored it is re-read
@@ -41,10 +44,9 @@
 //! Serialisation (review item 1 on #2952). Proof is never cached: every
 //! signal takes a fresh kernel snapshot and sends `killpg` straight after
 //! it, under the owner's lock, so no reaper-updated flag can claim the
-//! leader is alive after it was reaped. The only remaining window is the
-//! few microseconds between that snapshot and the `killpg` call, during
-//! which the whole group would have to exit and a new process would have
-//! to be allocated the very same id.
+//! leader is alive after it was reaped. The anchor closes the window
+//! between that snapshot and `killpg`: the group id cannot be recycled
+//! while the daemon's unreaped anchor holds it.
 //!
 //! Start times are compared exactly on every platform (review item 4):
 //! there is no tolerance for a replacement started "close enough".
@@ -110,16 +112,17 @@ struct Anchor {
 }
 
 impl Anchor {
-    /// Spawn the placeholder into group `pgid`. It ignores SIGTERM, SIGINT
-    /// and SIGHUP and exits when the daemon closes its stdin (including when
-    /// the daemon dies), so it never outlives the daemon.
+    /// Spawn the placeholder as the leader of a new process group. It
+    /// ignores SIGTERM, SIGINT and SIGHUP and exits when the daemon closes
+    /// its stdin (including when the daemon dies), so it never outlives the
+    /// daemon.
     #[cfg(unix)]
-    fn spawn(pgid: i32) -> Option<Self> {
+    fn spawn_leader() -> Option<Self> {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "trap '' TERM INT HUP; read _"])
-            .process_group(pgid)
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -128,7 +131,7 @@ impl Anchor {
         let joined = i32::try_from(child.id())
             .ok()
             .and_then(procinfo::info)
-            .filter(|p| p.pgid == pgid && !p.zombie);
+            .filter(|p| p.pgid == p.pid && !p.zombie);
         match joined {
             Some(p) => Some(Self {
                 id: ProcId::from(&p),
@@ -143,7 +146,7 @@ impl Anchor {
     }
 
     #[cfg(not(unix))]
-    fn spawn(_pgid: i32) -> Option<Self> {
+    fn spawn_leader() -> Option<Self> {
         None
     }
 }
@@ -173,19 +176,17 @@ impl GroupOwner {
         })
     }
 
-    /// Read the leader from the kernel, [`claim`](Self::claim) it and
-    /// anchor the group. The anchor is kept only if the leader still has
-    /// the claimed identity and group after the anchor joined: while pid
-    /// `pgid` is in use no other group can take that id, so the anchor
-    /// joined the run's group. Otherwise the claim stays unanchored.
-    pub fn claim_pid(pid: i32) -> Option<Self> {
-        let leader = procinfo::info(pid)?;
-        let mut owner = Self::claim(&leader)?;
-        let id = ProcId::from(&leader);
-        owner.anchor = Anchor::spawn(owner.pgid).filter(|_| {
-            procinfo::info(pid).is_some_and(|p| p.pgid == leader.pgid && ProcId::from(&p) == id)
-        });
-        Some(owner)
+    /// Create the run's group, led by a fresh [`Anchor`], before any agent
+    /// is spawned; agents then join it with `process_group(pgid)`. `None`
+    /// when the anchor cannot be spawned or read: the run then has no
+    /// pinned group, and none of its processes is ever signalled.
+    pub fn new_anchored() -> Option<Self> {
+        let anchor = Anchor::spawn_leader()?;
+        Some(Self {
+            pgid: anchor.id.pid,
+            known: HashSet::new(),
+            anchor: Some(anchor),
+        })
     }
 
     /// Whether an [`Anchor`] keeps the group id reserved.
@@ -294,14 +295,19 @@ impl GroupOwner {
         }
     }
 
-    /// Signal the group only if a fresh snapshot proves it is still ours.
-    /// Returns the proof the decision was made on.
+    /// Signal the group only if a fresh snapshot proves it is still ours
+    /// and an anchor pins its id through delivery. Returns the proof the
+    /// decision was made on; a proven but unpinned group is reported as
+    /// [`Proof::Unproven`] and left alone.
     pub fn signal(&mut self, sig: GroupSignal) -> Proof {
-        let proof = self.observe();
-        if matches!(proof, Proof::Ours(_)) {
-            send_killpg(self.pgid, sig);
+        match self.observe() {
+            Proof::Ours(live) if self.anchor.is_none() => Proof::Unproven(live),
+            Proof::Ours(live) => {
+                send_killpg(self.pgid, sig);
+                Proof::Ours(live)
+            }
+            other => other,
         }
-        proof
     }
 }
 
@@ -474,23 +480,16 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_claimed_group_gets_a_real_anchor_that_is_reaped_on_drop() {
-        use std::os::unix::process::CommandExt;
-        let mut leader = std::process::Command::new("sleep")
-            .arg("300")
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let pid = leader.id() as i32;
-        let owner = GroupOwner::claim_pid(pid).expect("leader claimed");
+    fn a_new_group_is_led_by_a_real_anchor_that_is_reaped_on_drop() {
+        let owner = GroupOwner::new_anchored().expect("anchored group");
         let anchor = owner.anchor_pid().expect("anchored");
         let a = procinfo::info(anchor).expect("anchor alive");
-        assert_eq!(a.pgid, pid);
+        assert_eq!((a.pid, a.pgid), (owner.pgid(), owner.pgid()));
         drop(owner);
-        let gone = procinfo::info(anchor).is_none();
-        let _ = leader.kill();
-        let _ = leader.wait();
-        assert!(gone, "anchor must be killed and reaped with the claim");
+        assert!(
+            procinfo::info(anchor).is_none(),
+            "anchor must be killed and reaped with the claim"
+        );
     }
 
     #[test]
