@@ -185,8 +185,19 @@ def _clone_children(db, template_id, first, count):
     )
 
 
-def test_tree_truncated_only_past_node_limit(api, world, db):
+@pytest.fixture
+def bulk_clones(db):
+    """Parents whose ``_clone_children`` rows are deleted on teardown: the
+    clones bypass the seeder, so the work-item fixture would leave them."""
+    parents = []
+    yield parents
+    for parent_id in parents:
+        db.execute("DELETE FROM issues WHERE parent_id = %s AND name LIKE 'bulk %%'", (parent_id,))
+
+
+def test_tree_truncated_only_past_node_limit(api, world, db, bulk_clones):
     epic_id = world["issue"]["id"]
+    bulk_clones.append(epic_id)
     first = make(api, world, "first", parent=epic_id)
     _clone_children(db, first["id"], 100000, 999)
 
