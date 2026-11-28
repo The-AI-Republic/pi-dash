@@ -1041,6 +1041,31 @@ async fn issue_list_fields_flag() {
 }
 
 #[tokio::test]
+async fn issue_list_fields_state_detail_passes_through_with_the_row_object() {
+    // PDASHOSS01-404: `--fields state_detail` reaches the server verbatim and
+    // the `{name, group}` object in each row comes back untouched.
+    const BODY: &str = r#"{"results":[{"state_detail":{"name":"Done","group":"completed"}}],"next_cursor":"10:1:0","next_page_results":false}"#;
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(BODY))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.fields = Some("state_detail".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list succeeds");
+    assert_eq!(
+        resp["results"][0],
+        serde_json::json!({"state_detail": {"name": "Done", "group": "completed"}})
+    );
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        recorded.iter().map(|r| r.path.clone()).collect::<Vec<_>>(),
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&fields=state_detail"
+        )]
+    );
+}
+
+#[tokio::test]
 async fn issue_list_parent_none_sends_null_without_lookup() {
     let mut args = list_args("ENG");
     args.parent = Some("none".into());
