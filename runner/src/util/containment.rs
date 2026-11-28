@@ -531,7 +531,10 @@ pub(crate) fn stop_owned_group(
                 first = Some(names(live));
                 break;
             }
-            Proof::Empty => return (Vec::new(), CleanupOutcome::Clean),
+            Proof::Empty => {
+                o.confirm_empty();
+                return (Vec::new(), CleanupOutcome::Clean);
+            }
             Proof::Unproven(live) => {
                 unproven(&live, pgid);
                 return (Vec::new(), CleanupOutcome::Unresolved);
@@ -576,8 +579,12 @@ pub(crate) fn stop_owned_group(
     // Clean only when a fresh snapshot shows the group empty: survivors of
     // SIGKILL, an unprovable group and a group that cannot be inspected
     // all leave the run unresolved.
-    let outcome = match lock_owner(owner).observe() {
-        Proof::Empty => CleanupOutcome::Clean,
+    let mut o = lock_owner(owner);
+    let outcome = match o.observe() {
+        Proof::Empty => {
+            o.confirm_empty();
+            CleanupOutcome::Clean
+        }
         Proof::Ours(_) | Proof::Unproven(_) | Proof::Unknown => CleanupOutcome::Unresolved,
     };
     (stopped, outcome)

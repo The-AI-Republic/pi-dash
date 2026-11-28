@@ -117,9 +117,12 @@ pub struct GroupOwner {
 struct Anchor {
     id: ProcId,
     child: Option<std::process::Child>,
-    /// Crash-recovery record of this group (part 3): removed once the
-    /// anchor is reaped, so it survives only a daemon that never got there.
+    /// Crash-recovery record of this group (part 3): removed with the
+    /// anchor once a cleanup confirmed the group empty, so it survives a
+    /// daemon that never got there.
     record: Option<std::path::PathBuf>,
+    /// A cleanup's fresh, settled snapshot found the group empty.
+    confirmed_empty: bool,
 }
 
 /// The anchor's shell script. With `linger` (macOS, where crashed groups
@@ -167,6 +170,7 @@ impl Anchor {
                 id: ProcId::from(&p),
                 child: Some(child),
                 record: None,
+                confirmed_empty: false,
             }),
             None => {
                 let _ = child.kill();
@@ -184,6 +188,21 @@ impl Anchor {
 
 impl Drop for Anchor {
     fn drop(&mut self) {
+        // A recorded group no cleanup confirmed empty (shutdown during an
+        // unresolved or cancelled cleanup) keeps its record and its anchor:
+        // the anchor is left unreaped (lingering, it outlives the daemon),
+        // so the group id stays reserved and the next daemon's recovery
+        // can still judge the group. Killing it here would delete the only
+        // way to find what the run left running.
+        if self.record.is_some() && !self.confirmed_empty {
+            // Dropping the handle neither kills nor reaps the child.
+            drop(self.child.take());
+            tracing::warn!(
+                pgid = self.id.pid,
+                "run group not confirmed empty; its anchor and crash record are kept for recovery"
+            );
+            return;
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -238,6 +257,7 @@ impl GroupOwner {
                 id: anchor,
                 child: None,
                 record: None,
+                confirmed_empty: false,
             }),
         }
     }
@@ -251,6 +271,14 @@ impl GroupOwner {
     pub fn set_record(&mut self, record: std::path::PathBuf) {
         if let Some(anchor) = self.anchor.as_mut() {
             anchor.record = Some(record);
+        }
+    }
+
+    /// A cleanup found the group empty from a fresh, settled snapshot:
+    /// dropping the owner may now reap the anchor and retire its record.
+    pub fn confirm_empty(&mut self) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            anchor.confirmed_empty = true;
         }
     }
 
@@ -272,6 +300,7 @@ impl GroupOwner {
             id,
             child: None,
             record: None,
+            confirmed_empty: false,
         });
         self
     }
