@@ -51,6 +51,9 @@ EXPIRE_TASK = "managed_runner.expire_waiting_runs"
 THIRTY_DAYS = 30 * 24 * 3600
 
 NOT_CONNECTED = "desktop_not_connected"
+# ``finalize_agent_run`` classifies every FAILED row (PDASHOSS01-183):
+# ``classify(error, error_code="desktop_not_connected")``.
+RUNNER_OFFLINE = "runner_offline"
 NEVER_CAME_ONLINE = (
     "Pi Dash Agent never came online for this run. "
     "Open the desktop app and run the issue again."
@@ -94,6 +97,7 @@ def test_sweep_fails_a_wait_that_outlived_the_bound(db, broker, seeder, world):
     after = wait_for_run(db, run["id"], status=FAILED)
     assert after["error_code"] == NOT_CONNECTED
     assert after["error"] == NEVER_CAME_ONLINE
+    assert after["failure_reason"] == RUNNER_OFFLINE
     assert after["ended_at"] is not None
     # The terminal event is cloud-only (``agent_run_finalization``).
     assert run_events(db, run["id"]) == []
