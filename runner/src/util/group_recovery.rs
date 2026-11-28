@@ -382,8 +382,14 @@ mod process_tests {
 
     /// A lingering anchor (as macOS spawns it) leading a new group.
     fn spawn_anchor() -> (Child, ProcInfo) {
+        spawn_anchor_with_path(&std::env::var("PATH").unwrap_or_default())
+    }
+
+    /// [`spawn_anchor`] resolving `sleep` through `path`.
+    fn spawn_anchor_with_path(path: &str) -> (Child, ProcInfo) {
         let child = Command::new("/bin/sh")
             .args(["-c", crate::util::group_ownership::anchor_script(true)])
+            .env("PATH", path)
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -412,11 +418,12 @@ mod process_tests {
     }
 
     /// Close the anchor's stdin, as a dying daemon does, and wait until it
-    /// has become its lingering `sleep`.
+    /// lingers: its `sleep` child has joined the group.
     fn orphan(anchor: &mut Child) {
         drop(anchor.stdin.take());
+        let pid = anchor.id() as i32;
         for _ in 0..50 {
-            if procinfo::info(anchor.id() as i32).is_some_and(|p| p.name == "sleep") {
+            if procinfo::group_members(pid).is_ok_and(|m| m.iter().any(|p| p.pid != pid)) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -442,6 +449,16 @@ mod process_tests {
     fn reap(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// Reap a test anchor, killing its whole group first so its lingering
+    /// `sleep` does not outlive the test.
+    fn reap_anchor(anchor: &mut Child) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(anchor.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = anchor.wait();
     }
 
     #[tokio::test]
@@ -506,7 +523,46 @@ mod process_tests {
             std::thread::sleep(Duration::from_millis(30));
             assert!(running(&mut anchor), "{sig} ended the anchor");
         }
-        reap(&mut anchor);
+        reap_anchor(&mut anchor);
+    }
+
+    #[test]
+    fn a_lingering_anchor_does_not_rely_on_its_sleep_keeping_ignored_signals() {
+        // Some `sleep` builds reset signal handlers when they start, so a
+        // `sleep` cannot be the anchor itself. This one restores the default
+        // action of every signal, then sleeps.
+        let bin = tempfile::tempdir().unwrap();
+        let fake = bin.path().join("sleep");
+        std::fs::write(
+            &fake,
+            "#!/usr/bin/env python3\n\
+             import signal, time\n\
+             for s in signal.valid_signals():\n\
+             \x20   try: signal.signal(s, signal.SIG_DFL)\n\
+             \x20   except (OSError, ValueError): pass\n\
+             time.sleep(1e6)\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let (mut anchor, _) = spawn_anchor_with_path(&path);
+        orphan(&mut anchor);
+        let pid = nix::unistd::Pid::from_raw(anchor.id() as i32);
+        for sig in [
+            nix::sys::signal::Signal::SIGHUP,
+            nix::sys::signal::Signal::SIGTERM,
+            nix::sys::signal::Signal::SIGSEGV,
+        ] {
+            nix::sys::signal::kill(pid, sig).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(running(&mut anchor), "{sig} ended the anchor");
+        }
+        reap_anchor(&mut anchor);
     }
 
     #[tokio::test]
@@ -542,7 +598,7 @@ mod process_tests {
         assert!(running(&mut member) && running(&mut anchor));
         assert!(path.exists(), "a live owner's record is kept");
         reap(&mut member);
-        reap(&mut anchor);
+        reap_anchor(&mut anchor);
     }
 
     #[tokio::test]
@@ -561,7 +617,7 @@ mod process_tests {
         assert!(running(&mut member) && running(&mut anchor));
         assert!(!path.exists(), "an unprovable record is dropped");
         reap(&mut member);
-        reap(&mut anchor);
+        reap_anchor(&mut anchor);
     }
 
     #[test]
@@ -579,6 +635,7 @@ mod process_tests {
             judge(&record, procinfo::info_with_parent),
             Verdict::Orphaned
         );
+        // Only the anchor goes; its lingering `sleep` stays in the group.
         reap(&mut anchor);
 
         let outcome = stop_adopted(&path, &record, GRACE);
@@ -589,6 +646,10 @@ mod process_tests {
             "an unproven group must not be signalled"
         );
         reap(&mut member);
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(a.pgid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
 
     #[test]

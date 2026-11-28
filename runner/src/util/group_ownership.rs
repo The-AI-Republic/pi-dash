@@ -37,7 +37,7 @@
 //!
 //! After a crash (part 3, [`crate::util::group_recovery`]). On macOS the
 //! anchor outlives a daemon that dies without cleaning up: once its stdin
-//! closes it `exec`s a `sleep` that never ends by itself, so it keeps
+//! closes it waits on `sleep` in a loop and never ends by itself, so it keeps
 //! holding the group id until a later daemon proves the group from the
 //! anchor's recorded identity and stops it ([`GroupOwner::adopt`]). An
 //! anchor whose daemon is never started again lingers until reboot; that
@@ -123,16 +123,18 @@ struct Anchor {
 }
 
 /// The anchor's shell script. With `linger` (macOS, where crashed groups
-/// are recovered) the anchor survives the daemon: when its stdin closes it
-/// becomes a `sleep` that keeps ignoring every signal that would otherwise
-/// end it (ignored dispositions survive `exec`), so only SIGKILL ends it
-/// and the group id stays reserved for the next daemon's recovery. An
-/// orphaned anchor is reaped at once by its new parent, so any other way
-/// out would free its pid between recovery's proof and its signal.
+/// are recovered) the anchor survives the daemon: when its stdin closes the
+/// shell itself stays, ignoring every signal that would otherwise end it,
+/// and waits on `sleep` in a loop, so only SIGKILL ends it and the group id
+/// stays reserved for the next daemon's recovery. An orphaned anchor is
+/// reaped at once by its new parent, so any other way out would free its
+/// pid between recovery's proof and its signal. The shell is not replaced
+/// by `exec sleep`: some `sleep` builds reset signal handlers at start, and
+/// a `sleep` that dies only ends one round of the loop.
 pub(crate) fn anchor_script(linger: bool) -> &'static str {
     if linger {
         "trap '' HUP INT QUIT TRAP ABRT BUS FPE ILL SEGV SYS PIPE ALRM TERM XCPU XFSZ VTALRM PROF USR1 USR2; \
-         read _; exec sleep 2147483647"
+         read _; while :; do sleep 2147483647; done"
     } else {
         "trap '' TERM INT HUP; read _"
     }
