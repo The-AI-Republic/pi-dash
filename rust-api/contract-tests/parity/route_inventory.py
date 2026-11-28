@@ -313,6 +313,8 @@ RUST_ONLY_JUSTIFICATIONS = {
     "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
     "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
     "/api/v1/workspaces/{slug}/schedulers/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
+    "/api/runners/{runner_id}/reconfigure/": "new-system-only runner edit (#3399, e365e3c62): sends reconfigure_runner to the daemon through the remote-create command pipeline; the old system has no runner edit, so Django has no counterpart",
+    "/api/runners/{runner_id}/reconfigure/{request_id}/": "status poll for the new-system-only runner reconfigure (#3399, e365e3c62); Django has no counterpart",
     "/api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{binding_id}/runs/": "ported from OSS main 474123e5 (PIDASHCONV-1059) ahead of the rust-dev Django sync; the route exists on main, rust-dev's apps/api is frozen at 01a93e17 (PIDASHCONV-1055) — delete this line when main is merged into rust-dev",
 }
 

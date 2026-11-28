@@ -243,6 +243,7 @@ WIRE_GAPS = (
     ("pi_dash.bgtasks.email_notification_task.", "W-mail"),
     ("pi_dash.bgtasks.notification_task.", "W-mail"),
     ("pi_dash.bgtasks.exporter_expired_task.", "W-export"),
+    ("pi_dash.bgtasks.github_sync_task.", "W-github-sync"),
     ("pi_dash.bgtasks.issue_activities_task.", "W-activity"),
     ("pi_dash.bgtasks.issue_automation_task.", "W-automation"),
     ("pi_dash.bgtasks.loop.", "W-loop"),
