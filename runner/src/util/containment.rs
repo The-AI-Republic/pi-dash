@@ -18,9 +18,10 @@
 //!   while a fresh snapshot proves the group is still the run's (see
 //!   [`crate::util::group_ownership`]): a pgid whose members all exited
 //!   can be handed to an unrelated group, and an unproven group is left
-//!   running rather than risk killing a stranger. Members are learned by
-//!   a periodic observer while the run is live, so proof outlives the
-//!   leader. A child that calls `setsid` escapes the group — a documented
+//!   running rather than risk killing a stranger. An anchor process the
+//!   daemon keeps unreaped in the group reserves its id until cleanup
+//!   ends, so proof outlives the leader; when no anchor can be spawned,
+//!   members are learned by a periodic observer instead. A child that calls `setsid` escapes the group — a documented
 //!   limit of this backend. Platforms without process inspection (not
 //!   Linux or macOS) can never prove ownership, so nothing is signalled
 //!   there. Cleanup cannot sweep after a crash (a dead PGID can be
@@ -147,7 +148,8 @@ pub struct RunGroup {
     /// unknown group is reported as unresolved rather than as clean.
     #[cfg(unix)]
     unclaimed_pgid: Option<i32>,
-    /// Background task re-observing `owner` while the run is live.
+    /// Background task re-observing an unanchored `owner` while the run
+    /// is live.
     #[cfg(unix)]
     observer: Option<tokio::task::JoinHandle<()>>,
     /// TERM → KILL grace ([`CLEANUP_GRACE`]; shorter in tests).
@@ -219,15 +221,18 @@ impl RunGroup {
         }
     }
 
-    /// Install the group claim and start observing it.
+    /// Install the group claim. An anchored claim needs no observer; an
+    /// unanchored one is observed so members are remembered.
     #[cfg(unix)]
     fn set_owner(&mut self, owner: GroupOwner) {
+        let anchored = owner.is_anchored();
         let owner = Arc::new(Mutex::new(owner));
         if let Some(old) = self.observer.take() {
             old.abort();
         }
         self.observer = tokio::runtime::Handle::try_current()
             .ok()
+            .filter(|_| !anchored)
             .map(|h| h.spawn(observe_loop(owner.clone())));
         self.owner = Some(owner);
     }
@@ -327,10 +332,14 @@ fn unclaimed_group_outcome(run_id: Uuid, pgid: Option<i32>) -> CleanupOutcome {
     let Some(pgid) = pgid else {
         return CleanupOutcome::Clean;
     };
-    let live: Vec<_> = crate::util::procinfo::group_members(pgid)
-        .into_iter()
-        .filter(|p| !p.zombie)
-        .collect();
+    let Ok(members) = crate::util::procinfo::group_members(pgid) else {
+        tracing::warn!(
+            run_id = %run_id, pgid,
+            "unclaimed run process group could not be inspected; left running"
+        );
+        return CleanupOutcome::Unresolved;
+    };
+    let live: Vec<_> = members.into_iter().filter(|p| !p.zombie).collect();
     if live.is_empty() {
         return CleanupOutcome::Clean;
     }
@@ -426,20 +435,25 @@ fn lock_owner(owner: &Mutex<GroupOwner>) -> std::sync::MutexGuard<'_, GroupOwner
     owner.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Re-observe a live run's group every [`OBSERVE_INTERVAL`] so members are
-/// remembered while it is still provably the run's. Stops once the group
-/// is empty or can no longer be proven: neither ever becomes ours again.
+/// Re-observe an unanchored live run's group at once and then every
+/// [`OBSERVE_INTERVAL`], so members are remembered while it is still
+/// provably the run's. Stops once the group is empty or can no longer be
+/// proven: neither ever becomes ours again. A failed inspection is retried.
 #[cfg(unix)]
 async fn observe_loop(owner: Arc<Mutex<GroupOwner>>) {
     loop {
-        tokio::time::sleep(OBSERVE_INTERVAL).await;
         let o = owner.clone();
         match tokio::task::spawn_blocking(move || lock_owner(&o).observe()).await {
-            Ok(Proof::Ours(_)) => {}
+            Ok(Proof::Ours(_) | Proof::Unknown) => {}
             _ => return,
         }
+        tokio::time::sleep(OBSERVE_INTERVAL).await;
     }
 }
+
+/// Attempts at a first cleanup snapshot when the group cannot be inspected.
+#[cfg(unix)]
+const INSPECT_ATTEMPTS: usize = 3;
 
 /// TERM → grace → KILL for a claimed process group. Every signal is sent
 /// by [`GroupOwner::signal`], which re-proves the group from a fresh
@@ -463,29 +477,57 @@ fn stop_owned_group(
             "run process group cannot be proven to belong to this run; left running"
         );
     };
-    let first = {
+    let uninspectable = |pgid: i32| {
+        tracing::warn!(
+            run_id = %run_id, pgid,
+            "run process group could not be inspected; left running"
+        );
+    };
+    let mut first = None;
+    for attempt in 0..INSPECT_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let mut o = lock_owner(owner);
         let pgid = o.pgid();
         match o.observe() {
-            Proof::Ours(live) => names(live),
+            Proof::Ours(live) => {
+                first = Some(names(live));
+                break;
+            }
             Proof::Empty => return (Vec::new(), CleanupOutcome::Clean),
             Proof::Unproven(live) => {
                 unproven(&live, pgid);
                 return (Vec::new(), CleanupOutcome::Unresolved);
             }
+            Proof::Unknown => {}
         }
+    }
+    let Some(first) = first else {
+        uninspectable(lock_owner(owner).pgid());
+        return (Vec::new(), CleanupOutcome::Unresolved);
     };
+    // A relist that cannot inspect the group repeats the last proven list,
+    // so the grace is not cut short and the KILL step is still attempted
+    // (which re-proves the group itself before signalling).
+    let mut last_known = first.clone();
     let stopped = stop_members(
         first,
         |_| {
             let mut o = lock_owner(owner);
             let pgid = o.pgid();
-            if let Proof::Unproven(live) = o.signal(GroupSignal::Term) {
-                unproven(&live, pgid);
+            match o.signal(GroupSignal::Term) {
+                Proof::Unproven(live) => unproven(&live, pgid),
+                Proof::Unknown => uninspectable(pgid),
+                Proof::Ours(_) | Proof::Empty => {}
             }
         },
         || match lock_owner(owner).observe() {
-            Proof::Ours(live) => names(live),
+            Proof::Ours(live) => {
+                last_known = names(live);
+                last_known.clone()
+            }
+            Proof::Unknown => last_known.clone(),
             // Gone, or no longer provable (reported when signalling):
             // nothing this run may still touch.
             Proof::Empty | Proof::Unproven(_) => Vec::new(),
@@ -493,17 +535,20 @@ fn stop_owned_group(
         |_| {
             let mut o = lock_owner(owner);
             let pgid = o.pgid();
-            if let Proof::Unproven(live) = o.signal(GroupSignal::Kill) {
-                unproven(&live, pgid);
+            match o.signal(GroupSignal::Kill) {
+                Proof::Unproven(live) => unproven(&live, pgid),
+                Proof::Unknown => uninspectable(pgid),
+                Proof::Ours(_) | Proof::Empty => {}
             }
         },
         grace,
     );
     // Clean only when a fresh snapshot shows the group empty: survivors of
-    // SIGKILL and an unprovable group both leave the run unresolved.
+    // SIGKILL, an unprovable group and a group that cannot be inspected
+    // all leave the run unresolved.
     let outcome = match lock_owner(owner).observe() {
         Proof::Empty => CleanupOutcome::Clean,
-        Proof::Ours(_) | Proof::Unproven(_) => CleanupOutcome::Unresolved,
+        Proof::Ours(_) | Proof::Unproven(_) | Proof::Unknown => CleanupOutcome::Unresolved,
     };
     (stopped, outcome)
 }
@@ -978,9 +1023,10 @@ mod tests {
     async fn process_group_cleanup_stops_members_that_outlive_the_leader() {
         use std::io::BufRead;
         use std::os::unix::process::CommandExt;
-        // The leader starts a background child in its group, then dies and
-        // is reaped; the observer must have learned the child for cleanup
-        // to prove (and stop) the group without its leader.
+        // Fallback without an anchor: the leader starts a background child
+        // in its group, then dies and is reaped; the observer must have
+        // learned the child for cleanup to prove (and stop) the group
+        // without its leader.
         let mut leader = std::process::Command::new("sh")
             .args(["-c", "sleep 300 & echo $!; wait"])
             .process_group(0)
@@ -993,8 +1039,10 @@ mod tests {
             .unwrap();
         let orphan: i32 = line.trim().parse().unwrap();
         let mut group = process_group_run();
-        group.move_pid(Some(leader.id()));
+        let info = crate::util::procinfo::info(leader.id() as i32).unwrap();
+        group.set_owner(GroupOwner::claim(&info).unwrap());
         let owner = group.owner.clone().expect("leader claimed");
+        assert!(!lock_owner(&owner).is_anchored());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !lock_owner(&owner).knows_pid(orphan) {
             assert!(
@@ -1017,6 +1065,48 @@ mod tests {
             !alive(orphan),
             "member outliving the leader was left running"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_group_cleanup_stops_a_child_whose_leader_was_reaped_unobserved() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::process::CommandExt;
+        // Review item (#3497): the leader starts its only surviving child
+        // and is reaped before any observation could learn that child.
+        // The group must still be provably the run's at cleanup.
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "read _; sleep 300 & echo $!"])
+            .process_group(0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut group = process_group_run();
+        group.move_pid(Some(leader.id()));
+        assert!(group.owner.is_some(), "leader claimed");
+        leader.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let orphan: i32 = line.trim().parse().unwrap();
+        leader.wait().unwrap();
+        assert!(alive(orphan));
+        group.cleanup().await;
+        group.mark_cleaned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(orphan) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let survived = alive(orphan);
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(orphan),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert!(!survived, "child of a reaped leader was left running");
     }
 
     #[cfg(unix)]

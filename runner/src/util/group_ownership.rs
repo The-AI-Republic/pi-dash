@@ -21,6 +21,23 @@
 //! leader's exit; [`GroupOwner::observe`] is called periodically while the
 //! run is live for exactly that reason.
 //!
+//! Anchor (review of #3497). Right after the claim the daemon spawns a
+//! tiny placeholder process of its own into the group ([`Anchor`]) and
+//! does not reap it until the claim is dropped, after cleanup. An unreaped
+//! child keeps its group id reserved, so from the claim to the end of
+//! cleanup the id cannot be handed to anyone else, even when the agent's
+//! leader is reaped before any of its children was observed. While the
+//! anchor stands, every live member of the group is the run's. The anchor
+//! ignores SIGTERM (it must outlast the grace period) and dies with the
+//! group's SIGKILL; it is never counted or reported as a run process.
+//! When it cannot be spawned, proof falls back to remembered members.
+//!
+//! Scans are not atomic (Linux reads one `/proc/<pid>/stat` at a time), so
+//! a proven scan is accepted only if a process that anchored it is re-read
+//! *after* the scan with the same identity and group: that process was in
+//! the group for the whole scan, so the group could not have been recycled
+//! in between. An inspection failure is [`Proof::Unknown`], never "empty".
+//!
 //! Serialisation (review item 1 on #2952). Proof is never cached: every
 //! signal takes a fresh kernel snapshot and sends `killpg` straight after
 //! it, under the owner's lock, so no reaper-updated flag can claim the
@@ -62,6 +79,9 @@ pub enum Proof {
     /// Live members, none of them remembered: the group cannot be proven
     /// to be the run's and must not be signalled.
     Unproven(Vec<ProcInfo>),
+    /// The group could not be inspected at all: neither empty nor proven.
+    /// Nothing is signalled and nothing is learned.
+    Unknown,
 }
 
 /// Signals [`GroupOwner::signal`] sends.
@@ -76,6 +96,65 @@ pub enum GroupSignal {
 pub struct GroupOwner {
     pgid: i32,
     known: HashSet<ProcId>,
+    anchor: Option<Anchor>,
+}
+
+/// A placeholder child of the daemon inside the run's group, kept unreaped
+/// so the group id stays reserved until the claim is dropped (see the
+/// module doc). Dropping it SIGKILLs and reaps it: it is the daemon's own
+/// unreaped child, so its pid cannot belong to anyone else.
+#[derive(Debug)]
+struct Anchor {
+    id: ProcId,
+    child: Option<std::process::Child>,
+}
+
+impl Anchor {
+    /// Spawn the placeholder into group `pgid`. It ignores SIGTERM, SIGINT
+    /// and SIGHUP and exits when the daemon closes its stdin (including when
+    /// the daemon dies), so it never outlives the daemon.
+    #[cfg(unix)]
+    fn spawn(pgid: i32) -> Option<Self> {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM INT HUP; read _"])
+            .process_group(pgid)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let joined = i32::try_from(child.id())
+            .ok()
+            .and_then(procinfo::info)
+            .filter(|p| p.pgid == pgid && !p.zombie);
+        match joined {
+            Some(p) => Some(Self {
+                id: ProcId::from(&p),
+                child: Some(child),
+            }),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn spawn(_pgid: i32) -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for Anchor {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 impl GroupOwner {
@@ -90,12 +169,50 @@ impl GroupOwner {
         Some(Self {
             pgid: leader.pgid,
             known: HashSet::from([ProcId::from(leader)]),
+            anchor: None,
         })
     }
 
-    /// Read the leader from the kernel and [`claim`](Self::claim) it.
+    /// Read the leader from the kernel, [`claim`](Self::claim) it and
+    /// anchor the group. The anchor is kept only if the leader still has
+    /// the claimed identity and group after the anchor joined: while pid
+    /// `pgid` is in use no other group can take that id, so the anchor
+    /// joined the run's group. Otherwise the claim stays unanchored.
     pub fn claim_pid(pid: i32) -> Option<Self> {
-        Self::claim(&procinfo::info(pid)?)
+        let leader = procinfo::info(pid)?;
+        let mut owner = Self::claim(&leader)?;
+        let id = ProcId::from(&leader);
+        owner.anchor = Anchor::spawn(owner.pgid).filter(|_| {
+            procinfo::info(pid).is_some_and(|p| p.pgid == leader.pgid && ProcId::from(&p) == id)
+        });
+        Some(owner)
+    }
+
+    /// Whether an [`Anchor`] keeps the group id reserved.
+    pub fn is_anchored(&self) -> bool {
+        self.anchor.is_some()
+    }
+
+    /// Pid of the anchor, if any (tests only).
+    #[cfg(test)]
+    pub fn anchor_pid(&self) -> Option<i32> {
+        self.anchor.as_ref().map(|a| a.id.pid)
+    }
+
+    /// Treat `id` as the group's anchor without spawning one (tests only).
+    #[cfg(test)]
+    fn with_anchor_id(mut self, id: ProcId) -> Self {
+        self.anchor = Some(Anchor { id, child: None });
+        self
+    }
+
+    fn anchor_id(&self) -> Option<ProcId> {
+        self.anchor.as_ref().map(|a| a.id)
+    }
+
+    /// Whether `id` was known to be the run's before the current snapshot.
+    fn remembers(&self, id: &ProcId) -> bool {
+        self.known.contains(id) || self.anchor_id() == Some(*id)
     }
 
     pub fn pgid(&self) -> i32 {
@@ -114,10 +231,13 @@ impl GroupOwner {
             .into_iter()
             .filter(|p| p.pgid == self.pgid)
             .collect();
-        let anchored = members
+        let anchored = members.iter().any(|p| self.remembers(&ProcId::from(p)));
+        let anchor = self.anchor_id();
+        let live: Vec<ProcInfo> = members
             .iter()
-            .any(|p| self.known.contains(&ProcId::from(p)));
-        let live: Vec<ProcInfo> = members.iter().filter(|p| !p.zombie).cloned().collect();
+            .filter(|p| !p.zombie && Some(ProcId::from(*p)) != anchor)
+            .cloned()
+            .collect();
         if live.is_empty() {
             Proof::Empty
         } else if anchored {
@@ -139,8 +259,39 @@ impl GroupOwner {
 
     /// Take a fresh kernel snapshot and [`accept`](Self::accept) it.
     pub fn observe(&mut self) -> Proof {
-        let snapshot = procinfo::group_members(self.pgid);
-        self.accept(snapshot)
+        self.observe_with(procinfo::group_members, procinfo::info)
+    }
+
+    /// [`observe`](Self::observe) with the kernel reads injected: `scan`
+    /// lists the group, `reread` inspects one process after the scan.
+    pub fn observe_with(
+        &mut self,
+        scan: impl FnOnce(i32) -> std::io::Result<Vec<ProcInfo>>,
+        reread: impl Fn(i32) -> Option<ProcInfo>,
+    ) -> Proof {
+        let Ok(snapshot) = scan(self.pgid) else {
+            return Proof::Unknown;
+        };
+        let anchors: Vec<ProcId> = snapshot
+            .iter()
+            .filter(|p| p.pgid == self.pgid)
+            .map(ProcId::from)
+            .filter(|id| self.remembers(id))
+            .collect();
+        match self.judge(snapshot) {
+            Proof::Ours(live) => {
+                let pgid = self.pgid;
+                let confirmed = anchors.iter().any(|a| {
+                    reread(a.pid).is_some_and(|r| r.pgid == pgid && ProcId::from(&r) == *a)
+                });
+                if !confirmed {
+                    return Proof::Unproven(live);
+                }
+                self.known.extend(live.iter().map(ProcId::from));
+                Proof::Ours(live)
+            }
+            other => other,
+        }
     }
 
     /// Signal the group only if a fresh snapshot proves it is still ours.
@@ -267,6 +418,90 @@ mod tests {
         );
         assert_eq!(owner.judge(vec![zombie(10, 10, 500)]), Proof::Empty);
         assert_eq!(owner.judge(Vec::new()), Proof::Empty);
+    }
+
+    #[test]
+    fn a_group_recycled_during_the_scan_is_not_proven() {
+        // Review item (#3497): the Linux scan reads one /proc entry at a
+        // time. The remembered leader was read early; then the group
+        // emptied and its id went to a stranger whose member was read
+        // later. Re-reading the anchor after the scan exposes it.
+        let mut owner = GroupOwner::claim(&p(10, 10, 500)).unwrap();
+        let proof = owner.observe_with(|_| Ok(vec![p(10, 10, 500), p(12, 10, 9_100)]), |_pid| None);
+        assert!(matches!(proof, Proof::Unproven(_)), "{proof:?}");
+        assert!(!owner.knows_pid(12), "a stranger was learned");
+        // A re-read that still finds the anchor proves the scan.
+        let proof = owner.observe_with(
+            |_| Ok(vec![p(10, 10, 500), p(11, 10, 600)]),
+            |pid| (pid == 10).then(|| p(10, 10, 500)),
+        );
+        assert!(matches!(proof, Proof::Ours(_)), "{proof:?}");
+        assert!(owner.knows_pid(11));
+    }
+
+    #[test]
+    fn a_re_read_with_another_start_or_group_does_not_revalidate() {
+        let mut owner = GroupOwner::claim(&p(10, 10, 500)).unwrap();
+        let proof = owner.observe_with(|_| Ok(vec![p(10, 10, 500)]), |_| Some(p(10, 10, 501)));
+        assert!(matches!(proof, Proof::Unproven(_)), "{proof:?}");
+        let proof = owner.observe_with(|_| Ok(vec![p(10, 10, 500)]), |_| Some(p(10, 77, 500)));
+        assert!(matches!(proof, Proof::Unproven(_)), "{proof:?}");
+    }
+
+    #[test]
+    fn an_anchor_proves_the_group_after_the_leader_is_gone() {
+        // Review item (#3497): the leader was reaped before its child was
+        // ever observed; the anchor still holds the group id.
+        let anchor = ProcId {
+            pid: 20,
+            start: 700,
+        };
+        let mut owner = GroupOwner::claim(&p(10, 10, 500))
+            .unwrap()
+            .with_anchor_id(anchor);
+        let proof = owner.observe_with(
+            |_| Ok(vec![p(20, 10, 700), p(11, 10, 600)]),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        // The anchor proves the group but is never one of its processes.
+        assert_eq!(proof, Proof::Ours(vec![p(11, 10, 600)]));
+        assert_eq!(owner.judge(vec![p(20, 10, 700)]), Proof::Empty);
+        assert_eq!(
+            owner.judge(vec![zombie(20, 10, 700), p(11, 10, 600)]),
+            Proof::Ours(vec![p(11, 10, 600)])
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_claimed_group_gets_a_real_anchor_that_is_reaped_on_drop() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id() as i32;
+        let owner = GroupOwner::claim_pid(pid).expect("leader claimed");
+        let anchor = owner.anchor_pid().expect("anchored");
+        let a = procinfo::info(anchor).expect("anchor alive");
+        assert_eq!(a.pgid, pid);
+        drop(owner);
+        let gone = procinfo::info(anchor).is_none();
+        let _ = leader.kill();
+        let _ = leader.wait();
+        assert!(gone, "anchor must be killed and reaped with the claim");
+    }
+
+    #[test]
+    fn a_failed_scan_is_unknown_and_teaches_nothing() {
+        // Review item (#3497): an inspection failure is not an empty group.
+        let mut owner = GroupOwner::claim(&p(10, 10, 500)).unwrap();
+        let proof = owner.observe_with(
+            |_| Err(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
+            |_| Some(p(10, 10, 500)),
+        );
+        assert_eq!(proof, Proof::Unknown);
     }
 
     #[test]
