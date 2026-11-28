@@ -1,0 +1,9 @@
+{
+  "name": "pi-dash-github-scripts",
+  "private": true,
+  "description": "Dependencies for the CI helper scripts in .github/scripts (installed with npm ci --prefix .github/scripts).",
+  "type": "module",
+  "dependencies": {
+    "yaml": "2.8.4"
+  }
+}
