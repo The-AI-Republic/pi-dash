@@ -5161,15 +5161,19 @@ impl AssignWorker {
                 break;
             }
             let run_id = terminal_run_id(&msg);
+            // Before the send, so a failed send finds the exact record and
+            // does not journal a copy (see `deliver`). A delivered report's
+            // record goes with the slot release.
+            let payload = run_id.and_then(|r| self.persistable_terminal(r, &msg));
+            let recorded = run_id.filter(|r| self.ensure_outbox_record(*r, payload.as_deref()));
             if !self.deliver(msg).await {
                 self.state.note_terminal_undelivered();
-                undelivered = undelivered.or(run_id);
+                // Only a run with a retryable outbox record stays pending.
+                undelivered = undelivered.or(recorded);
             }
         }
         if self.state.release_clears_current_run() {
-            // Only a managed run has an outbox record the retry delivers.
-            let kept = undelivered
-                .filter(|_| self.coordinator.is_some() && !self.state.terminal_drained());
+            let kept = undelivered.filter(|_| !self.state.terminal_drained());
             match kept {
                 // Still reported in flight until the outbox retry delivers
                 // the report: a run the runner stops reporting would be
@@ -6334,6 +6338,30 @@ impl AssignWorker {
                 tracing::warn!(%run_id, "held terminal report: no queue record to persist it in")
             }
             Err(e) => tracing::warn!(%run_id, "failed to persist held terminal report: {e}"),
+        }
+    }
+
+    /// Whether the outbox holds a terminal record for `run_id` the retry can
+    /// deliver (review of #3501 at 591a610). A held result whose write
+    /// failed is written now from `payload`; when that fails too, `false`:
+    /// nothing would ever deliver the result, so the run must not be kept
+    /// reported in flight on its account.
+    fn ensure_outbox_record(&self, run_id: uuid::Uuid, payload: Option<&[u8]>) -> bool {
+        let Some(coord) = self.coordinator.as_ref() else {
+            return false;
+        };
+        if coord.terminal_pending().iter().any(|e| e.run_id == run_id) {
+            return true;
+        }
+        let Some(payload) = payload else {
+            return false;
+        };
+        match coord.persist_terminal_if_absent(run_id, payload, &format!("held-{run_id}")) {
+            Ok(_) => coord.terminal_pending().iter().any(|e| e.run_id == run_id),
+            Err(e) => {
+                tracing::warn!(%run_id, "undelivered terminal report could not be recorded: {e}");
+                false
+            }
         }
     }
 
@@ -9305,6 +9333,61 @@ mod tests {
         ));
         assert!(inst.state.rx_in_flight.borrow().is_none());
         assert!(coord.terminal_pending().is_empty());
+    }
+
+    /// Review of #3501 at 591a610 (MUST 4): a run is kept reported in
+    /// flight only while a retryable outbox record exists. When the held
+    /// result could not be written (here: the queue has no row for the
+    /// run, as after a failed write) and its send fails, nothing would ever
+    /// deliver it, so the run must not stay in flight for good.
+    #[tokio::test]
+    async fn an_undelivered_run_without_an_outbox_record_is_not_kept_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("norecord", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.state = inst.state.clone();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        worker.coordinator = Some(coord.clone());
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        drop(rx);
+        worker.release_terminal().await;
+
+        assert!(coord.terminal_pending().is_empty());
+        assert_eq!(inst.state.report_pending(), None);
+        assert!(
+            inst.state.rx_in_flight.borrow().is_none(),
+            "a run with no retryable record stays reported in flight forever"
+        );
     }
 
     /// The in-process outbox retry delivers a released run's kept record,
