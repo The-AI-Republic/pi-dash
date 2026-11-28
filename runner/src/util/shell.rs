@@ -75,6 +75,11 @@ pub struct RunEnv {
     /// cgroup backend needs no command-line help (the supervisor moves
     /// the spawned pid after spawn).
     pub backend: BackendKind,
+    /// The run's anchored process group (process-group backend): agents
+    /// join it rather than leading groups of their own, so the run's claim
+    /// never depends on reading a pid after spawn (PDASHOSS01-417). `None`
+    /// on other backends, or when no anchored group could be created.
+    pub process_group: Option<i32>,
     /// Directory holding only a `pidash` symlink to the daemon's own binary
     /// (`<data_dir>/runtime/bin`, NEWPIDASH-363). Prepended to the agent's
     /// `PATH` after rc files run so the agent always invokes the daemon's
@@ -145,10 +150,11 @@ fn apply_run_env(cmd: &mut Command) {
         }
         #[cfg(unix)]
         if env.backend == BackendKind::ProcessGroup {
-            // Own process group so cleanup can signal the whole group.
-            // A child that `setsid`s escapes it (documented limit of
-            // the process-group backend).
-            cmd.process_group(0);
+            // The run's anchored group (or a group of its own when there
+            // is none) so cleanup can signal the whole group. A child that
+            // `setsid`s escapes it (documented limit of the process-group
+            // backend).
+            cmd.process_group(env.process_group.unwrap_or(0));
         }
         if let Some(dir) = &env.runner_bin_dir {
             cmd.env(RUNNER_BIN_ENV, dir.as_os_str());
@@ -618,6 +624,7 @@ mod tests {
                 RunEnv {
                     run_id,
                     backend: BackendKind::None,
+                    process_group: None,
                     runner_bin_dir: None,
                     config_dir: None,
                     data_dir: None,
@@ -635,6 +642,44 @@ mod tests {
         );
     }
 
+    /// PDASHOSS01-417: on the process-group backend the agent joins the
+    /// run's anchored group instead of leading one of its own, so the
+    /// run's claim never depends on reading the agent's pid after spawn.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn process_group_runs_spawn_agents_into_the_runs_group() {
+        let owner = crate::util::group_ownership::GroupOwner::new_anchored().expect("anchored");
+        let pgid = owner.pgid();
+        let mut child = RUN_ENV
+            .scope(
+                RunEnv {
+                    run_id: uuid::Uuid::new_v4(),
+                    backend: BackendKind::ProcessGroup,
+                    process_group: Some(pgid),
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: None,
+                    project_identifier: None,
+                    agent_name: None,
+                },
+                async { login_shell_command("sleep", &["30"], None) },
+            )
+            .await
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let joined = child
+            .id()
+            .and_then(|pid| crate::util::procinfo::info(pid as i32))
+            .map(|p| p.pgid);
+        let _ = child.kill().await;
+        assert_eq!(joined, Some(pgid), "agent did not join the run's group");
+    }
+
     /// NEWPIDASH-320 §6.3: issue runs export the issue, project and agent
     /// name; scheduler runs omit the issue; chat (no scope) exports none.
     #[tokio::test]
@@ -645,6 +690,7 @@ mod tests {
                 RunEnv {
                     run_id,
                     backend: BackendKind::None,
+                    process_group: None,
                     runner_bin_dir: None,
                     config_dir: None,
                     data_dir: None,
@@ -674,6 +720,7 @@ mod tests {
                 RunEnv {
                     run_id,
                     backend: BackendKind::None,
+                    process_group: None,
                     runner_bin_dir: None,
                     config_dir: None,
                     data_dir: None,
@@ -1063,6 +1110,7 @@ mod tests {
         RunEnv {
             run_id: uuid::Uuid::new_v4(),
             backend: BackendKind::None,
+            process_group: None,
             runner_bin_dir: Some(bin_dir.to_path_buf()),
             config_dir: Some(PathBuf::from("/daemon/pidash")),
             data_dir: Some(PathBuf::from("/daemon/pidash/data")),
