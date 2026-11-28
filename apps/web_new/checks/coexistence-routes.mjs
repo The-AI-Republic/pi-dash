@@ -284,7 +284,10 @@ export function buildCeAssetLines(publicPaths = []) {
     "\t\t@web_new_static_down {",
     `\t\t\tpath ${paths}`,
     `\t\t\tpath_regexp ${STATIC_FILE_REGEXP}`,
-    "\t\t\texpression `{err.status_code} in [502, 503]`",
+    // Only when web_new is the upstream that failed: /static/* reaches
+    // api:8000 above this block, and its 502 must not become the old app's
+    // index.html. The proxy sets this placeholder before it dials.
+    `\t\t\texpression \`{err.status_code} in [502, 503] && {http.reverse_proxy.upstream.hostport} == '${WEB_NEW_UPSTREAM}'\``,
     "\t\t}",
     `\t\treverse_proxy @web_new_static_down ${WEB_UPSTREAM}`,
     "\t}",

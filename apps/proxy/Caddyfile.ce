@@ -283,7 +283,7 @@
 		@web_new_static_down {
 			path /assets/* /apple-touch-icon.svg /empty-state/* /icon-contrast.svg /icon.svg /illustrations/* /logos/* /manifest.desktop.webmanifest /manifest.webmanifest /social-card.svg /static/* /world-map.svg
 			path_regexp \.[^/]+$
-			expression `{err.status_code} in [502, 503]`
+			expression `{err.status_code} in [502, 503] && {http.reverse_proxy.upstream.hostport} == 'web_new:3000'`
 		}
 		reverse_proxy @web_new_static_down web:3000
 	}

@@ -152,7 +152,7 @@ describe("buildCeLines", () => {
       "\t\t@web_new_static_down {",
       "\t\t\tpath /assets/*",
       "\t\t\tpath_regexp \\.[^/]+$",
-      "\t\t\texpression `{err.status_code} in [502, 503]`",
+      "\t\t\texpression `{err.status_code} in [502, 503] && {http.reverse_proxy.upstream.hostport} == 'web_new:3000'`",
       "\t\t}",
       "\t\treverse_proxy @web_new_static_down web:3000",
       "\t}",
@@ -178,7 +178,21 @@ describe("buildCeLines", () => {
     assert.ok(errors.includes("\t\treverse_proxy @web_new_static_down web:3000"), lines.join("\n"));
     // Scoped to the proxy's own dial/no-upstream errors on these paths; the
     // `handle_errors 502 503` shorthand would drop the inner matcher.
-    assert.ok(errors.includes("\t\t\texpression `{err.status_code} in [502, 503]`"), lines.join("\n"));
+    assert.ok(
+      errors.includes(
+        "\t\t\texpression `{err.status_code} in [502, 503] && {http.reverse_proxy.upstream.hostport} == 'web_new:3000'`"
+      ),
+      lines.join("\n")
+    );
+  });
+
+  it("retries the old app only when web_new is the upstream that failed", () => {
+    // /static/* goes to api:8000 above this block. Its 502 while the API is
+    // down must stay a 502, not become the old app's index.html.
+    const lines = buildCeAssetLines(["/static/*"]);
+    const matcher = lines.slice(lines.indexOf("\t\t@web_new_static_down {"));
+    const expression = matcher.find((line) => line.trim().startsWith("expression "));
+    assert.ok(expression?.includes("{http.reverse_proxy.upstream.hostport} == 'web_new:3000'"), lines.join("\n"));
   });
 
   it("only routes file requests, so a workspace named after a public directory keeps its pages", () => {

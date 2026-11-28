@@ -375,109 +375,156 @@ function download() {
     echo "In case of 'Upgrade', please check the 'pi_dash.env 'file for any new variables and update them accordingly"
     echo ""
 }
-# Connection URLs the services fall back to when pi_dash.env leaves
-# DATABASE_URL / AMQP_URL blank (the defaults in docker-compose.yml).
-DEFAULT_DATABASE_URL="postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash"
-DEFAULT_AMQP_URL="amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash"
+# Credential probe, run in a one-off `api` container by checkBundledCredentials
+# (Python, so its source is kept at column 0).
+IFS= read -r -d '' CREDENTIAL_PROBE <<'PROBE' || true
+# Runs inside a one-off `api` container: same image, environment and
+# network as the app, so URLs are parsed by the app's own libraries
+# (dj-database-url, Kombu) and logins take the app's network path.
+# Prints one "credential-check<TAB>STATUS<TAB>SERVICE<TAB>DETAIL" line per
+# bundled service; STATUS is OK, SKIP, MISMATCH or NOTREADY.
+import os
+import signal
+import sys
+import time
 
-# Percent-decoding as Python's urllib.parse.unquote does it, which is what
-# Kombu and dj-database-url use: a literal "+" and backslashes stay as they are.
-function urlDecode() {
-    local s=$1 out="" hex
-    while [[ $s == *%* ]]; do
-        out+=${s%%[%]*}
-        s=${s#*[%]}
-        hex=${s:0:2}
-        if [[ $hex =~ ^[0-9A-Fa-f]{2}$ ]]; then
-            printf -v hex '%b' "\\x$hex"
-            out+=$hex
-            s=${s:2}
-        else
-            out+=%
-        fi
-    done
-    printf '%s' "$out$s"
-}
+SERVICES = os.environ.get("CREDENTIAL_CHECK_SERVICES", "").split()
+SECONDS = max(1, int(os.environ.get("CREDENTIAL_CHECK_SECONDS") or "120"))
+INTERVAL = float(os.environ.get("CREDENTIAL_CHECK_INTERVAL") or "2")
+TIMEOUT = 5
 
-# Decodes the body of a JSON string (Compose writes & < > as \u00XX).
-function jsonUnescape() {
-    local s=$1 out="" c code
-    while [[ $s == *\\* ]]; do
-        out+=${s%%\\*}
-        s=${s#*\\}
-        c=${s:0:1}
-        s=${s:1}
-        case $c in
-            n) out+=$'\n' ;;
-            t) out+=$'\t' ;;
-            r) out+=$'\r' ;;
-            b) out+=$'\b' ;;
-            f) out+=$'\f' ;;
-            u)
-                code=${s:0:4}
-                s=${s:4}
-                if [[ $code =~ ^00[0-7][0-9A-Fa-f]$ ]]; then
-                    printf -v c '%b' "\\x${code:2:2}"
-                else
-                    printf -v c '%b' "\\u$code"
-                fi
-                out+=$c
-                ;;
-            *) out+=$c ;;
-        esac
-    done
-    printf '%s' "$out$s"
-}
 
-# Prints the value of environment variable $2 for service $1 as Compose
-# resolves it (exported variables, then the env file, then the compose
-# defaults), which is what the app receives. Fails when Compose cannot print
-# its configuration as JSON or the service does not set the variable.
-function composeServiceEnv() {
-    local service=$1 key=$2 line
-    local json
-    json=$($COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH config --format json "$service" 2>/dev/null) || return 1
-    while IFS= read -r line; do
-        if [[ $line =~ ^[[:space:]]*\"$key\":[[:space:]]*\"(.*)\",?[[:space:]]*$ ]]; then
-            jsonUnescape "${BASH_REMATCH[1]}"
-            return 0
-        fi
-    done <<< "$json"
-    return 1
-}
+def say(status, service, detail=""):
+    detail = " ".join(str(detail).split())
+    print(f"credential-check\t{status}\t{service}\t{detail}", flush=True)
 
-# The URL the app connects with: Compose's resolved value, or, with a Compose
-# that cannot print JSON, the env file's value and the compose default.
-function appServiceUrl() {
-    local key=$1 default=$2 value
-    if value=$(composeServiceEnv api "$key"); then
-        printf '%s' "$value"
+
+def give_up(signum, frame):
+    say("NOTREADY", CURRENT[0], f"no answer within {SECONDS}s")
+    sys.stdout.flush()
+    os._exit(0)
+
+
+CURRENT = ["PostgreSQL"]
+
+
+def retry(service, attempt):
+    """Run attempt() until it returns a result or the deadline passes."""
+    CURRENT[0] = service
+    end = time.monotonic() + SECONDS
+    signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(SECONDS + 3 * TIMEOUT)
+    last = ""
+    try:
+        while True:
+            result = attempt()
+            if result[0] != "RETRY":
+                say(result[0], service, result[1])
+                return
+            last = result[1]
+            if time.monotonic() + INTERVAL >= end:
+                say("NOTREADY", service, last)
+                return
+            time.sleep(INTERVAL)
+    finally:
+        signal.alarm(0)
+
+
+def check_postgres():
+    import dj_database_url
+    import psycopg
+
+    # As pi_dash/settings/common.py: DATABASE_URL, else the POSTGRES_* values.
+    if os.environ.get("DATABASE_URL"):
+        cfg = dj_database_url.parse(os.environ["DATABASE_URL"])
+    else:
+        cfg = {
+            "NAME": os.environ.get("POSTGRES_DB"),
+            "USER": os.environ.get("POSTGRES_USER"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
+            "HOST": os.environ.get("POSTGRES_HOST"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        }
+    host = cfg.get("HOST") or ""
+    if host != "pi-dash-db":
+        say("SKIP", "PostgreSQL", f"external host {host}")
         return
-    fi
-    value=$(getEnvValue "$key" "$DOCKER_ENV_PATH")
-    printf '%s' "${value:-$default}"
-}
+    params = {k: v for k, v in (cfg.get("OPTIONS") or {}).items() if isinstance(v, (str, int))}
+    params.update(
+        dbname=cfg.get("NAME") or "",
+        user=cfg.get("USER") or "",
+        password=cfg.get("PASSWORD") or "",
+        host=host,
+        port=str(cfg.get("PORT") or 5432),
+        connect_timeout=TIMEOUT,
+    )
 
-# Splits scheme://user:pass@host:port/path?query the way Python's urlsplit
-# does and prints user, password, host, port and the decoded path, separated
-# by the unit separator (\x1f) so empty fields survive `read`.
-function splitServiceUrl() {
-    local rest=${1#*://}
-    local netloc=${rest%%[/?#]*}
-    local path=${rest:${#netloc}}
-    path=${path#/}
-    path=${path%%[?#]*}
-    local auth="" hostport=$netloc
-    if [[ $netloc == *@* ]]; then
-        auth=${netloc%@*}
-        hostport=${netloc##*@}
-    fi
-    local user=${auth%%:*} password=""
-    if [[ $auth == *:* ]]; then password=${auth#*:}; fi
-    local host=${hostport%%:*} port=""
-    if [[ $hostport == *:* ]]; then port=${hostport#*:}; fi
-    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$(urlDecode "$user")" "$(urlDecode "$password")" "$host" "$port" "$(urlDecode "$path")"
-}
+    def attempt():
+        try:
+            psycopg.connect(**params).close()
+            return ("OK", "")
+        except psycopg.OperationalError as error:
+            text = str(error)
+            # 28P01 bad password, 28000 no such role / no pg_hba entry,
+            # 3D000 no such database. Over TCP these only come from the
+            # final server: the image's init server listens on the socket.
+            if (
+                getattr(error, "sqlstate", None) in ("28P01", "28000", "3D000")
+                or "password authentication failed" in text
+                or "does not exist" in text
+            ):
+                return ("MISMATCH", text.split("FATAL:")[-1].strip())
+            return ("RETRY", text)
+
+    retry("PostgreSQL", attempt)
+
+
+def check_rabbitmq():
+    import amqp.exceptions
+    from kombu import Connection
+
+    # As pi_dash/settings/common.py: AMQP_URL, else the RABBITMQ_* values.
+    url = os.environ.get("AMQP_URL") or "amqp://{}:{}@{}:{}/{}".format(
+        os.environ.get("RABBITMQ_USER", "guest"),
+        os.environ.get("RABBITMQ_PASSWORD", "guest"),
+        os.environ.get("RABBITMQ_HOST"),
+        os.environ.get("RABBITMQ_PORT", "5672"),
+        os.environ.get("RABBITMQ_VHOST", "/"),
+    )
+    conn = Connection(
+        url,
+        connect_timeout=TIMEOUT,
+        transport_options={"read_timeout": TIMEOUT, "write_timeout": TIMEOUT},
+    )
+    if conn.hostname != "pi-dash-mq":
+        say("SKIP", "RabbitMQ", f"external host {conn.hostname}")
+        return
+    refused = (amqp.exceptions.AccessRefused, amqp.exceptions.NotAllowed)
+
+    def attempt():
+        try:
+            conn.connect()
+            conn.release()
+            return ("OK", "")
+        except Exception as error:
+            chain, seen = error, set()
+            while chain is not None and id(chain) not in seen:
+                seen.add(id(chain))
+                # 403 ACCESS_REFUSED: bad user or password. 530 NOT_ALLOWED:
+                # no such vhost, or the user has no permissions on it.
+                if isinstance(chain, refused) or getattr(chain, "code", None) in (403, 530):
+                    return ("MISMATCH", f"{chain} (user {conn.userid!r}, vhost {conn.virtual_host!r})")
+                chain = chain.__cause__ or chain.__context__
+            return ("RETRY", f"{type(error).__name__}: {error}")
+
+    retry("RabbitMQ", attempt)
+
+
+if "db" in SERVICES:
+    check_postgres()
+if "mq" in SERVICES:
+    check_rabbitmq()
+PROBE
 
 function credentialMismatch() {
     local service=$1 detail=$2 variable=$3
@@ -493,14 +540,12 @@ function credentialMismatch() {
     echo "   Stop the data services with: ./setup.sh stop" >&2
 }
 
-# A slow service (first boot, crash recovery) is not a credential problem:
-# warn, skip its check and let the app retry its own connection.
-function serviceNotReady() {
-    local service=$1 detail=$2
+# Not a credential problem: warn and let the app retry its own connection.
+function credentialCheckSkipped() {
+    local what=$1 detail=$2
     echo "" >&2
-    echo "   $service is not ready yet ($detail); skipping its credential check ⚠️" >&2
-    echo "   If the app cannot connect, check its logs with:" >&2
-    echo "   $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH logs $3" >&2
+    echo "   $what; skipping its credential check ⚠️" >&2
+    [ -n "$detail" ] && echo "   ($detail)" >&2
     echo "" >&2
 }
 
@@ -508,94 +553,47 @@ function serviceNotReady() {
 # when their volume is first created. Before the app starts, check that the
 # bundled services accept the credentials the app will connect with, so an
 # old volume fails here with a clear message instead of an auth error in
-# the API logs. External services (another host in the URL) are skipped.
+# the API logs. The probe runs in a one-off `api` container: the app's
+# image, resolved environment, network and client libraries. External
+# services (another host in the URL) are skipped. Only a refused login
+# stops the start; a slow service or a probe that cannot run only warns.
 function checkBundledCredentials() {
-    local attempts=${CREDENTIAL_CHECK_ATTEMPTS:-60}
-    local interval=${CREDENTIAL_CHECK_INTERVAL:-2}
+    local seconds=${CREDENTIAL_CHECK_SECONDS:-120}
     local compose="$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH"
-    local services
+    local services check=""
     services=$($compose config --services 2>/dev/null)
-    local user password host port name out i ready
-
-    IFS=$'\x1f' read -r user password host port name <<< "$(splitServiceUrl "$(appServiceUrl DATABASE_URL "$DEFAULT_DATABASE_URL")")"
-    if [ "$host" == "pi-dash-db" ] && grep -qx "pi-dash-db" <<< "$services"; then
-        port=${port:-5432}
-        # 127.0.0.1 only answers once first-boot initialisation is done.
-        ready=""
-        for ((i = 0; i < attempts; i++)); do
-            out=$($compose exec -T pi-dash-db pg_isready -h 127.0.0.1 -p "$port" 2>&1) && { ready=1; break; }
-            sleep "$interval"
-        done
-        if [ -z "$ready" ]; then
-            serviceNotReady "PostgreSQL" "no answer on port $port (${out:-no output})" "pi-dash-db"
-        else
-            checkPostgresLogin || return 1
-        fi
+    grep -qx "pi-dash-db" <<< "$services" && check+=" db"
+    grep -qx "pi-dash-mq" <<< "$services" && check+=" mq"
+    if [ -z "$check" ] || ! grep -qx "api" <<< "$services"; then
+        return 0
     fi
 
-    IFS=$'\x1f' read -r user password host port name <<< "$(splitServiceUrl "$(appServiceUrl AMQP_URL "$DEFAULT_AMQP_URL")")"
-    if [ "$host" == "pi-dash-mq" ] && grep -qx "pi-dash-mq" <<< "$services"; then
-        # Kombu's defaults for parts the URL leaves out.
-        if [ -z "$user" ]; then
-            user="guest"
-            password=${password:-guest}
-        fi
-        name=${name:-/}
-        ready=""
-        for ((i = 0; i < attempts; i++)); do
-            $compose exec -T pi-dash-mq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && { ready=1; break; }
-            sleep "$interval"
-        done
-        if [ -z "$ready" ]; then
-            serviceNotReady "RabbitMQ" "the broker is not running" "pi-dash-mq"
-        else
-            checkRabbitLogin || return 1
-        fi
+    local out
+    if ! out=$(printf '%s\n' "$CREDENTIAL_PROBE" | $compose run --rm --no-deps -T \
+        -e CREDENTIAL_CHECK_SERVICES="${check# }" -e CREDENTIAL_CHECK_SECONDS="$seconds" \
+        api python3 - 2>&1); then
+        credentialCheckSkipped "The credential check could not run" "$(tail -n 1 <<< "$out")"
+        return 0
     fi
-    return 0
-}
 
-# Uses checkBundledCredentials' locals. Logs in by the service name, as the
-# app does: the image's pg_hba.conf trusts the socket and loopback, so only
-# a connection from the container's network address checks the password.
-function checkPostgresLogin() {
-    ready=""
-    for ((i = 0; i < attempts; i++)); do
-        out=$(PGPASSWORD="$password" $compose exec -T -e PGPASSWORD pi-dash-db psql -h "$host" -p "$port" -U "$user" -d "$name" -tAc "select 1" 2>&1) && { ready=1; break; }
-        [[ $out == *"does not exist"* || $out == *"password authentication failed"* ]] && break
-        sleep "$interval"
-    done
-    if [[ $out == *"password authentication failed"* ]]; then
-        credentialMismatch "PostgreSQL" "the database volume does not accept the password for role \"$user\"" "DATABASE_URL"
-        return 1
-    fi
-    if [[ $out == *"does not exist"* ]]; then
-        credentialMismatch "PostgreSQL" "the database volume has no role \"$user\" with database \"$name\" (${out##*FATAL:  })" "DATABASE_URL"
-        return 1
-    fi
-    if [ -z "$ready" ]; then
-        serviceNotReady "PostgreSQL" "${out##*error: }" "pi-dash-db"
-    fi
-    return 0
-}
-
-# Uses checkBundledCredentials' locals. The password goes on stdin, so it is
-# not in any process's arguments and a leading "-" is not read as an option.
-function checkRabbitLogin() {
-    if ! printf '%s\n' "$password" | $compose exec -T pi-dash-mq rabbitmqctl -q authenticate_user "$user" >/dev/null 2>&1; then
-        credentialMismatch "RabbitMQ" "the broker volume does not accept user \"$user\"" "AMQP_URL"
-        return 1
-    fi
-    if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_vhosts name 2>/dev/null | grep -qxF -- "$name"; then
-        credentialMismatch "RabbitMQ" "the broker volume has no vhost \"$name\"" "AMQP_URL"
-        return 1
-    fi
-    # A valid user on an existing vhost can still lack access to it.
-    if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_permissions -p "$name" 2>/dev/null | cut -f1 | grep -qxF -- "$user"; then
-        credentialMismatch "RabbitMQ" "user \"$user\" has no permissions on vhost \"$name\"" "AMQP_URL"
-        return 1
-    fi
-    return 0
+    local tag status service detail failed=0
+    while IFS=$'\t' read -r tag status service detail; do
+        [ "$tag" == "credential-check" ] || continue
+        case $status in
+            MISMATCH)
+                if [ "$service" == "PostgreSQL" ]; then
+                    credentialMismatch "$service" "$detail" "DATABASE_URL"
+                else
+                    credentialMismatch "$service" "$detail" "AMQP_URL"
+                fi
+                failed=1
+                ;;
+            NOTREADY)
+                credentialCheckSkipped "$service is not ready yet" "$detail"
+                ;;
+        esac
+    done <<< "$out"
+    return $failed
 }
 
 function startServices() {

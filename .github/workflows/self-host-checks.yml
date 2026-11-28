@@ -6,6 +6,8 @@
 # nginx 404 the community proxy's /assets/* fallback depends on, plus the
 # installer's credential preflight. Plain node:test over the shipped files,
 # so no install step; one step resolves the pinned MinIO image on Docker Hub.
+# A second job runs the preflight's probe with the app's client libraries,
+# against fake servers and against real PostgreSQL and RabbitMQ volumes.
 name: self-host-checks
 
 on:
@@ -57,3 +59,24 @@ jobs:
           docker buildx imagetools inspect --raw "$ref" \
             | jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] as $p | ($p | index("linux/amd64")) and ($p | index("linux/arm64"))'
 
+  credential-preflight:
+    name: installer credential preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The probe's client libraries, at the versions the app image ships.
+      - name: Install the app's client libraries
+        run: |
+          set -euo pipefail
+          pins=$(grep -hE '^(kombu|psycopg|psycopg-binary|dj-database-url)==' apps/api/requirements/base.txt)
+          echo "$pins"
+          pip install $pins
+      - name: Probe against fake PostgreSQL and RabbitMQ servers
+        run: python -m unittest discover -s deployments/checks -p '*_test.py' -v
+      # Real postgres:15.7 and rabbitmq:3.13.6 volumes: wrong password,
+      # old 'pi dash' volumes, no vhost permissions, and the README's fix.
+      - name: Preflight against real PostgreSQL and RabbitMQ
+        run: bash deployments/checks/credential-preflight-e2e.sh
