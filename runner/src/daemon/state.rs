@@ -402,10 +402,21 @@ impl StateHandle {
     /// run is still executing), including ones the worker is sending right
     /// now, and drop any later ones. From here the drain owns the send.
     pub fn take_terminal_for_drain(&self) -> Vec<ClientMsg> {
-        match std::mem::replace(&mut *self.lock_terminal_hold(), TerminalHold::Drained) {
+        self.take_terminal_for_drain_then(|msgs| msgs)
+    }
+
+    /// [`Self::take_terminal_for_drain`], running `then` on the taken
+    /// reports while the hold is still locked. The worker cannot see the
+    /// hold as drained (and release the run's queue slot on that basis)
+    /// until `then` returns, so the drain can durably record the result
+    /// before the slot it belongs to can go.
+    pub fn take_terminal_for_drain_then<R>(&self, then: impl FnOnce(Vec<ClientMsg>) -> R) -> R {
+        let mut hold = self.lock_terminal_hold();
+        let msgs = match std::mem::replace(&mut *hold, TerminalHold::Drained) {
             TerminalHold::Holding { msgs, .. } | TerminalHold::Releasing { msgs, .. } => msgs,
             TerminalHold::Off | TerminalHold::Drained => Vec::new(),
-        }
+        };
+        then(msgs)
     }
 
     /// Record that the worker failed to send a released terminal report.

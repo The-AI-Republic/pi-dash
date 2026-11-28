@@ -997,8 +997,48 @@ mod process_tests {
                 survivors: Vec::new(),
             }
         );
+        // A cleanup that confirms the group empty retires the record.
+        let owner = std::sync::Mutex::new(owner);
+        let (_, outcome) = crate::util::containment::stop_owned_group(run_id, &owner, GRACE);
+        assert_eq!(outcome, CleanupOutcome::Clean);
         drop(owner);
-        assert!(!path.exists(), "the record goes with the anchor");
+        assert!(
+            !path.exists(),
+            "the record goes with a confirmed-empty group"
+        );
+    }
+
+    /// Review of #3501 at ba9c1c3 (MUST 2/5): an owner dropped while its
+    /// cleanup is unresolved (daemon shutdown during a held cleanup, or a
+    /// cancelled detached cleanup) must keep the record and leave its
+    /// anchor unreaped, so the group id stays reserved and the next
+    /// daemon's recovery can still judge the group.
+    #[test]
+    fn an_unresolved_owner_dropped_at_shutdown_keeps_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = GroupOwner::new_anchored().expect("anchored group");
+        let run_id = Uuid::new_v4();
+        record_in(dir.path(), run_id, None, &mut owner);
+        let path = record_path(dir.path(), run_id);
+        let anchor = owner.anchor_identity().unwrap();
+
+        drop(owner);
+
+        let still = procinfo::info(anchor.pid);
+        // Reap or end the anchor this test left behind before asserting.
+        let pid = nix::unistd::Pid::from_raw(anchor.pid);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = nix::sys::wait::waitpid(pid, None);
+        assert!(path.exists(), "the only record of a live group was deleted");
+        let record: GroupRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            (record.anchor_pid, record.anchor_start),
+            (anchor.pid, anchor.start)
+        );
+        assert!(
+            still.is_some_and(|p| ProcId::from(&p) == anchor),
+            "the anchor was reaped, freeing the group id"
+        );
     }
 
     #[tokio::test]
