@@ -399,12 +399,6 @@ fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
         .add(Expr::exists(pinned_is_working))
 }
 
-/// The pin release for a run taken from another runner's locality pin
-/// (see [`borrowed_locality_condition`]), run after the assignment write
-/// in the same transaction: clear the parent's resume hint, then the pin,
-/// as the release-pin paths do — the new runner has no session of the
-/// parent's to resume against. Both are no-ops for a run that is unpinned
-/// or pinned to `runner_id`.
 /// Whether a selected run was taken from another runner's locality pin
 /// ([`borrowed_locality_condition`]), read off the locked run row: only
 /// then does the assignment need [`release_borrowed_pin_stmts`].
@@ -412,6 +406,12 @@ pub fn is_borrowed_pin(pinned_runner_id: Option<Uuid>, pin_kind: &str, runner_id
     pin_kind == "locality" && pinned_runner_id.is_some_and(|pinned| pinned != runner_id)
 }
 
+/// The pin release for a run taken from another runner's locality pin
+/// (see [`borrowed_locality_condition`]), run after the assignment write
+/// in the same transaction: clear the parent's resume hint, then the pin,
+/// as the release-pin paths do — the new runner has no session of the
+/// parent's to resume against. Both are no-ops for a run that is unpinned
+/// or pinned to `runner_id`.
 pub fn release_borrowed_pin_stmts(run_id: Uuid, runner_id: Uuid) -> [UpdateStatement; 2] {
     let borrowed_parent = Query::select()
         .column("parent_run_id")
