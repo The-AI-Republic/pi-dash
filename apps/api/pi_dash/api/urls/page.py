@@ -8,6 +8,7 @@ from pi_dash.api.views import (
     PageListAPIEndpoint,
     PageDetailAPIEndpoint,
     PageArchiveAPIEndpoint,
+    PageMoveAPIEndpoint,
 )
 
 urlpatterns = [
@@ -25,5 +26,10 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/archive/",
         PageArchiveAPIEndpoint.as_view(http_method_names=["post", "delete"]),
         name="pages-archive",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/move/",
+        PageMoveAPIEndpoint.as_view(http_method_names=["post"]),
+        name="pages-move",
     ),
 ]
