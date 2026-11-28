@@ -4,7 +4,8 @@
 (a registered key or blank) after the ``CharField(max_length=32)`` checks;
 ``Project.save()`` resolves a blank value at creation (``software`` with a
 repo, else ``general``). The read serializers (``fields="__all__"``) render
-the key right after ``default_agent_executor``. PUT goes through
+the model's scalar fields in declaration order, so the key follows
+``default_agent_executor`` and ``dedicated_runner_lost_action``. PUT goes through
 ``ProjectListSerializer``, which has no ``validate_default_work_type``.
 """
 
@@ -34,7 +35,10 @@ def _stored(db, pid):
 
 def _assert_after_executor(item):
     keys = list(item.keys())
-    assert keys.index("default_work_type") == keys.index("default_agent_executor") + 1, keys
+    at = keys.index("default_agent_executor")
+    assert keys[at:at + 3] == [
+        "default_agent_executor", "dedicated_runner_lost_action", "default_work_type",
+    ], keys
 
 
 def test_create_resolves_from_repo(world, db):
