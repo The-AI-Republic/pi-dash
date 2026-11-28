@@ -364,12 +364,13 @@ def AgentRunCountAhead(run) -> int:
                 .exclude(pk=run.pk)
                 .count()
             )
-            # One shared run is served before the next dedicated (§10.2).
-            if AgentRun.objects.filter(
-                pod=run.pod,
-                status=AgentRunStatus.QUEUED,
-                pinned_runner__isnull=True,
-            ).exists():
+            # One shared run is served before the next dedicated (§10.2):
+            # unpinned pod work, or another busy runner's locality pin that
+            # this runner would borrow (PDASHOSS01-419).
+            from pi_dash.runner.services.matcher import borrowable_pin_q
+
+            queued = AgentRun.objects.filter(pod=run.pod, status=AgentRunStatus.QUEUED)
+            if queued.filter(pinned_runner__isnull=True).exists() or queued.filter(borrowable_pin_q(runner)).exists():
                 ahead += 1
     return ahead
 

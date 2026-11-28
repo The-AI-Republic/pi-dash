@@ -161,6 +161,24 @@ def _last_served_dedicated(runner: Runner) -> bool:
     )
 
 
+def borrowable_pin_q(runner: Runner) -> Q:
+    """Runs pinned for locality to another runner that is working now.
+
+    ``runner`` may take such a run (PDASHOSS01-419) when it takes pod work;
+    the caller adds that gate. Also used by the read-side ``runs_ahead``.
+    """
+    from pi_dash.runner.models import PinKind
+
+    return (
+        Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+        & Q(pin_kind=PinKind.LOCALITY, pinned_runner__isnull=False)
+        & ~Q(pinned_runner=runner)
+        & models.Exists(
+            AgentRun.objects.filter(runner_id=models.OuterRef("pinned_runner_id"), status__in=BUSY_STATUSES)
+        )
+    )
+
+
 def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     """Return the next QUEUED run this runner should take.
 
@@ -212,14 +230,7 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     # runner it names is working, it is pod work: an idle pod member takes it
     # rather than leaving the run queued behind the busy runner while it
     # idles (PDASHOSS01-419). Dedicated pins are never borrowed.
-    borrowed = (
-        local
-        & Q(pin_kind=PinKind.LOCALITY, pinned_runner__isnull=False)
-        & ~Q(pinned_runner=runner)
-        & models.Exists(
-            AgentRun.objects.filter(runner_id=models.OuterRef("pinned_runner_id"), status__in=BUSY_STATUSES)
-        )
-    )
+    borrowed = borrowable_pin_q(runner)
     if runner.is_engine:
         eligible = Q(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
         # §23.1: a dedicated pin is served whatever pod_dispatch.
