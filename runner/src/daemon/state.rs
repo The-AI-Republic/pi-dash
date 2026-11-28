@@ -89,6 +89,10 @@ pub struct StateHandle {
     /// A released terminal report could not be sent: the run's terminal
     /// outbox record must outlive its slot release.
     terminal_undelivered: Arc<AtomicBool>,
+    /// A finished run whose terminal report could not be sent: it stays
+    /// reported in flight (so the cloud's heartbeat reaper never fails it)
+    /// until the outbox retry delivers the report.
+    report_pending: Arc<std::sync::Mutex<Option<Uuid>>>,
 }
 
 /// See [`StateHandle::hold_terminal`].
@@ -277,6 +281,7 @@ impl StateHandle {
             terminal_hold: Arc::new(std::sync::Mutex::new(TerminalHold::Off)),
             cleanup_reserved: Arc::new(AtomicBool::new(false)),
             terminal_undelivered: Arc::new(AtomicBool::new(false)),
+            report_pending: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -417,6 +422,38 @@ impl StateHandle {
     /// mark): its outbox record must then be kept for the retry.
     pub fn take_terminal_undelivered(&self) -> bool {
         self.terminal_undelivered.swap(false, Ordering::SeqCst)
+    }
+
+    /// Keep `run_id` reported in flight until its report is delivered
+    /// (see [`Self::clear_report_pending`]).
+    pub fn set_report_pending(&self, run_id: Uuid) {
+        *self
+            .report_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(run_id);
+    }
+
+    /// The finished run kept in flight until its report is delivered.
+    pub fn report_pending(&self) -> Option<Uuid> {
+        *self
+            .report_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `run_id`'s report reached the cloud (or was rejected for good): stop
+    /// reporting it in flight, unless a later run has replaced it.
+    pub async fn clear_report_pending(&self, run_id: Uuid) {
+        let cleared = {
+            let mut pending = self
+                .report_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (*pending == Some(run_id)).then(|| pending.take()).is_some()
+        };
+        if cleared && *self.rx_in_flight.borrow() == Some(run_id) {
+            self.set_current_run(None).await;
+        }
     }
 
     /// Mark whether a finished run's cleanup is unresolved.

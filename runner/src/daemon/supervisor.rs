@@ -2100,12 +2100,15 @@ async fn replay_terminal_outbox_once(
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         };
-        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+        if *state.rx_in_flight.borrow() == Some(entry.run_id)
+            && state.report_pending() != Some(entry.run_id)
+        {
             tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         }
         let out = out.clone();
+        let state = state.clone();
         sends.push(async move {
             let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
             match msg {
@@ -2113,11 +2116,13 @@ async fn replay_terminal_outbox_once(
                     RunFailedSend::Delivered => {
                         tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         true
                     }
                     RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
                         tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         false
                     }
                     RunFailedSend::Failed(e) => {
@@ -4927,16 +4932,29 @@ impl AssignWorker {
     /// the same payload, which the cloud's first-writer-wins finalize
     /// acknowledges as a no-op.
     async fn release_terminal(&self) {
+        let mut undelivered = None;
         for msg in self.state.begin_release() {
             if !self.state.releasing() {
                 break;
             }
+            let run_id = terminal_run_id(&msg);
             if !self.deliver(msg).await {
                 self.state.note_terminal_undelivered();
+                undelivered = undelivered.or(run_id);
             }
         }
         if self.state.release_clears_current_run() {
-            self.state.set_current_run(None).await;
+            // Only a managed run has an outbox record the retry delivers.
+            let kept = undelivered
+                .filter(|_| self.coordinator.is_some() && !self.state.terminal_drained());
+            match kept {
+                // Still reported in flight until the outbox retry delivers
+                // the report: a run the runner stops reporting would be
+                // failed by the cloud's heartbeat reaper, and the real
+                // result could no longer replace that failure.
+                Some(run_id) => self.state.set_report_pending(run_id),
+                None => self.state.set_current_run(None).await,
+            }
         }
         self.state.finish_release();
     }
@@ -5235,9 +5253,7 @@ impl AssignWorker {
                     } else {
                         self.crash_reason()
                     };
-                    let base = auth
-                        .map(|a| a.detail())
-                        .unwrap_or_else(|| format!("{e:#}"));
+                    let base = auth.map(|a| a.detail()).unwrap_or_else(|| format!("{e:#}"));
                     let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
@@ -8264,6 +8280,20 @@ mod tests {
         );
     }
 
+    /// Reopen a queue store the test dropped. A subprocess another test
+    /// forks can hold the old lock's file description until it execs, so
+    /// the lock may stay taken for a moment after the drop.
+    fn reopen_queue(dir: std::path::PathBuf) -> crate::daemon::run_queue::Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match crate::daemon::run_queue::Coordinator::new(dir.clone(), 1) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     fn hello_map(inst: &RunnerInstance) -> Arc<RwLock<HelloRunnerMap>> {
         Arc::new(RwLock::new(
             std::iter::once(inst)
@@ -8431,7 +8461,7 @@ mod tests {
         // store finds the exact result to replay.
         drop(worker);
         drop(coord);
-        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after_crash = reopen_queue(queue_dir);
         let pending = after_crash.terminal_pending();
         assert_eq!(pending.len(), 1, "the held result was not persisted");
         let replayed: ClientMsg =
@@ -8552,7 +8582,7 @@ mod tests {
 
         assert!(!coord.holds_run(run_id), "the slot was not released");
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert_eq!(
             after.terminal_pending().len(),
             1,
@@ -8614,6 +8644,90 @@ mod tests {
             1,
             "an undelivered RunCompleted lost its terminal record"
         );
+    }
+
+    /// A released run whose report
+    /// could not be sent stays reported in flight, so the cloud's heartbeat
+    /// reaper cannot fail it before the outbox retry delivers the real
+    /// result; once delivered, the runner stops reporting it.
+    #[tokio::test]
+    async fn an_undelivered_run_stays_in_flight_until_the_retry_delivers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("pending", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.state = inst.state.clone();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: inst.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        // The terminal POST fails when cleanup ends; polling still works.
+        drop(rx);
+        worker.release_terminal().await;
+        release_finished_slot(&coord, &inst.state, run_id);
+
+        assert_eq!(
+            *inst.state.rx_in_flight.borrow(),
+            Some(run_id),
+            "an undelivered run stopped being reported, so the reaper can fail it"
+        );
+
+        let delivered = replay_terminal_outbox_once(&coord, &hello_map(&inst), true).await;
+        assert_eq!(delivered, 1, "the retry dropped the run's own report");
+        assert!(matches!(
+            out_rx.try_recv().unwrap().body,
+            ClientMsg::RunCompleted { .. }
+        ));
+        assert!(
+            inst.state.rx_in_flight.borrow().is_none(),
+            "the delivered run is still reported in flight"
+        );
+        assert!(coord.terminal_pending().is_empty());
     }
 
     /// The in-process outbox retry delivers a released run's kept record,
@@ -8753,7 +8867,7 @@ mod tests {
 
         assert!(!coord.holds_run(run_id));
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert!(after.terminal_pending().is_empty());
     }
 
