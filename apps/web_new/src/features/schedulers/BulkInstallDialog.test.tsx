@@ -620,6 +620,42 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
   });
 
+  it("does not start the install on Enter in the picker's search field", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    contracts.createSchedulerBinding.mockResolvedValue(binding(ALPHA));
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.click(screen.getByLabelText("Search projects"));
+
+    await user.keyboard("Al{Enter}");
+
+    expect(screen.getByLabelText("Search projects")).toHaveValue("Al");
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps a held Escape that closed the picker from also closing the dialog", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: /project/ });
+    expect(trigger).toHaveFocus();
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("form")).toBeInTheDocument();
+
+    fireEvent.keyUp(trigger, { key: "Escape" });
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
   it("lets the cancel button close without writing", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA })]);
     const { user, onClose } = renderDialog();

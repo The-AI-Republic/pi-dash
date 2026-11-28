@@ -136,10 +136,40 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
       event.preventDefault();
       setOpen(false);
       triggerRef.current?.focus();
+      holdEscape();
     }
     document.addEventListener("keydown", onEscape, true);
     return () => document.removeEventListener("keydown", onEscape, true);
   }, [open]);
+
+  // The key repeats of an Escape held down after it closed the popup belong
+  // to that same press, so they are kept from the dialog until the key is
+  // released or pressed afresh: one press never closes both.
+  const releaseEscapeRef = React.useRef<(() => void) | null>(null);
+  function holdEscape(): void {
+    releaseEscapeRef.current?.();
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      if (!event.repeat) {
+        release();
+        return;
+      }
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    function onKeyUp(event: KeyboardEvent): void {
+      if (event.key === "Escape") release();
+    }
+    function release(): void {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      releaseEscapeRef.current = null;
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    releaseEscapeRef.current = release;
+  }
+  React.useEffect(() => () => releaseEscapeRef.current?.(), []);
 
   // Focus moving to another control outside the picker closes the popup, so
   // Escape from there belongs to the dialog without dropping a hidden popup.
@@ -177,6 +207,10 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
             aria-label="Search projects"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            // Enter here only searches: it must not submit the install form.
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.preventDefault();
+            }}
           />
           <div className="flex justify-end">
             <Button
