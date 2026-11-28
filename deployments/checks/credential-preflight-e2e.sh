@@ -65,6 +65,8 @@ scenario() {
     else
         echo "::error::$name: expected $expect matching /$pattern/, got exit $status"
         failures=$((failures + 1))
+        $dc ps -a
+        $dc logs --tail 40 pi-dash-db pi-dash-mq
     fi
     $dc down -v --remove-orphans > /dev/null 2>&1
     echo "::endgroup::"
@@ -101,7 +103,7 @@ scenario mq-password-characters pass "$ACCEPTED" \
     "AMQP_URL=amqp://pi-dash:a+b%5Cc@pi-dash-mq:5672/pi-dash"
 
 # A valid user with no permissions on the vhost.
-SETUP='for i in $(seq 1 60); do $dc exec -T pi-dash-mq rabbitmqctl -q await_startup > /dev/null 2>&1 && break; sleep 2; done
+SETUP='for i in $(seq 1 60); do $dc exec -T pi-dash-mq rabbitmqctl -q await_startup && break; sleep 2; done
 $dc exec -T pi-dash-mq rabbitmqctl -q add_user nopriv nopriv' \
     scenario mq-no-permissions fail "RabbitMQ: .*(NOT_ALLOWED|refused)" \
     "AMQP_URL=amqp://nopriv:nopriv@pi-dash-mq:5672/pi-dash"
