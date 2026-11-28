@@ -620,6 +620,37 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
   });
 
+  it("closes the picker when focus moves on from the dialog it fell back to, so Escape there is the dialog's", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    screen.getByRole("dialog").focus();
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+
+    screen.getByLabelText("Project context (optional)").focus();
+
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it.each([
+    ["isComposing", { isComposing: true }],
+    ["keyCode 229", { keyCode: 229 }],
+  ])("leaves an Enter that confirms an input method candidate (%s) to the input method", async (_label, init) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("does not start the install on Enter in the picker's search field", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
     contracts.createSchedulerBinding.mockResolvedValue(binding(ALPHA));
@@ -653,6 +684,20 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
 
     fireEvent.keyUp(trigger, { key: "Escape" });
     fireEvent.keyDown(trigger, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("stops holding Escape back once the window loses focus mid-hold", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    const trigger = screen.getByRole("button", { name: /project/ });
+    fireEvent.blur(window);
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 

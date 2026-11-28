@@ -144,7 +144,8 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
 
   // The key repeats of an Escape held down after it closed the popup belong
   // to that same press, so they are kept from the dialog until the key is
-  // released or pressed afresh: one press never closes both.
+  // released or pressed afresh: one press never closes both. The window
+  // losing focus also ends the hold, as the release may then never arrive.
   const releaseEscapeRef = React.useRef<(() => void) | null>(null);
   function holdEscape(): void {
     releaseEscapeRef.current?.();
@@ -163,27 +164,37 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
     function release(): void {
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", release);
       releaseEscapeRef.current = null;
     }
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", release);
     releaseEscapeRef.current = release;
   }
   React.useEffect(() => () => releaseEscapeRef.current?.(), []);
 
-  // Focus moving to another control outside the picker closes the popup, so
-  // Escape from there belongs to the dialog without dropping a hidden popup.
-  // Focus falling back to an enclosing container (a click on non-focusable
-  // popup content) is not a move to another control: the popup stays open.
-  function onBlur(event: React.FocusEvent<HTMLDivElement>): void {
-    const next = event.relatedTarget;
-    if (!open || next === null) return;
-    if (event.currentTarget.contains(next) || next.contains(event.currentTarget)) return;
-    setOpen(false);
-  }
+  // Focus arriving at another control outside the picker closes the popup,
+  // so Escape from there belongs to that control or the dialog. Watching
+  // where focus arrives, rather than the picker's own blur, also covers focus
+  // that first fell back to the dialog and then moves on. Focus falling back
+  // to an enclosing container (a click on non-focusable popup content) is not
+  // a move to another control: the popup stays open.
+  React.useEffect(() => {
+    if (!open) return;
+    function onFocusIn(event: FocusEvent): void {
+      const root = rootRef.current;
+      const next = event.target;
+      if (root === null || !(next instanceof Node)) return;
+      if (root.contains(next) || next.contains(root)) return;
+      setOpen(false);
+    }
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [open]);
 
   return (
-    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onBlur={onBlur}>
+    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)">
       <span className="text-body font-medium text-(--text)">Projects</span>
       <button
         ref={triggerRef}
@@ -208,8 +219,10 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             // Enter here only searches: it must not submit the install form.
+            // An Enter that confirms an input method candidate is left alone.
             onKeyDown={(event) => {
-              if (event.key === "Enter") event.preventDefault();
+              if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
             }}
           />
           <div className="flex justify-end">
