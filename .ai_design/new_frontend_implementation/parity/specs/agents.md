@@ -550,12 +550,17 @@ create-issue dialog — chat titles come from the send path. Oracle:
 
 ## 11. Sidebar, deeplinks, tools, paging (AGT-044–046, AGT-055, AGT-056, AGT-058, AGT-061, slice NEWFRONT-607)
 
-The conversation sidebar inside the assistant layout lists threads from
-`GET /api/workspaces/{slug}/ai-assistant/threads/`: each thread links to
+The conversation history on the assistant layout lists threads from
+`GET /api/workspaces/{slug}/ai-assistant/threads/`: the oracle keeps a
+persistent sidebar beside the conversation, while the new app gives the
+conversation the full width and opens the same list from a Chat History
+button in the page header (NEWPIDASH-337). Either way each thread links to
 its own route with its title or a fallback label, the open thread
 highlights, no conversations shows a placeholder line, archived threads
-never appear, and new threads prepend optimistically. Thread owners,
-member and above. Oracle: `assistant-core/thread-sidebar.spec.ts`. (AGT-044)
+never appear, and new threads prepend optimistically. Picking a thread
+opens it and closes the dialog; Escape and the backdrop also close it.
+Thread owners, member and above. Oracle:
+`assistant-core/thread-sidebar.spec.ts`. (AGT-044)
 
 Per-thread deep links are shareable entry points: opening
 `/{ws}/assistant/{threadId}` loads that transcript in a centered column,
@@ -599,9 +604,11 @@ the service methods stay reserved for a future surface. Oracle:
 `assistant-plus/no-thread-management.spec.ts`. (AGT-058)
 
 Structural negative row: the shared history-panel component is not the
-assistant sidebar. The assistant layout renders its own inline link rail;
-the reusable history panel stays available for runner chat (rowed under
-runners) and no duplicate or dead sidebar may render. Oracle:
+assistant history. The assistant layout renders its own link list — the
+oracle as an inline rail, the new app as a Chat History dialog with no
+buttons of its own (NEWPIDASH-337); the reusable history panel stays
+available for runner chat (rowed under runners) and no duplicate or dead
+sidebar may render. Oracle:
 `assistant-plus/sidebar-identity.spec.ts`. (AGT-061)
 
 ## 12. Keys, voice, registry, desktop, editor (AGT-050–052, AGT-057, AGT-059, AGT-060, AGT-063, slice NEWFRONT-608)

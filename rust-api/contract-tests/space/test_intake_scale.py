@@ -18,7 +18,7 @@ BASE = "/api/public"
 
 ROW_KEYS = frozenset(
     [
-        "agent_executor", "archived_at", "assigned_pod", "assignee_details",
+        "agent_executor", "archived_at", "assigned_pod", "assigned_runner", "assignee_details",
         "assignees", "completed_at", "complexity_score", "created_at",
         "created_by", "created_via", "deleted_at", "description_binary",
         "description_html", "description_json", "description_stripped",
@@ -27,7 +27,7 @@ ROW_KEYS = frozenset(
         "parent", "point", "priority", "project", "project_detail",
         "sequence_id", "sort_order", "start_date", "state", "state_detail",
         "sub_issues_count", "target_date", "type", "updated_at", "updated_by",
-        "workspace",
+        "work_type", "workspace",
     ]
 )
 

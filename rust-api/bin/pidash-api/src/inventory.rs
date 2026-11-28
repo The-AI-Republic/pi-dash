@@ -771,7 +771,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["DELETE", "PATCH"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
@@ -806,6 +806,12 @@ pub const ROUTES: &[RouteRow] = &[
     // through to the GET proxy arm (NEWPIDASH-31).
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/pause/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Runner reconfigure (edit working dir / agent / model through the
+    // machine control channel): POST + status GET, Rust-only.
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/reconfigure/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/reconfigure/{request_id}/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/resume/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revive/",
@@ -820,6 +826,10 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/assets/user-assets/{asset_id}/server/",
         owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/auth/desktop-handoff/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/auth/desktop-handoff/redeem/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/device/approve/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/device/start/",
@@ -1005,6 +1015,8 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/runners/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     // v1 scheduler definition write (PDASHOSS01-318, f0fde5a53; NEWPIDASH-31).
@@ -1042,14 +1054,26 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/desktop-enroll/",
         owned: &["POST", "DELETE"], proxied: &["GET", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/",
+        owned: &["GET", "PATCH"], proxied: &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/poll",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/credential/revoke/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/model-token/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/profile/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/health/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/machine-tokens/",
@@ -1097,6 +1121,8 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "runner", path: "/api/v1/runner/runs/{run_id}/stream/upgrade/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "auth", path: "/auth/change-password/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "auth", path: "/auth/desktop-handoff/redeem/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "auth", path: "/auth/email-check/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
@@ -1196,15 +1222,6 @@ pub const TASKS: &[TaskRow] = &[
         name: "assistant.sweep_stale_turns",
     },
     TaskRow {
-        name: "cloud_agent.run_agent_run",
-    },
-    TaskRow {
-        name: "cloud_agent.scan_queued_runs",
-    },
-    TaskRow {
-        name: "cloud_agent.sweep_stale_runs",
-    },
-    TaskRow {
         name: "managed_runner.expire_waiting_runs",
     },
     TaskRow {
@@ -1272,15 +1289,6 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.git_sync_task.sync_one_binding",
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.post_completion_comment",
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.sync_all_repos",
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.sync_one_repo",
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_activities_task.issue_activity",
@@ -1388,16 +1396,25 @@ pub const TASKS: &[TaskRow] = &[
         name: "runner.expire_stale_approvals",
     },
     TaskRow {
+        name: "runner.fail_dedicated_runs",
+    },
+    TaskRow {
         name: "runner.fail_runs_on_offline_runners",
     },
     TaskRow {
         name: "runner.mark_offline_runners",
     },
     TaskRow {
+        name: "runner.pause_engines_with_expired_credentials",
+    },
+    TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
     },
     TaskRow {
         name: "runner.reconcile_stalled_runs",
+    },
+    TaskRow {
+        name: "runner.reconcile_unsatisfiable_pins",
     },
     TaskRow {
         name: "runner.release_pins_on_offline_runners",
@@ -1419,6 +1436,9 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
+    },
+    TaskRow {
+        name: "runner.sweep_stranded_dedicated_runs",
     },
 ];
 
@@ -1736,38 +1756,6 @@ mod tests {
     /// table's rust names. Residual: a registration outside these
     /// consts is invisible here (`Registry` has no iterator) — review
     /// catches it, and the parity diff flags the behavior change.
-    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
-    /// here, so it is never called.
-    struct NoopTransitionHook;
-
-    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
-        fn enqueue_completion_comment(
-            &self,
-            _issue_id: uuid::Uuid,
-            _prev_state_id: Option<uuid::Uuid>,
-            _current_state_id: Option<uuid::Uuid>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            Box::pin(async move {})
-        }
-
-        fn fire(
-            &self,
-            _actor_id: uuid::Uuid,
-            _request: pidash_services::orchestration::entries::FireRequest,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async move {
-                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
-            })
-        }
-    }
-
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
@@ -1844,9 +1832,7 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.cloud_agent.clone(),
-            seed_settings.managed_runner.clone(),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            seed_settings.pidash_agent.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
@@ -1864,12 +1850,6 @@ mod tests {
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
-            None,
-        );
-        pidash_jobs::integrations::github_sync::register_github_sync_tasks(
-            &mut registry,
-            pool.clone(),
-            pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
             None,
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
@@ -1901,11 +1881,9 @@ mod tests {
             pool.clone(),
             std::sync::Arc::new(pidash_jobs::orchestration::LiveFireTickSeam::new(
                 pool.clone(),
-                dispatch_settings.cloud_agent.clone(),
-                dispatch_settings.managed_runner.clone(),
+                dispatch_settings.pidash_agent.clone(),
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam.clone(),
             )),
         );
@@ -1914,11 +1892,9 @@ mod tests {
             pool.clone(),
             pidash_jobs::orchestration::live_scheduler_dispatch(
                 pool.clone(),
-                dispatch_settings.cloud_agent,
-                dispatch_settings.managed_runner,
+                dispatch_settings.pidash_agent,
                 None,
                 dispatch_settings.runner.clone(),
-                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam,
             ),
         );
@@ -1938,7 +1914,6 @@ mod tests {
             pool.clone(),
             None,
             &runner_settings,
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
                 std::sync::Arc::new(runner_settings.clone()),
             )),
@@ -1957,49 +1932,27 @@ mod tests {
         pidash_jobs::runner_runs::register_offline_recovery_tasks(
             &mut registry,
             pool.clone(),
-            runner_seams,
+            runner_seams.clone(),
         );
-        // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
-        // the same calls the worker builder makes — real register over the
-        // lazy pool, no forward override (handlers never run here).
-        let execute_settings =
-            pidash_db::config::Settings::from_env().expect("settings parse in test env");
-        let invoke = crate::model_runtime::invoke::InvokeCtx {
-            tools: crate::model_runtime::tools_exec::ToolCtx {
-                toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
-                pool: pool.clone(),
-                orm: pidash_db::pool::sea_orm_connection(&pool),
-                cloud: execute_settings.cloud_agent.clone(),
-                managed: execute_settings.managed_runner.clone(),
-                http: reqwest::Client::new(),
-                github: crate::model_runtime::github::GithubAppContext::new(
-                    pool.clone(),
-                    pidash_db::redis::RedisHandle::from_settings(&execute_settings),
-                    execute_settings.secret_key.clone(),
-                ),
-                // No Redis client in the mirror (handlers never run
-                // here), like the runner-seams and turn-seam mirrors
-                // above; the worker builder builds this from REDIS_URL.
-                redis: None,
-                runner: execute_settings.runner.clone(),
-                transition_hook: std::sync::Arc::new(NoopTransitionHook),
-            },
-            keys: crate::model_runtime::keys::KeyResolver::from_env(
-                execute_settings.assistant.key_cache_ttl_secs,
-                execute_settings.assistant.key_cache_maxsize,
-            ),
-        };
-        pidash_jobs::dispatch_execute::register_execute_tasks(
+        pidash_jobs::runner_runs::register_unsatisfiable_pins_tasks(
             &mut registry,
             pool.clone(),
-            execute_settings.cloud_agent.clone(),
-            execute_settings.managed_runner.clone(),
-            std::sync::Arc::new(crate::execute_seams::LiveExecuteSeams::new(
-                pool.clone(),
-                execute_settings.cloud_agent.block_private_urls,
-                invoke,
-            )),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            runner_seams,
+        );
+        pidash_jobs::runner_runs::register_pidash_agent_pause_tasks(&mut registry, pool.clone());
+        // Managed wait expiry (P3 step A): the only execute-plane
+        // handler that survives; same call the worker builder makes —
+        // real register over the lazy pool, no forward override
+        // (handlers never run here).
+        let execute_settings =
+            pidash_db::config::Settings::from_env().expect("settings parse in test env");
+        pidash_jobs::runner_runs::waiting_expiry::register_waiting_expiry_tasks(
+            &mut registry,
+            pool.clone(),
+            execute_settings.pidash_agent.clone(),
+            std::sync::Arc::new(
+                pidash_jobs::runner_runs::waiting_expiry::LiveExecuteSeams::new(pool.clone()),
+            ),
         );
         // The same call the worker builder makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over
@@ -2075,7 +2028,6 @@ mod tests {
         ]);
         expected_rust.extend(pidash_jobs::tasks_webhooks::link_crawl::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
-        expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
         expected_rust.extend(pidash_jobs::assistant::TASK_NAMES);
         expected_rust.extend(pidash_jobs::loop_scan::TASK_NAMES);
@@ -2085,10 +2037,7 @@ mod tests {
             pidash_jobs::tasks_ticker::scan::SCAN_DUE_BINDINGS_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
             pidash_jobs::tasks_ticker::scan::FIRE_SCHEDULER_BINDING_TASK,
-            pidash_jobs::dispatch::RUN_CLOUD_AGENT_TASK,
-            pidash_jobs::dispatch_execute::SCAN_QUEUED_RUNS_TASK,
-            pidash_jobs::dispatch_execute::SWEEP_STALE_RUNS_TASK,
-            pidash_jobs::dispatch_execute::EXPIRE_WAITING_RUNS_TASK,
+            pidash_jobs::runner_runs::waiting_expiry::EXPIRE_WAITING_RUNS_TASK,
         ]);
         expected_rust.insert(pidash_jobs::tasks_mail::NOTIFICATIONS_TASK);
         expected_rust.extend(pidash_jobs::runner_runs::TASK_NAMES);
@@ -2121,18 +2070,13 @@ mod tests {
             "git_sync group drifted"
         );
         assert_eq!(
-            pidash_jobs::integrations::github_sync::TASK_NAMES.len(),
-            3,
-            "github_sync group drifted"
-        );
-        assert_eq!(
             pidash_jobs::loop_scan::TASK_NAMES.len(),
             2,
             "loop_scan group drifted"
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            13,
+            17,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2145,7 +2089,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 78, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2172,7 +2116,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 30);
         let find = |name: &str| {
             schedule
                 .iter()

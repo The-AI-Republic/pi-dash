@@ -12,7 +12,7 @@ use crate::agent::{
     AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::codex::jsonrpc::Incoming;
-use crate::util::shell::{is_benign_login_shell_warning, login_shell_command_with_env, AgentEnv};
+use crate::util::shell::{AgentEnv, is_benign_login_shell_warning, login_shell_command_with_env};
 
 /// Handles the `codex app-server` subprocess lifecycle + JSON-RPC wire.
 ///
@@ -48,7 +48,7 @@ impl AppServer {
 
     /// Spawn `codex app-server` with a Pi Dash-controlled environment.
     ///
-    /// The managed runner uses this to point the engine at its own
+    /// The Pi Dash Agent uses this to point the engine at its own
     /// `CODEX_HOME`, put the bundled `pidash` CLI on the agent's `PATH`, and
     /// supply the model credential from a file read fresh on every spawn. An
     /// empty [`AgentEnv`] is exactly the historical behaviour.

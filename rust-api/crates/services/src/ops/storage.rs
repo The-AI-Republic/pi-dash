@@ -27,10 +27,10 @@
 //!   `ClientError` from the permissions.json fallback, `ValueError` from
 //!   an empty region without an endpoint in `update_bucket`) become a
 //!   one-line stderr message; the exit code (1) matches.
-//! * Credentials resolve from the environment only. boto3 would fall
-//!   through to shared files and instance metadata; the project's config
-//!   registry classifies these keys as env-only, so that chain is out of
-//!   contract.
+//! * Credentials resolve per request via boto3's chain (env keys first,
+//!   then the EC2 instance role over IMDSv2 — NEWPIDASH-204); the
+//!   `access-key` / `secret-key` placeholders are local-MinIO only and fail
+//!   clearly outside `USE_MINIO=1`.
 //! * Ported bugs: the PutBucketPolicy permission probe really applies a
 //!   public-read policy (F37-02 BUGS — the probe IS the mutation); a
 //!   non-404 head error in `update_bucket` falls through to the success
@@ -82,14 +82,18 @@ pub const UNBOUND_PERMISSIONS_MESSAGE: &str =
 /// `AWS_REGION` is unset. `None` means unset; an empty string is `Some("")`
 /// and behaves exactly like boto3 treats it (empty credentials are *used*,
 /// a set-but-empty region wins over the chain — only `None` falls through).
+/// `AWS_SESSION_TOKEN` and `USE_MINIO` ride along for the NEWPIDASH-204
+/// credential chain (placeholders only valid under MinIO).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct S3Env {
     pub endpoint_url: Option<String>,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
+    pub session_token: Option<String>,
     pub region: Option<String>,
     pub default_region: Option<String>,
     pub bucket: Option<String>,
+    pub use_minio: bool,
 }
 
 impl S3Env {
@@ -99,10 +103,21 @@ impl S3Env {
             endpoint_url: std::env::var("AWS_S3_ENDPOINT_URL").ok(),
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok(),
             secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok(),
+            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
             region: std::env::var("AWS_REGION").ok(),
             default_region: std::env::var("AWS_DEFAULT_REGION").ok(),
             bucket: std::env::var("AWS_S3_BUCKET_NAME").ok(),
+            use_minio: std::env::var("USE_MINIO")
+                .map(|v| v.trim() == "1")
+                .unwrap_or(false),
         }
+    }
+
+    /// Whether the env keys look like the local-dev placeholders that only
+    /// make sense under MinIO.
+    pub fn is_placeholder(&self) -> bool {
+        self.access_key_id.as_deref() == Some("access-key")
+            && self.secret_access_key.as_deref() == Some("secret-key")
     }
 }
 
@@ -159,14 +174,17 @@ fn check_endpoint(endpoint_url: Option<&str>, region: &str) -> Result<(), S3Setu
 }
 
 /// A resolved call target: everything except the credentials, which stay
-/// lazy so the flows reproduce boto3's per-call `NoCredentialsError`.
+/// lazy so the flows reproduce boto3's per-call `NoCredentialsError` and so
+/// role credentials can rotate per request (NEWPIDASH-204).
 #[derive(Debug, Clone, PartialEq)]
 pub struct S3Target {
     pub endpoint_url: Option<String>,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
+    pub session_token: Option<String>,
     pub region: String,
     pub bucket: String,
+    pub use_minio: bool,
 }
 
 /// `create_bucket` setup: build the client (region chain, then the
@@ -179,8 +197,10 @@ pub fn resolve_create_target(env: &S3Env) -> Result<S3Target, S3SetupError> {
         endpoint_url: env.endpoint_url.clone(),
         access_key_id: env.access_key_id.clone(),
         secret_access_key: env.secret_access_key.clone(),
+        session_token: env.session_token.clone(),
         region,
         bucket: env.bucket.clone().ok_or(S3SetupError::BucketNone)?,
+        use_minio: env.use_minio,
     })
 }
 
@@ -207,8 +227,10 @@ pub fn resolve_update_target(env: &S3Env) -> Result<UpdateSetup, S3SetupError> {
         endpoint_url: env.endpoint_url.clone(),
         access_key_id: env.access_key_id.clone(),
         secret_access_key: env.secret_access_key.clone(),
+        session_token: env.session_token.clone(),
         region,
         bucket,
+        use_minio: env.use_minio,
     }))
 }
 
@@ -670,12 +692,12 @@ pub fn canonical_query_string(query: &str) -> String {
 }
 
 /// Sign one S3 request (SigV4 `s3`, header auth), mirroring the
-/// `pidash-storage` canonical-request construction (`crates/storage` is
-/// read-only and its fixed-shape helpers cannot sign query-bearing
-/// requests). Signed headers are exactly
-/// `host;x-amz-content-sha256;x-amz-date`, like botocore sends for these
-/// operations; `Content-MD5` (where sent) stays unsigned. Returns the
-/// `Authorization` header value.
+/// `pidash-storage` canonical-request construction. Signed headers are
+/// exactly `host;x-amz-content-sha256;x-amz-date` (plus
+/// `x-amz-security-token` when a session token is present, like botocore
+/// sends for these operations); `Content-MD5` (where sent) stays unsigned.
+/// Returns the `Authorization` header value.
+/// For temporary credentials use [`sign_s3_request_with_token`].
 // Ten positional inputs mirror the D-02 presign-helper shape (like the
 // storage crate's own `sign_*`); grouping them would only rename the tuple.
 #[allow(clippy::too_many_arguments)]
@@ -691,10 +713,55 @@ pub fn sign_s3_request(
     amz_datetime: &str,
     date_stamp: &str,
 ) -> String {
+    sign_s3_request_with_token(
+        access_key,
+        secret_key,
+        "",
+        region,
+        method,
+        canonical_uri,
+        query,
+        signed_host,
+        payload_hash,
+        amz_datetime,
+        date_stamp,
+    )
+}
+
+/// Sign with an explicit session token (role credentials). When the token is
+/// non-empty it is signed as `x-amz-security-token` and must be sent by the
+/// caller.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_s3_request_with_token(
+    access_key: &str,
+    secret_key: &str,
+    session_token: &str,
+    region: &str,
+    method: &str,
+    canonical_uri: &str,
+    query: &str,
+    signed_host: &str,
+    payload_hash: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> String {
     let canonical_query = canonical_query_string(query);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let has_token = !session_token.is_empty();
+    let (signed_headers, header_lines) = if has_token {
+        let signed = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+        let lines = format!(
+            "host:{signed_host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{session_token}\n"
+        );
+        (signed.to_owned(), lines)
+    } else {
+        let signed = "host;x-amz-content-sha256;x-amz-date";
+        let lines = format!(
+            "host:{signed_host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n"
+        );
+        (signed.to_owned(), lines)
+    };
     let canonical_request = format!(
-        "{method}\n{canonical_uri}\n{canonical_query}\nhost:{signed_host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}"
+        "{method}\n{canonical_uri}\n{canonical_query}\n{header_lines}\n{signed_headers}\n{payload_hash}"
     );
     let scope = format!("{date_stamp}/{region}/s3/aws4_request");
     let string_to_sign = format!(
@@ -889,7 +956,9 @@ pub fn resolve_request_base(
 
 /// The live [`S3Ops`] client: reqwest plus the [`sign_s3_request`] signer.
 /// Missing credentials fail every call without I/O, like boto3's lazy
-/// `NoCredentialsError`.
+/// `NoCredentialsError`. Credentials are resolved per request
+/// (NEWPIDASH-204): static keys from the target, else the EC2 instance role
+/// via IMDS (rotating hourly), with `x-amz-security-token` when temporary.
 pub struct ReqwestS3 {
     client: reqwest::Client,
     url_base: String,
@@ -897,7 +966,9 @@ pub struct ReqwestS3 {
     path_prefix: String,
     access_key: Option<String>,
     secret_key: Option<String>,
+    session_token: Option<String>,
     region: String,
+    use_minio: bool,
 }
 
 /// botocore's timeout text: `ConnectTimeoutError` for connect stalls,
@@ -943,8 +1014,39 @@ impl ReqwestS3 {
             path_prefix,
             access_key: target.access_key_id.clone(),
             secret_key: target.secret_access_key.clone(),
+            session_token: target.session_token.clone(),
             region: target.region.clone(),
+            use_minio: target.use_minio,
         }
+    }
+
+    /// Resolve per-request credentials: static keys from the target when
+    /// present and not placeholder-outside-MinIO, else the credential chain
+    /// (instance role). Placeholders outside MinIO are ignored like missing
+    /// keys (NEWPIDASH-204).
+    async fn resolve_credentials(&self) -> Result<pidash_storage::AwsCredentials, S3CallError> {
+        use pidash_storage::{is_placeholder_credentials, CredentialSource};
+        let ak = self.access_key.as_deref().unwrap_or("");
+        let sk = self.secret_key.as_deref().unwrap_or("");
+        let is_ph = is_placeholder_credentials(ak, sk);
+        let has_static = !ak.is_empty() && !sk.is_empty() && !(is_ph && !self.use_minio);
+        if has_static {
+            return Ok(pidash_storage::AwsCredentials {
+                access_key: ak.to_owned(),
+                secret_key: sk.to_owned(),
+                session_token: self.session_token.clone().unwrap_or_default(),
+                expires_at: None,
+            });
+        }
+        // No usable static keys: fall through to the credential chain.
+        let source = CredentialSource::from_env();
+        source
+            .check_static()
+            .map_err(|_| S3CallError::NoCredentials)?;
+        source
+            .resolve()
+            .await
+            .map_err(|_| S3CallError::NoCredentials)
     }
 
     /// Sign and dispatch one request, returning the live response with
@@ -958,16 +1060,13 @@ impl ReqwestS3 {
         body: Vec<u8>,
         send_md5: bool,
     ) -> Result<(reqwest::Response, String), S3CallError> {
-        let (Some(access_key), Some(secret_key)) =
-            (self.access_key.as_deref(), self.secret_key.as_deref())
-        else {
-            return Err(S3CallError::NoCredentials);
-        };
+        let creds = self.resolve_credentials().await?;
         let payload_hash = pidash_storage::sha256_hex(&body);
         let (amz_datetime, date_stamp) = now_stamps();
-        let authorization = sign_s3_request(
-            access_key,
-            secret_key,
+        let authorization = sign_s3_request_with_token(
+            &creds.access_key,
+            &creds.secret_key,
+            &creds.session_token,
             &self.region,
             method.as_str(),
             path,
@@ -988,6 +1087,9 @@ impl ReqwestS3 {
             .header("Authorization", authorization)
             .header("x-amz-date", amz_datetime)
             .header("x-amz-content-sha256", payload_hash);
+        if !creds.session_token.is_empty() {
+            request = request.header("x-amz-security-token", creds.session_token);
+        }
         if send_md5 {
             use base64::Engine as _;
             use md5::Digest;

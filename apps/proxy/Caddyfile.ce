@@ -21,6 +21,13 @@
 
 	reverse_proxy /api/* api:8000
 
+	# Email logo images (NEWPIDASH-376): the frozen Django collectstatic
+	# output is gone, so the templates' /static/logos/* URLs are served
+	# from the web_new bundle (apps/web_new/public/static/logos/). This
+	# must stay above the /static/* rule: the Rust API serves no /static
+	# paths, and first match wins.
+	reverse_proxy /static/logos/* web_new:3000
+
 	reverse_proxy /static/* api:8000
 
 	reverse_proxy /{$BUCKET_NAME}/* pi-dash-minio:9000

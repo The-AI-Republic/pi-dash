@@ -133,7 +133,8 @@
 
 use pidash_compat::py::py_strip;
 use pidash_db::entity::{
-    dev_machine, machine_token, pod, projects, runner, users, workspace_members, workspaces,
+    dev_machine, machine_token, pod, projects, runner, runner_force_refresh, users,
+    workspace_members, workspaces,
 };
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, runner as r_cols, runner_force_refresh as ffr_cols,
@@ -842,8 +843,8 @@ pub async fn count_pod_runners(db: &impl ConnectionTrait, pod_id: Uuid) -> Resul
         .await
 }
 
-/// A reused desktop runner `(id, name, refresh_token_generation)`.
-pub type ReuseHitRow = (Uuid, String, i32);
+/// A reused desktop runner `(id, name, refresh_token_generation, pod_dispatch)`.
+pub type ReuseHitRow = (Uuid, String, i32, String);
 
 /// E7 reuse probe ([`desktop_reuse_probe_sql`]): the live bundled runner
 /// for this machine / owner / pod / workspace, `Meta.ordering`, locked.
@@ -861,6 +862,7 @@ pub async fn desktop_reuse_probe(
             runner::Column::Id,
             runner::Column::Name,
             runner::Column::RefreshTokenGeneration,
+            runner::Column::PodDispatch,
         ])
         .filter(runner::Column::DevMachineId.eq(dev_machine_id))
         .filter(runner::Column::OwnerId.eq(owner_id))
@@ -925,6 +927,11 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
         name: Set(new.name.to_owned()),
         host_label: Set(new.host_label.to_owned()),
         provisioning: Set(new.provisioning.to_owned()),
+        pod_dispatch: Set(if new.provisioning == "desktop_bundled" {
+            "pinned_only".to_owned()
+        } else {
+            "pod_member".to_owned()
+        }),
         visibility: Set(0),
         refresh_token_hash: Set(String::new()),
         refresh_token_fingerprint: Set(String::new()),
@@ -952,6 +959,119 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
     .exec_without_returning(db)
     .await
     .map(drop)
+}
+
+/// `live_pidash_agent_runner_for` (#2910): the machine's live engine runner on
+/// the project, oldest first, optionally locked. Returns `(id, name,
+/// generation, pod_id)`.
+pub struct LiveEngineHit {
+    pub id: Uuid,
+    pub name: String,
+    pub generation: i32,
+    pub pod_id: Uuid,
+}
+
+pub async fn live_pidash_agent_runner_for(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LiveEngineHit>, DbErr> {
+    use pidash_db::entity::{pod, runner};
+    // The machine's live engine runners, oldest first (locked). The
+    // project filter is applied in memory via the pod row: a `JOIN`
+    // alias renders the unaliased `pod.project_id` reference, which
+    // Postgres rejects (`invalid reference to FROM-clause entry`).
+    let rows = runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::Name,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::PodId,
+        ])
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_asc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await?;
+    for (id, name, generation, pod_id) in rows {
+        let pod_row = pod::Entity::find_by_id(pod_id).one(db).await?;
+        if let Some(pod_row) = pod_row {
+            if pod_row.project_id == project_id {
+                return Ok(Some(LiveEngineHit {
+                    id,
+                    name,
+                    generation,
+                    pod_id,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `_taken_names` (#2910): machine live names + every pod runner name
+/// (revoked included), optionally excluding one runner.
+pub async fn taken_names(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    pod_id: Uuid,
+    exclude_runner_id: Option<Uuid>,
+) -> Result<std::collections::HashSet<String>, DbErr> {
+    use pidash_db::entity::runner;
+    let query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Name)
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    sea_orm::Condition::all()
+                        .add(runner::Column::DevMachineId.eq(machine_id))
+                        .add(runner::Column::RevokedAt.is_null()),
+                )
+                .add(runner::Column::PodId.eq(pod_id)),
+        );
+    let rows = query.into_tuple().all(db).await?;
+    let mut names: std::collections::HashSet<String> = rows.into_iter().map(|(n,)| n).collect();
+    if let Some(exclude) = exclude_runner_id {
+        if let Some(row) = runner::Entity::find_by_id(exclude)
+            .select_only()
+            .column(runner::Column::Name)
+            .into_tuple::<String>()
+            .one(db)
+            .await?
+        {
+            names.remove(&row);
+        }
+    }
+    Ok(names)
+}
+
+/// `unique_runner_name` (#2910) over the ORM taken set.
+pub fn unique_runner_name(base: &str, taken: &std::collections::HashSet<String>) -> String {
+    use crate::runner_enroll::pidash_agent_naming::with_suffix;
+    if !taken.contains(base) {
+        return base.to_owned();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = with_suffix(base, n);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// `engine_runner_name` (#2910): base + uniqueness.
+pub fn engine_runner_name_from_base(
+    base: &str,
+    taken: &std::collections::HashSet<String>,
+) -> String {
+    unique_runner_name(base, taken)
 }
 
 /// The session-auth user row `(id, password, is_active)`.
@@ -982,6 +1102,105 @@ pub async fn user_exists(db: &impl ConnectionTrait, user_id: Uuid) -> Result<boo
         .one(db)
         .await?;
     Ok(hit.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM refresh statements (E3-E5)
+// ---------------------------------------------------------------------------
+
+/// The E3 runner facts the refresh endpoint reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct RefreshRunnerRow {
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub dev_machine_id: Option<Uuid>,
+    pub refresh_token_hash: String,
+    pub refresh_token_generation: i32,
+    pub previous_refresh_token_hash: String,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// E3 (`enrollment.py:403-404`): the runner by id, INNER JOINed to its
+/// workspace (`select_related`), `Meta.ordering`, first, `FOR UPDATE`.
+pub async fn refresh_locked_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<RefreshRunnerRow>, DbErr> {
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::DevMachineId,
+            runner::Column::RefreshTokenHash,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::PreviousRefreshTokenHash,
+            runner::Column::RevokedAt,
+        ])
+        .join(JoinType::InnerJoin, runner_to_workspace())
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_model::<RefreshRunnerRow>()
+        .one(db)
+        .await
+}
+
+/// E4 (`enrollment.py:415-425`): the linked dev machine is revoked.
+pub async fn dev_machine_is_revoked(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = dev_machine::Entity::find()
+        .select_only()
+        .column(dev_machine::Column::Id)
+        .filter(dev_machine::Column::Id.eq(dev_machine_id))
+        .filter(dev_machine::Column::RevokedAt.is_not_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// E5 (`enrollment.py:448-460`): rotate to the new refresh token; the
+/// previous hash is the OLD current hash.
+pub async fn rotate_refresh_token(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+    new_hash: &str,
+    new_fingerprint: &str,
+    new_generation: i32,
+    previous_hash: &str,
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::RefreshTokenHash, Expr::value(new_hash))
+        .col_expr(
+            runner::Column::RefreshTokenFingerprint,
+            Expr::value(new_fingerprint),
+        )
+        .col_expr(
+            runner::Column::RefreshTokenGeneration,
+            Expr::value(new_generation),
+        )
+        .col_expr(
+            runner::Column::PreviousRefreshTokenHash,
+            Expr::value(previous_hash),
+        )
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `RunnerForceRefresh.objects.filter(runner=runner).delete()`
+/// (`enrollment.py:467`).
+pub async fn clear_force_refresh(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<(), DbErr> {
+    runner_force_refresh::Entity::delete_many()
+        .filter(runner_force_refresh::Column::RunnerId.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
 }
 
 #[cfg(test)]
@@ -1048,6 +1267,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -1091,6 +1311,15 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -1133,7 +1362,7 @@ mod tests {
         assert_eq!(ffr_cols::TABLE, "runner_force_refresh");
         assert_eq!(WORKSPACES_SELECT_COLUMNS.len(), 14);
         assert_eq!(WORKSPACE_MEMBERS_SELECT_COLUMNS.len(), 17);
-        // Cross-domain projects list (46 cols, id sixth) comes from the
+        // Cross-domain projects list (47 cols, id sixth) comes from the
         // merged app_project port — spot-pin head, id slot and tail.
         assert_eq!(
             &project_cols::COLUMNS[..6],
@@ -1146,9 +1375,10 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 46);
+        assert_eq!(project_cols::COLUMNS.len(), 47);
         assert_eq!(project_cols::COLUMNS[12], "identifier");
         assert_eq!(project_cols::COLUMNS[45], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS[46], "default_work_type");
         assert_eq!(project_cols::TABLE, "projects");
     }
 

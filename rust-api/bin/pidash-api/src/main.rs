@@ -13,14 +13,7 @@
 //! composes the same builders with its own settings, seams, routes and
 //! jobs (see the runbook), so OSS and overlay boot through one code path.
 
-/// Re-export shims for the inventory mirror test (PIDASHCONV-918):
-/// the providers moved to `pidash_jobs::oss_worker`, and only the
-/// `#[cfg(test)]` mirror still addresses them through the binary.
-#[cfg(test)]
-mod execute_seams;
 mod inventory;
-#[cfg(test)]
-mod model_runtime;
 #[cfg(test)]
 mod runner_seams;
 
@@ -47,6 +40,15 @@ enum Mode {
         /// Jobs to run side by side.
         #[arg(long, default_value_t = 4)]
         concurrency: u32,
+        /// Queue label to claim (Phase 2 D3): `celery` for the general
+        /// worker, `cloud_agent` for the dedicated agent worker.
+        #[arg(long, default_value = "celery")]
+        queue: String,
+        /// Disable the beat scheduler loop (Phase 2): agent workers run
+        /// with this so Python beat stays the sole periodic firer while
+        /// coexistence holds. Queue maintenance still runs.
+        #[arg(long)]
+        no_scheduler: bool,
     },
     /// Run a Django management-command port (D-37 ops).
     Ops {
@@ -76,10 +78,12 @@ async fn serve(bind: &str) -> MainResult {
         .await
 }
 
-async fn worker(concurrency: u32) -> MainResult {
+async fn worker(concurrency: u32, queue: String, no_scheduler: bool) -> MainResult {
     pidash_api::startup::WorkerBuilder::from_env()
         .await?
         .with_concurrency(concurrency)
+        .with_queue(queue)
+        .with_scheduler(!no_scheduler)
         .run()
         .await
 }
@@ -114,7 +118,11 @@ fn main() -> MainResult {
         .build()?;
     match cli.mode {
         Mode::Serve { bind } => runtime.block_on(serve(&bind)),
-        Mode::Worker { concurrency } => runtime.block_on(worker(concurrency)),
+        Mode::Worker {
+            concurrency,
+            queue,
+            no_scheduler,
+        } => runtime.block_on(worker(concurrency, queue, no_scheduler)),
         Mode::Ops { command } => runtime.block_on(pidash_ops::run(command)),
         Mode::Routes { json } => {
             if json {
@@ -244,7 +252,7 @@ mod tests {
         let worker =
             Cli::try_parse_from(["pidash-api", "worker", "--concurrency", "2"]).expect("worker");
         match worker.mode {
-            Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
+            Mode::Worker { concurrency, .. } => assert_eq!(concurrency, 2),
             _ => panic!("wrong mode"),
         }
     }
@@ -332,6 +340,21 @@ mod tests {
         );
     }
 
+    /// `check_migrations` is new-system-only (NEWPIDASH-378 fail-fast
+    /// gate, no Django counterpart): still snake_case like the Django
+    /// names, and kebab-case is still rejected.
+    #[test]
+    fn check_migrations_name_is_snake_case() {
+        assert!(matches!(
+            parse_ops(&["check_migrations"]),
+            pidash_ops::OpsCommand::CheckMigrations
+        ));
+        assert!(
+            Cli::try_parse_from(["pidash-api", "ops", "check-migrations"]).is_err(),
+            "kebab-case is not accepted for the new command either"
+        );
+    }
+
     /// `--key` takes an optional value (`nargs="?"`): absent and bare
     /// both yield the full-clear path, like argparse's `None` const.
     #[test]
@@ -406,9 +429,7 @@ mod tests {
             &mut registry,
             pool.clone(),
             std::env::temp_dir(),
-            seed_settings.cloud_agent.clone(),
-            seed_settings.managed_runner.clone(),
-            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            seed_settings.pidash_agent.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
@@ -479,15 +500,15 @@ mod tests {
         }
     }
 
-    /// PIDASHCONV-238: the worker owns all six D-05 task names with live
-    /// providers. Mirrors the `WorkerBuilder` registration: the real
+    /// PIDASHCONV-238: the worker owns all three D-05 task names with
+    /// live providers. Mirrors the `WorkerBuilder` registration: the real
     /// register fns over a lazy pool (no I/O) plus `from_env` providers
     /// (`Keyring::from_env` falls back to an empty secret, so no env is
     /// needed). `github_signals` owns no names of its own — its dispatch
     /// targets the git `post_completion_comment` task.
     #[tokio::test]
     async fn worker_registry_owns_all_d05_local_tasks() {
-        use pidash_jobs::integrations::{git_sync, github_sync};
+        use pidash_jobs::integrations::git_sync;
         use pidash_jobs::worker::Registry;
 
         // `connect_lazy` never touches the network (it needs a Tokio
@@ -504,16 +525,9 @@ mod tests {
             git_sync::LiveProviders::from_env(),
             None,
         );
-        github_sync::register_github_sync_tasks(
-            &mut registry,
-            pool.clone(),
-            github_sync::LiveTransports::from_env(),
-            None,
-        );
 
-        let mut local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
-        local.extend(github_sync::TASK_NAMES);
-        assert_eq!(local.len(), 6, "D-05 local task count drifted");
+        let local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
+        assert_eq!(local.len(), 3, "D-05 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
         }

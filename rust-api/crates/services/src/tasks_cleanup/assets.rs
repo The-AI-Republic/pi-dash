@@ -27,7 +27,9 @@
 //!   the live conversion runs on the re-serialized HTML either way.
 //! * `QuerySet.update(is_uploaded=True)` writes that column only; unlike
 //!   `save()`, it does not bump `updated_at`. `save(update_fields=[...])`
-//!   *does* bump `updated_at` via `auto_now` (`pre_save` in `_save_table`).
+//!   writes only the named columns: `auto_now` is resolved by `pre_save`
+//!   on named fields only, so `updated_at` (and `updated_by`) are left
+//!   untouched (PIDASHCONV-1731).
 
 use serde_json::{Map, Value};
 
@@ -517,10 +519,12 @@ fn json_truthy(value: &Value) -> bool {
 /// projected; the manager scope (`deleted_at IS NULL`) is kept.
 pub const METADATA_SELECT_SQL: &str = "SELECT \"file_assets\".\"asset\" FROM \"file_assets\" WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1)";
 
-/// `asset.save(update_fields=["storage_metadata"])`: the named column plus
-/// `updated_at`, which `auto_now` always includes via `pre_save`.
+/// `asset.save(update_fields=["storage_metadata"])`: the named column
+/// only. `update_fields` restricts the UPDATE to it, so the `auto_now`
+/// `updated_at` (and `updated_by`) are not written (PIDASHCONV-1731).
 /// `$1` is the metadata JSON (`NULL` when S3 answered nothing).
-pub const METADATA_SAVE_SQL: &str = "UPDATE \"file_assets\" SET \"storage_metadata\" = $1, \"updated_at\" = $2 WHERE \"file_assets\".\"id\" = $3";
+pub const METADATA_SAVE_SQL: &str =
+    "UPDATE \"file_assets\" SET \"storage_metadata\" = $1 WHERE \"file_assets\".\"id\" = $2";
 
 /// `model_class.objects.get(id)` for the copy task: live rows only.
 pub fn entity_select_sql(entity: CopyEntity) -> String {

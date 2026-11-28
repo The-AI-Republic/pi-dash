@@ -549,3 +549,5 @@ export { GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./global/quer
 export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
 export { EntityListScreen } from "./list/EntityListScreen.js";
 export type { EmptyStateActions, EntityListScreenProps } from "./list/EntityListScreen.js";
+export { canRunIssue, RUN_POLICY_BLOCKED_REASON, runBlockedReason } from "./runPolicy.js";
+export type { RunPolicyInput } from "./runPolicy.js";

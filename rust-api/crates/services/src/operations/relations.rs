@@ -8,19 +8,24 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
+};
+use sea_query::{Expr, Func};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::{issue_relations, issues, project_members, projects, states, workspaces};
 
 use crate::domain::relations as relation_domain;
 use crate::domain::WriteCtx;
-use crate::read;
 use crate::v1_work_items::queries_sub::actual_relation;
 use crate::v1_work_items::tasks as work_tasks;
 
-use super::common::{db_error, map_read_error, now_utc};
+use super::common::{db_error, now_utc};
 use super::deps::Deps;
 use super::error::{Error, Outcome};
 
@@ -149,26 +154,53 @@ impl ResolvedIssue {
     }
 }
 
-/// The shared visible-pool predicates: `member_project_issues(user, slug)`
+/// `_source`/visible-pool predicates shared by [`visible_pool_query`]
+/// and [`fetch_source`]: the `IssueManager` scope plus triage, archive
+/// and draft guards. The triage guard keeps stateless rows open: `group
+/// IS NULL` is a separate positive arm because `<>` excludes NULLs.
+fn live_manager_scope() -> Condition {
+    Condition::all()
+        .add(issues::Column::DeletedAt.is_null())
+        .add(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .add(issues::Column::ArchivedAt.is_null())
+        .add(projects::Column::ArchivedAt.is_null())
+        .add(issues::Column::IsDraft.eq(false))
+}
+
+/// The shared visible-pool select: `member_project_issues(user, slug)`
 /// (`core/querysets.py:19-30`) — the `IssueManager` scope plus workspace
 /// slug plus an active project membership of the caller. The membership
-/// join carries NO `deleted_at` guard (fixture-verbatim
-/// `member_guard_sql`).
-const VISIBLE_POOL_JOINS: &str = r#"FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")"#;
+/// carries NO `deleted_at` guard (fixture-verbatim `member_guard_sql`);
+/// the raw `EXISTS` becomes an `INNER JOIN` on `project_members` — the
+/// row multiplicity it adds is unobservable: the callers take `.first()`
+/// (identical duplicate rows) or key by `id` in a `HashMap`.
+fn visible_pool_query(slug: &str, user_id: &Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(live_manager_scope())
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+}
 
-const VISIBLE_POOL_WHERE: &str = r#""issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND EXISTS(SELECT 1 FROM "project_members"
-                        WHERE "project_members"."project_id" = "issues"."project_id"
-                          AND "project_members"."member_id" = $2
-                          AND "project_members"."is_active")"#;
+/// One resolved pool issue, in the raw's output columns.
+#[derive(Debug, Clone, FromQueryResult)]
+struct ResolvedRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    identifier: String,
+    sequence_id: i32,
+}
 
 /// `resolve_refs(refs, visible)` (`relations.py:138-163`): each raw ref is
 /// `str(raw or "").strip()`, tried as a UUID first (flexible parse),
@@ -407,19 +439,27 @@ async fn resolve_by_id(
     user_id: &Uuid,
     id: &Uuid,
 ) -> Result<Option<ResolvedIssue>, Error> {
-    let row = sqlx::query(&format!(
-        r#"SELECT "issues"."id", "issues"."workspace_id", "projects"."identifier", "issues"."sequence_id"
-           {VISIBLE_POOL_JOINS}
-           WHERE ({VISIBLE_POOL_WHERE}) AND "issues"."id" = $3
-           ORDER BY "issues"."created_at" DESC LIMIT 1"#
-    ))
-    .bind(slug)
-    .bind(user_id)
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "resolve-ref-id"))?;
-    row.map(decode_resolved).transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = visible_pool_query(slug, user_id)
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(issues::Column::Id.eq(*id))
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_model::<ResolvedRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "resolve-ref-id"))?;
+    Ok(row.map(|row| ResolvedIssue {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
+    }))
 }
 
 /// The identifier attempt (`relations.py:157-158`): `UPPER(identifier) =
@@ -435,30 +475,34 @@ async fn resolve_by_identifier(
     if sequence > i64::from(i32::MAX) || sequence < i64::from(i32::MIN) {
         return Ok(None);
     }
-    let row = sqlx::query(&format!(
-        r#"SELECT "issues"."id", "issues"."workspace_id", "projects"."identifier", "issues"."sequence_id"
-           {VISIBLE_POOL_JOINS}
-           WHERE ({VISIBLE_POOL_WHERE}) AND UPPER("projects"."identifier") = UPPER($3)
-             AND "issues"."sequence_id" = $4
-           ORDER BY "issues"."created_at" DESC LIMIT 1"#
-    ))
-    .bind(slug)
-    .bind(user_id)
-    .bind(ident)
-    .bind(sequence as i32)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "resolve-ref-identifier"))?;
-    row.map(decode_resolved).transpose()
-}
-
-fn decode_resolved(row: sqlx::postgres::PgRow) -> Result<ResolvedIssue, Error> {
-    Ok(ResolvedIssue {
-        id: read::row_uuid(&row, "id").map_err(map_read_error)?,
-        workspace_id: read::row_uuid(&row, "workspace_id").map_err(map_read_error)?,
-        project_identifier: read::row_string(&row, "identifier").map_err(map_read_error)?,
-        sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
-    })
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = visible_pool_query(slug, user_id)
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(
+            Expr::expr(Func::upper(Expr::col((
+                projects::Entity,
+                projects::Column::Identifier,
+            ))))
+            .eq(Func::upper(Expr::val(ident))),
+        )
+        .filter(issues::Column::SequenceId.eq(sequence as i32))
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_model::<ResolvedRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "resolve-ref-identifier"))?;
+    Ok(row.map(|row| ResolvedIssue {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
+    }))
 }
 
 /// `_source` (`views/issue.py:3153-3156`): the manager-scoped issue plus
@@ -478,43 +522,51 @@ impl SourceIssue {
     }
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct SourceRow {
+    id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    identifier: String,
+    sequence_id: i32,
+}
+
 pub async fn fetch_source(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
 ) -> Result<SourceIssue, Error> {
-    let row = sqlx::query(
-        r#"SELECT "issues"."id", "issues"."project_id", "issues"."workspace_id",
-                  "projects"."identifier", "issues"."sequence_id"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND "issues"."project_id" = $2
-             AND "issues"."id" = $3)"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-source"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = issues::Entity::find()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+        ])
+        .column_as(projects::Column::Identifier, "identifier")
+        .filter(live_manager_scope())
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*issue_id))
+        .into_model::<SourceRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "relation-source"))?;
     let Some(row) = row else {
         return Err(Error::NotFound);
     };
     Ok(SourceIssue {
-        id: read::row_uuid(&row, "id").map_err(map_read_error)?,
-        project_id: read::row_uuid(&row, "project_id").map_err(map_read_error)?,
-        workspace_id: read::row_uuid(&row, "workspace_id").map_err(map_read_error)?,
-        project_identifier: read::row_string(&row, "identifier").map_err(map_read_error)?,
-        sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
+        id: row.id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
     })
 }
 
@@ -604,30 +656,52 @@ fn type_from(row: &PairRow, viewpoint_id: &Uuid) -> String {
 
 /// `_pair_rows` (`relations.py:117-120`): live rows between the two ids in
 /// either direction, `Meta.ordering` (`-created_at`).
+#[derive(Debug, Clone, FromQueryResult)]
+struct PairStoredRow {
+    id: Uuid,
+    issue_id: Uuid,
+    related_issue_id: Uuid,
+    relation_type: String,
+}
+
 async fn fetch_pair_rows(pool: &PgPool, a_id: &Uuid, b_id: &Uuid) -> Result<Vec<PairRow>, Error> {
-    let rows = sqlx::query(
-        r#"SELECT "id", "issue_id", "related_issue_id", "relation_type" FROM "issue_relations"
-           WHERE "deleted_at" IS NULL
-             AND (("issue_id" = $1 AND "related_issue_id" = $2)
-               OR ("issue_id" = $2 AND "related_issue_id" = $1))
-           ORDER BY "created_at" DESC"#,
-    )
-    .bind(a_id)
-    .bind(b_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-pair-rows"))?;
-    rows.iter()
-        .map(|row| {
-            Ok(PairRow {
-                id: read::row_uuid(row, "id").map_err(map_read_error)?,
-                issue_id: read::row_uuid(row, "issue_id").map_err(map_read_error)?,
-                related_issue_id: read::row_uuid(row, "related_issue_id")
-                    .map_err(map_read_error)?,
-                relation_type: read::row_string(row, "relation_type").map_err(map_read_error)?,
-            })
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::Id,
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+        ])
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(issue_relations::Column::IssueId.eq(*a_id))
+                        .add(issue_relations::Column::RelatedIssueId.eq(*b_id)),
+                )
+                .add(
+                    Condition::all()
+                        .add(issue_relations::Column::IssueId.eq(*b_id))
+                        .add(issue_relations::Column::RelatedIssueId.eq(*a_id)),
+                ),
+        )
+        .order_by_desc(issue_relations::Column::CreatedAt)
+        .into_model::<PairStoredRow>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "relation-pair-rows"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PairRow {
+            id: row.id,
+            issue_id: row.issue_id,
+            related_issue_id: row.related_issue_id,
+            relation_type: row.relation_type,
         })
-        .collect()
+        .collect())
 }
 
 /// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
@@ -690,26 +764,44 @@ pub async fn grouped_relations(
     user_id: &Uuid,
     source: &SourceIssue,
 ) -> Result<Map<String, Value>, Error> {
-    let rows = sqlx::query(
-        r#"SELECT "issue_id", "related_issue_id", "relation_type" FROM "issue_relations"
-           WHERE "deleted_at" IS NULL
-             AND ("issue_id" = $1 OR "related_issue_id" = $1)
-             AND "workspace_id" = $2
-             AND NOT ("issue_id" = $1 AND "related_issue_id" = $1)"#,
-    )
-    .bind(source.id)
-    .bind(source.workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "grouped-rows"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct RawPair {
+        issue_id: Uuid,
+        related_issue_id: Uuid,
+        relation_type: String,
+    }
+    let rows = issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+        ])
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.eq(source.id))
+                .add(issue_relations::Column::RelatedIssueId.eq(source.id)),
+        )
+        .filter(issue_relations::Column::WorkspaceId.eq(source.workspace_id))
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.ne(source.id))
+                .add(issue_relations::Column::RelatedIssueId.ne(source.id)),
+        )
+        .into_model::<RawPair>()
+        .all(&db)
+        .await
+        .map_err(|error| db_error(error, "grouped-rows"))?;
     let mut other_by_type: HashMap<&str, std::collections::HashSet<Uuid>> = HashMap::new();
     for relation in RELATION_TYPES {
         other_by_type.insert(*relation, std::collections::HashSet::new());
     }
     for row in &rows {
-        let issue_id = read::row_uuid(row, "issue_id").map_err(map_read_error)?;
-        let related_id = read::row_uuid(row, "related_issue_id").map_err(map_read_error)?;
-        let relation_type = read::row_string(row, "relation_type").map_err(map_read_error)?;
+        let issue_id = row.issue_id;
+        let related_id = row.related_issue_id;
+        let relation_type = row.relation_type.clone();
         let other = if issue_id == source.id {
             related_id
         } else {
@@ -733,31 +825,39 @@ pub async fn grouped_relations(
         .collect();
     let mut others: HashMap<Uuid, GroupedItem> = HashMap::new();
     if !wanted.is_empty() {
-        let pool_rows = sqlx::query(&format!(
-            r#"SELECT "issues"."id", "issues"."name", "issues"."sequence_id",
-                      "projects"."identifier" AS "project_identifier",
-                      "states"."name" AS "state_name", "states"."group" AS "state_group"
-               {VISIBLE_POOL_JOINS}
-               WHERE ({VISIBLE_POOL_WHERE})
-                 AND "issues"."id" = ANY($3)
-                 AND "issues"."workspace_id" = $4"#
-        ))
-        .bind(slug)
-        .bind(user_id)
-        .bind(&wanted)
-        .bind(source.workspace_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "grouped-pool"))?;
-        for row in &pool_rows {
+        #[derive(Debug, Clone, FromQueryResult)]
+        struct PoolRow {
+            id: Uuid,
+            name: String,
+            sequence_id: i32,
+            project_identifier: String,
+            state_name: Option<String>,
+            state_group: Option<String>,
+        }
+        let pool_rows = visible_pool_query(slug, user_id)
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::Name,
+                issues::Column::SequenceId,
+            ])
+            .column_as(projects::Column::Identifier, "project_identifier")
+            .column_as(states::Column::Name, "state_name")
+            .column_as(states::Column::Group, "state_group")
+            .filter(issues::Column::Id.is_in(wanted.clone()))
+            .filter(issues::Column::WorkspaceId.eq(source.workspace_id))
+            .into_model::<PoolRow>()
+            .all(&db)
+            .await
+            .map_err(|error| db_error(error, "grouped-pool"))?;
+        for row in pool_rows {
             let item = GroupedItem {
-                id: read::row_uuid(row, "id").map_err(map_read_error)?,
-                project_identifier: read::row_string(row, "project_identifier")
-                    .map_err(map_read_error)?,
-                sequence_id: row.try_get("sequence_id").map_err(|_| Error::ServerError)?,
-                name: read::row_string(row, "name").map_err(map_read_error)?,
-                state_name: read::row_string_opt(row, "state_name").map_err(map_read_error)?,
-                state_group: read::row_string_opt(row, "state_group").map_err(map_read_error)?,
+                id: row.id,
+                project_identifier: row.project_identifier,
+                sequence_id: row.sequence_id,
+                name: row.name,
+                state_name: row.state_name,
+                state_group: row.state_group,
             };
             others.insert(item.id, item);
         }
@@ -851,7 +951,9 @@ async fn insert_relation_row(
         related_issue_id: related_id,
         relation_type: stored,
     };
-    match relation_domain::relate_row_or_nothing(pool, &row).await {
+    match relation_domain::relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(pool), &row)
+        .await
+    {
         Ok(created) => Ok(created),
         Err(error) if is_unique_violation(&error) => Ok(false),
         Err(error) => Err(db_error(error, "relate-insert")),
@@ -1048,7 +1150,7 @@ async fn unrelate_op(
         }
         for row in matching {
             relation_domain::soft_delete_relation_row(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 row.id,
                 *actor_id,
                 now_utc(),
@@ -1323,6 +1425,31 @@ pub async fn unrelate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn visible_pool_joins_and_guards_match_the_manager_scope() {
+        let user = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = visible_pool_query("acme", &user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "issues""#), "{sql}");
+        assert!(sql.contains(r#"LEFT JOIN "states""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "projects""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "project_members""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""project_members"."is_active""#), "{sql}");
+        // No deleted-at guard on the membership (fixture-verbatim).
+        assert!(
+            !sql.contains(r#""project_members"."deleted_at""#),
+            "membership carries no deleted-at guard: {sql}"
+        );
+        // Stateless rows stay visible; triage rows do not.
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+    }
 
     #[test]
     fn relation_type_validation_matrix() {

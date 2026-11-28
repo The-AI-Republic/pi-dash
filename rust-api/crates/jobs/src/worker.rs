@@ -158,11 +158,31 @@ pub struct WorkerConfig {
     pub concurrency: usize,
 }
 
+/// Per-process worker owner (Phase 2, 2.2): `hostname:pid` so a
+/// `run_started` event or a `claimed_by` row names which container
+/// ran it during coexistence, rather than the fixed `pidash-rust`.
+/// Falls back to `pid:pid` when the hostname is unavailable.
+pub fn default_worker_owner() -> String {
+    let hostname = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("HOST").ok())
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| {
+            // Best-effort hostname via /etc/hostname; failure keeps the
+            // owner pid-scoped but still unique per process.
+            std::fs::read_to_string("/etc/hostname")
+                .map(|raw| raw.trim().to_owned())
+                .unwrap_or_else(|_| "pid".to_owned())
+        });
+    format!("{}:{}", hostname, std::process::id())
+}
+
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             queue: DEFAULT_QUEUE.to_owned(),
-            owner: "pidash-rust".to_owned(),
+            owner: default_worker_owner(),
             poll_interval: Duration::from_secs(1),
             concurrency: 4,
         }
@@ -328,15 +348,37 @@ pub async fn run_worker(
         if *shutdown.borrow() {
             break;
         }
+        // Phase 2 (2.5): take the slot before the row. Previously the row
+        // was marked `running` while it waited for a free slot, so a
+        // saturated worker accumulated `running` rows that had never started,
+        // blocking reuse of those runs. With the permit taken first, a
+        // second row stays `queued` until a slot frees — the claim is then
+        // an immediate `running` → dispatch.
+        //
+        // The acquire waits for a slot; shutdown still wins while waiting.
+        let permit = tokio::select! {
+            _ = shutdown.wait_for(|stop| *stop) => break,
+            permit = semaphore.clone().acquire_owned() => {
+                match permit {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!("semaphore closed; stopping worker");
+                        break;
+                    }
+                }
+            }
+        };
         match queue::claim(&pool, &config.queue, &config.owner).await {
             Err(error) => {
                 tracing::warn!(%error, "job claim failed; retrying");
+                drop(permit);
                 tokio::select! {
                     _ = shutdown.wait_for(|stop| *stop) => break,
                     _ = tokio::time::sleep(config.poll_interval) => {}
                 }
             }
             Ok(None) => {
+                drop(permit);
                 if let Some(listener) = listener.as_mut() {
                     tokio::select! {
                         _ = shutdown.wait_for(|stop| *stop) => break,
@@ -355,11 +397,6 @@ pub async fn run_worker(
                 }
             }
             Ok(Some(job)) => {
-                let permit = semaphore
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore never closes");
                 let pool = pool.clone();
                 let registry = registry.clone();
                 // The handle is deliberately unchecked: settlement happens
@@ -574,6 +611,15 @@ mod tests {
         assert_eq!(config.queue, "celery");
         assert_eq!(config.concurrency, 4);
         assert_eq!(config.poll_interval, Duration::from_secs(1));
+        // Phase 2: the default owner is per-process (hostname:pid), not
+        // the fixed `pidash-rust`, so coexistence logs name the container.
+        assert!(
+            config.owner.contains(':'),
+            "owner must be hostname:pid, got {}",
+            config.owner
+        );
+        assert!(!config.owner.is_empty());
+        assert_ne!(config.owner, "pidash-rust");
     }
 
     /// Push-wake pacing (PIDASHCONV-476): an idle worker claims a newly

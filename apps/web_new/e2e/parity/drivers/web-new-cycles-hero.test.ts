@@ -530,6 +530,16 @@ describe("cyclesHeroClickBreakdownEntry", () => {
   });
 });
 
+describe("cyclesHeroTapBreakdownEntryByText", () => {
+  it("clicks the entry carrying the text without waiting for navigation", async () => {
+    const script = new Recorder();
+    await script.driver().cyclesHeroTapBreakdownEntryByText("No assignee");
+    expect(script.callsIncluding("hero-breakdown-entry", "click")).toHaveLength(1);
+    expect(script.callsIncluding("No assignee", "click")).toHaveLength(1);
+    expect(script.waitedUrls).toHaveLength(0);
+  });
+});
+
 describe("cyclesHeroOpenWorkspaceActives", () => {
   it("opens the actives address and waits for the upsell", async () => {
     const script = new Recorder();

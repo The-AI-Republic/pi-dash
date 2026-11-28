@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   descriptionAssetSrc,
+  extractMarkdownSource,
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
@@ -274,6 +275,21 @@ describe("renderableHtml", () => {
       'src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"'
     );
   });
+
+  it("resolves a plain image's rooted asset source through the API origin", () => {
+    const html = renderableHtml(
+      '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/" alt="shot"></p>',
+      (src) => descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"');
+  });
+
+  it("leaves a plain image's non-asset source alone", () => {
+    const html = renderableHtml('<p><img src="/media/a.png" alt="shot"></p>', (src) =>
+      descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="/media/a.png"');
+  });
 });
 
 describe("descriptionAssetSrc", () => {
@@ -306,9 +322,51 @@ describe("descriptionAssetSrc", () => {
       descriptionAssetSrc("asset-1", { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test/" })
     ).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
   });
+
+  it("joins a rooted asset source to the API origin when one is given", () => {
+    expect(
+      descriptionAssetSrc("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/", {
+        workspaceSlug: "acme",
+        projectId: "p-1",
+        apiBaseUrl: "https://api.test",
+      })
+    ).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+  });
+
+  it("leaves a rooted asset source alone without an API origin", () => {
+    expect(
+      descriptionAssetSrc("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/", {
+        workspaceSlug: "acme",
+        projectId: "p-1",
+      })
+    ).toBe("/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+  });
+
+  it("leaves a rooted non-asset source alone even with an API origin", () => {
+    expect(
+      descriptionAssetSrc("/media/a.png", { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    ).toBe("/media/a.png");
+  });
 });
 
 describe("prepareEditorHtml", () => {
+  it("paints a plain image's rooted asset source through the resolver", () => {
+    const html = prepareEditorHtml(
+      '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/" alt="shot"></p>',
+      (src) => descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain('src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"');
+  });
+
+  it("leaves a plain image's non-asset source alone in the editor", () => {
+    const stored = '<p><img src="/media/a.png" alt="shot"></p>';
+    expect(
+      prepareEditorHtml(stored, (src) =>
+        descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+      )
+    ).toContain('src="/media/a.png"');
+  });
+
   it("paints the resolved source and keeps the stored id", () => {
     const html = prepareEditorHtml(
       '<p><image-component src="asset-1" width="200"></image-component></p>',
@@ -444,5 +502,51 @@ describe("entity preview without any label", () => {
     const html = renderableHtml('<entity-reference-component entity_name="issue"></entity-reference-component>');
     expect(html).toContain('class="page-entity-preview"');
     expect(html).toContain('data-entity-name="issue"');
+  });
+});
+
+describe("extractMarkdownSource (NEWPIDASH-232)", () => {
+  it("extracts markdown from a <p>-wrapped raw markdown body", () => {
+    const md = extractMarkdownSource("<p>## Summary</p><p>Hello <strong>world</strong></p>");
+    // Proper HTML with <strong> should not be treated as markdown-wrapped
+    expect(md).toBeNull();
+  });
+
+  it("extracts a heading wrapped in <p>", () => {
+    const source = extractMarkdownSource("<p>## Summary</p><p>Hello **world**</p>");
+    expect(source).toBe("## Summary\n\nHello **world**");
+  });
+
+  it("extracts lists and code fences", () => {
+    const source = extractMarkdownSource("<p>- item one<br>- item two</p><p>```python<br>print(1)<br>```</p>");
+    expect(source).toBe("- item one\n- item two\n\n```python\nprint(1)\n```");
+  });
+
+  it("extracts tables and links", () => {
+    const source = extractMarkdownSource(
+      "<p>| A | B |<br>|---|---|<br>| 1 | 2 |</p><p>[link](https://example.com)</p>"
+    );
+    expect(source).toContain("| A | B |");
+    expect(source).toContain("[link](https://example.com)");
+  });
+
+  it("extracts bold/italic and inline code", () => {
+    const source = extractMarkdownSource("<p>This is **bold** and *italic* and `code`</p>");
+    expect(source).toContain("**bold**");
+    expect(source).toContain("*italic*");
+    expect(source).toContain("`code`");
+  });
+
+  it("returns null for proper HTML that already has formatting", () => {
+    expect(extractMarkdownSource("<h2>Title</h2><p>Hello <strong>world</strong></p>")).toBeNull();
+    expect(extractMarkdownSource("<ul><li>one</li></ul>")).toBeNull();
+    expect(extractMarkdownSource("<p>Hello</p>")).toBeNull();
+    expect(extractMarkdownSource("<p></p>")).toBeNull();
+    expect(extractMarkdownSource("")).toBeNull();
+  });
+
+  it("returns null when no DOMParser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(extractMarkdownSource("<p>## hi</p>")).toBeNull();
   });
 });

@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
-    Config, CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection,
-    RunnerConfig, WorkspaceSection,
+    AgentKind, AgentSection, AntigravitySection, ApprovalPolicySection, AuthEvent,
+    AuthEventAccount, AuthEventKind, AuthEventReason, ClaudeCodeSection, CodexSection, Config,
+    CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
+    WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -25,7 +26,28 @@ use uuid::Uuid;
 /// cloud dropdown. Passed verbatim to codex `turn/start`; the exact set a
 /// given codex build honours can vary, so an unrecognized value here is a
 /// soft warning, not a hard error.
-const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+pub(crate) const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// Claude Code effort levels, passed verbatim as `claude --effort` (the set
+/// `claude --help` lists).
+pub(crate) const CLAUDE_CODE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Muse Code reasoning-effort tiers, passed verbatim as `muse exec
+/// --reasoning-effort` (the set `muse exec --help` lists).
+pub(crate) const MUSE_CODE_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// The reasoning-effort tiers `kind` accepts, or `None` when the agent has no
+/// effort knob. Codex, Claude Code and Muse Code are the agents that take one.
+pub(crate) fn efforts_for_agent(kind: AgentKind) -> Option<&'static [&'static str]> {
+    match kind {
+        AgentKind::Codex => Some(CODEX_EFFORTS),
+        AgentKind::ClaudeCode => Some(CLAUDE_CODE_EFFORTS),
+        AgentKind::MuseCode => Some(MUSE_CODE_EFFORTS),
+        _ => None,
+    }
+}
 
 /// Print an orange (256-color 208) warning to stderr. Used when a
 /// `--model` / `--reasoning-effort` value can't be applied to the chosen
@@ -59,7 +81,7 @@ fn warn_model_fallback(msg: &str) {
 /// A bare dash-terminated prefix (`"claude-"`, `"gpt-"`) is rejected — it
 /// is an incomplete slug, not a model — so it can't be written as a bogus
 /// `model_default`.
-fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
+pub(crate) fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
     // `prefix` followed by at least one more character.
     let has = |prefix: &str| m.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty());
@@ -70,12 +92,18 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
         AgentKind::Codex => {
             has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex")
         }
-        // Cursor, OpenClaw, Grok, and Muse Code pull their model slug from
-        // their own provider's catalog; accept any non-empty value and let the
-        // agent reject unknown slugs.
-        AgentKind::CursorAgent | AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => {
-            !m.is_empty()
-        }
+        // Cursor, OpenClaw, Grok, Antigravity, and Muse Code pull their model
+        // slug from their own provider's catalog; accept any non-empty value
+        // and let the agent reject unknown slugs. Antigravity additionally
+        // matches the slug against its advertised session options at run
+        // time and falls back to the server default on a miss.
+        AgentKind::CursorAgent
+        | AgentKind::OpenClaw
+        | AgentKind::Grok
+        | AgentKind::Antigravity
+        | AgentKind::MuseCode => !m.is_empty(),
+        // The engine's model comes from the server's profile (design §4.3).
+        AgentKind::PidashAgent => false,
     }
 }
 
@@ -95,6 +123,7 @@ pub fn agent_sections_for(
     CursorAgentSection,
     OpenClawSection,
     GrokSection,
+    AntigravitySection,
     MuseCodeSection,
 ) {
     let model = model.map(str::trim).filter(|s| !s.is_empty());
@@ -116,36 +145,38 @@ pub fn agent_sections_for(
         }
     };
 
-    // Reasoning effort only applies to Codex, and only alongside an explicit
-    // model — it is meaningless on its own (see `CodexSection::effort_default`),
-    // so it is dropped when the model was absent or rejected above.
-    let effort = match (agent_kind, effort) {
+    // Reasoning effort applies to Codex, Claude Code and Muse Code only, and only alongside
+    // an explicit model: the web picker pairs every tier with a model, so an
+    // effort on the agent default could not be shown or kept there. It is
+    // dropped when the model was absent or rejected above.
+    let effort = match (efforts_for_agent(agent_kind), effort) {
         (_, None) => None,
-        (AgentKind::Codex, Some(e))
-            if !CODEX_EFFORTS.contains(&e.to_ascii_lowercase().as_str()) =>
-        {
+        (None, Some(_)) => {
             warn_model_fallback(&format!(
-                "reasoning effort {e:?} is not a recognized Codex tier \
-                 (expected one of {}); using the model's default effort.",
-                CODEX_EFFORTS.join(", ")
-            ));
-            None
-        }
-        (AgentKind::Codex, Some(e)) if model.is_some() => Some(e.to_ascii_lowercase()),
-        (AgentKind::Codex, Some(_)) => {
-            // Valid tier, but no applicable model to attach it to.
-            warn_model_fallback(
-                "--reasoning-effort needs an applicable --model for the codex agent; ignoring it.",
-            );
-            None
-        }
-        (_, Some(_)) => {
-            warn_model_fallback(&format!(
-                "--reasoning-effort only applies to the codex agent, not {}; ignoring it.",
+                "--reasoning-effort only applies to the codex, claude-code and muse-code \
+                 agents, not {}; ignoring it.",
                 agent_kind.display_name()
             ));
             None
         }
+        (Some(tiers), Some(e)) if !tiers.contains(&e.to_ascii_lowercase().as_str()) => {
+            warn_model_fallback(&format!(
+                "reasoning effort {e:?} is not a recognized {} tier \
+                 (expected one of {}); using the model's default effort.",
+                agent_kind.display_name(),
+                tiers.join(", ")
+            ));
+            None
+        }
+        (Some(_), Some(_)) if model.is_none() => {
+            // Valid tier, but no applicable model to attach it to.
+            warn_model_fallback(&format!(
+                "--reasoning-effort needs an applicable --model for the {} agent; ignoring it.",
+                agent_kind.display_name()
+            ));
+            None
+        }
+        (Some(_), Some(e)) => Some(e.to_ascii_lowercase()),
     };
 
     let mut codex = CodexSection::default();
@@ -153,19 +184,36 @@ pub fn agent_sections_for(
     let mut cursor_agent = CursorAgentSection::default();
     let mut openclaw = OpenClawSection::default();
     let mut grok = GrokSection::default();
+    let mut antigravity = AntigravitySection::default();
     let mut muse_code = MuseCodeSection::default();
     match agent_kind {
         AgentKind::Codex => {
             codex.model_default = model;
             codex.effort_default = effort;
         }
-        AgentKind::ClaudeCode => claude_code.model_default = model,
+        AgentKind::ClaudeCode => {
+            claude_code.model_default = model;
+            claude_code.effort_default = effort;
+        }
         AgentKind::CursorAgent => cursor_agent.model_default = model,
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
-        AgentKind::MuseCode => muse_code.model_default = model,
+        AgentKind::Antigravity => antigravity.model_default = model,
+        AgentKind::MuseCode => {
+            muse_code.model_default = model;
+            muse_code.effort_default = effort;
+        }
+        AgentKind::PidashAgent => {}
     }
-    (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
+    (
+        codex,
+        claude_code,
+        cursor_agent,
+        openclaw,
+        grok,
+        antigravity,
+        muse_code,
+    )
 }
 
 /// Read the user's CLI token from `[cli].token` in `config.toml`.
@@ -201,6 +249,9 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
         file::load_config(paths)?
     } else {
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
@@ -210,6 +261,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -231,15 +283,268 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
-    let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
-    let preserved_default_project = cfg.cli.as_ref().and_then(|c| c.default_project.clone());
-    cfg.cli = Some(CliSection {
-        token: Some(token.to_string()),
-        workspace_slug: preserved_workspace,
-        default_project: preserved_default_project,
-    });
+    let mut cli = cfg.cli.take().unwrap_or_default();
+    cli.token = Some(token.to_string());
+    cfg.cli = Some(cli);
     file::write_config(paths, &cfg)?;
     Ok(())
+}
+
+/// Store the dev-machine token `token` for workspace `slug`, under the
+/// config lock (see [`CliSection::set_workspace_token`] for how `as_default`
+/// decides between refreshing the default workspace and adding one).
+/// Bootstraps `config.toml` with `[daemon].cloud_url` on a fresh host and
+/// applies the same cloud-mismatch guard as [`write_cli_token`].
+pub fn store_workspace_token(
+    paths: &Paths,
+    cloud_url: &str,
+    slug: &str,
+    token: &str,
+    as_default: bool,
+    force: bool,
+) -> Result<Config> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(cloud_url)),
+        |cfg| {
+            apply_cloud_binding(cfg, cloud_url, force)?;
+            let mut cli = cfg.cli.take().unwrap_or_default();
+            cli.set_workspace_token(slug, token, as_default);
+            cfg.cli = Some(cli);
+            Ok(())
+        },
+    )
+}
+
+/// Everything one `pidash auth login` stores, in one locked config write
+/// (desktop_unified_signin §6.1): the workspace token, the engine credential
+/// when the server issued one, the account, and the `signed_in` event.
+pub struct SignIn<'a> {
+    pub cloud_url: &'a str,
+    pub slug: &'a str,
+    pub token: &'a str,
+    pub as_default: bool,
+    pub force: bool,
+    pub engine: Option<(
+        &'a crate::pidash_agent::api::IssuedPidashAgentCredential,
+        crate::config::schema::EngineSignInState,
+    )>,
+    pub email: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+}
+
+/// Store a sign-in ([`SignIn`]) and its `signed_in` event together, so the
+/// credentials and the event never tear apart.
+pub fn store_sign_in(paths: &Paths, sign_in: &SignIn<'_>) -> Result<Config> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(sign_in.cloud_url)),
+        |cfg| {
+            apply_cloud_binding(cfg, sign_in.cloud_url, sign_in.force)?;
+            let mut cli = cfg.cli.take().unwrap_or_default();
+            cli.set_workspace_token(sign_in.slug, sign_in.token, sign_in.as_default);
+            if let Some((credential, state)) = sign_in.engine {
+                cli.engine_credential = Some(crate::config::schema::PidashAgentCredential {
+                    token: credential.token.clone(),
+                    expires_at: credential.expires_at,
+                });
+                cli.engine_sign_in_state = Some(state);
+            }
+            if let Some(email) = sign_in.email {
+                cli.account_email = Some(email.to_string());
+            }
+            if let Some(user_id) = sign_in.user_id {
+                cli.account_user_id = Some(user_id.to_string());
+            }
+            cfg.cli = Some(cli);
+            apply_auth_event(
+                cfg,
+                &AuthEventDraft {
+                    kind: AuthEventKind::SignedIn,
+                    reason: None,
+                    email: sign_in.email.map(str::to_string),
+                    user_id: sign_in.user_id.map(str::to_string),
+                    cloud_url: sign_in.cloud_url.to_string(),
+                },
+            );
+            Ok(())
+        },
+    )
+}
+
+/// Refuse a sign-in to another cloud than the one this computer is bound
+/// to, unless `force` — without writing anything, so a login can check it
+/// before it signs the current account out. [`bind_cloud`] repeats the
+/// check under the config lock.
+pub fn check_cloud_binding(paths: &Paths, cloud_url: &str, force: bool) -> Result<()> {
+    let Ok(Some(mut cfg)) = file::load_config_opt(paths) else {
+        return Ok(());
+    };
+    apply_cloud_binding(&mut cfg, cloud_url, force)
+}
+
+/// Make sure `config.toml` exists and is bound to `cloud_url`, before a
+/// login asks the user to approve anything. A different cloud is refused
+/// unless `force`, which rebinds and drops the old cloud's tokens.
+pub fn bind_cloud(paths: &Paths, cloud_url: &str, force: bool) -> Result<()> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(cloud_url)),
+        |cfg| apply_cloud_binding(cfg, cloud_url, force),
+    )?;
+    Ok(())
+}
+
+fn bootstrap_config(cloud_url: &str) -> Config {
+    Config {
+        engine: Default::default(),
+        auth: Default::default(),
+        auth_event: None,
+        version: 2,
+        daemon: DaemonConfig {
+            cloud_url: cloud_url.to_string(),
+            ..DaemonConfig::default()
+        },
+        runners: vec![],
+        cli: None,
+    }
+}
+
+fn apply_cloud_binding(cfg: &mut Config, cloud_url: &str, force: bool) -> Result<()> {
+    if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
+        if !force {
+            anyhow::bail!(
+                "this host is already enrolled with cloud {} — refusing to sign in to a different cloud {} (pass --force to re-enroll against the new cloud)",
+                cfg.daemon.cloud_url,
+                cloud_url
+            );
+        }
+        cfg.daemon.cloud_url = cloud_url.to_string();
+        // Tokens of the old cloud are useless against the new one.
+        if let Some(cli) = cfg.cli.as_mut() {
+            cli.clear_all_tokens();
+        }
+    }
+    if cfg.daemon.cloud_url.is_empty() {
+        cfg.daemon.cloud_url = cloud_url.to_string();
+    }
+    Ok(())
+}
+
+/// Record the signed-in account (`pidash auth login`), for `Hello`.
+pub fn store_account(paths: &Paths, email: Option<&str>, user_id: Option<&str>) -> Result<()> {
+    if email.is_none() && user_id.is_none() {
+        return Ok(());
+    }
+    file::mutate_config(paths, |cfg| {
+        let mut cli = cfg.cli.take().unwrap_or_default();
+        if let Some(email) = email {
+            cli.account_email = Some(email.to_string());
+        }
+        if let Some(user_id) = user_id {
+            cli.account_user_id = Some(user_id.to_string());
+        }
+        cfg.cli = Some(cli);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Is `email`/`user_id` the account this computer is signed in as, compared
+/// case-insensitively by e-mail (the user id decides when both have one)?
+/// A config that never recorded an account counts as the same account
+/// rather than locking the user out.
+pub fn same_account(
+    email: Option<&str>,
+    user_id: Option<&str>,
+    stored_email: &Option<String>,
+    stored_id: &Option<String>,
+) -> bool {
+    if let (Some(want), Some(have)) = (
+        user_id.filter(|s| !s.is_empty()),
+        stored_id.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        return want == have;
+    }
+    match (
+        email.filter(|s| !s.is_empty()),
+        stored_email.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(want), Some(have)) => want.trim().eq_ignore_ascii_case(have.trim()),
+        _ => true,
+    }
+}
+
+/// One sign-in event, to record (desktop_unified_signin §6.1). `reason`
+/// is only for `signed_out`.
+#[derive(Debug, Clone)]
+pub struct AuthEventDraft {
+    pub kind: AuthEventKind,
+    pub reason: Option<AuthEventReason>,
+    pub email: Option<String>,
+    pub user_id: Option<String>,
+    pub cloud_url: String,
+}
+
+/// Record one sign-in event on `cfg`: `seq` only increases on this
+/// computer. Applied inside the same config write as the credentials it
+/// describes, so the two never tear apart (design §6.1).
+pub fn apply_auth_event(cfg: &mut Config, draft: &AuthEventDraft) {
+    let seq = cfg.auth_event.as_ref().map(|e| e.seq + 1).unwrap_or(1);
+    cfg.auth_event = Some(AuthEvent {
+        seq,
+        kind: draft.kind,
+        reason: draft.reason,
+        account: Some(AuthEventAccount {
+            user_id: draft.user_id.clone(),
+            email: draft.email.clone(),
+            cloud_url: draft.cloud_url.clone(),
+        }),
+        at: chrono::Utc::now(),
+    });
+}
+
+/// Append one sign-in event under the config lock (the login side; the
+/// logout side folds it into the credential clear below).
+pub fn record_auth_event(
+    paths: &Paths,
+    kind: AuthEventKind,
+    reason: Option<AuthEventReason>,
+    email: Option<&str>,
+    user_id: Option<&str>,
+    cloud_url: &str,
+) -> Result<()> {
+    if !paths.config_path().exists() {
+        return Ok(());
+    }
+    file::mutate_config(paths, |cfg| {
+        apply_auth_event(
+            cfg,
+            &AuthEventDraft {
+                kind,
+                reason,
+                email: email.map(str::to_string),
+                user_id: user_id.map(str::to_string),
+                cloud_url: cloud_url.to_string(),
+            },
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The token for workspace `slug` (`None` = the default workspace), as
+/// [`CliSection::token_for_workspace`] picks it.
+pub fn load_workspace_token(paths: &Paths, slug: Option<&str>) -> Result<Option<String>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = file::load_config(paths)?;
+    Ok(cfg
+        .cli
+        .as_ref()
+        .and_then(|c| c.token_for_workspace(slug))
+        .map(str::to_string))
 }
 
 /// Return the stable cloud identity for this dev machine, minting and
@@ -312,19 +617,69 @@ pub fn write_cli_default_project(paths: &Paths, project: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clear `[cli].token` from `config.toml`. Used by `pidash auth logout`.
+/// Clear every workspace token (`[cli].token` and `[[cli.workspaces]]`) from
+/// `config.toml`. Used by `pidash auth logout`.
 /// Leaves `[[runner]]` blocks untouched so the daemon keeps running
-/// under its own identity. No-op if no config exists.
-pub fn clear_cli_token(paths: &Paths) -> Result<()> {
+/// under its own identity. No-op if no config exists. When `event` is
+/// given, the sign-in event is recorded in the same write (design §6.1).
+pub fn clear_cli_token(paths: &Paths, event: Option<&AuthEventDraft>) -> Result<()> {
     if !paths.config_path().exists() {
         return Ok(());
     }
-    let mut cfg = file::load_config(paths)?;
-    if let Some(ref mut cli) = cfg.cli {
-        cli.token = None;
-    }
-    file::write_config(paths, &cfg)?;
+    file::mutate_config(paths, |cfg| {
+        if let Some(ref mut cli) = cfg.cli {
+            cli.clear_all_tokens();
+        }
+        if let Some(draft) = event {
+            apply_auth_event(cfg, draft);
+        }
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// Store (or with `None`, forget) the machine's engine credential and record
+/// the engine sign-in state, under the config lock. The secret lands where
+/// `[auth] credentials_store` says.
+pub fn store_engine_credential(
+    paths: &Paths,
+    credential: Option<&crate::pidash_agent::api::IssuedPidashAgentCredential>,
+    state: crate::config::schema::EngineSignInState,
+) -> Result<Config> {
+    file::mutate_config(paths, |cfg| {
+        let cli = cfg.cli.get_or_insert_with(Default::default);
+        cli.engine_credential = credential.map(|c| crate::config::schema::PidashAgentCredential {
+            token: c.token.clone(),
+            expires_at: c.expires_at,
+        });
+        cli.engine_sign_in_state = Some(state);
+        Ok(())
+    })
+}
+
+/// Forget one workspace's token (`pidash auth logout --workspace <slug>`).
+/// Returns whether the workspace had a token. When `event` is given, the
+/// sign-in event is recorded in the same write (the last workspace's
+/// logout, design §6.1).
+pub fn clear_workspace_token(
+    paths: &Paths,
+    slug: &str,
+    event: Option<&AuthEventDraft>,
+) -> Result<bool> {
+    if !paths.config_path().exists() {
+        return Ok(false);
+    }
+    let mut removed = false;
+    file::mutate_config(paths, |cfg| {
+        if let Some(ref mut cli) = cfg.cli {
+            removed = cli.remove_workspace_token(slug);
+        }
+        if let Some(draft) = event {
+            apply_auth_event(cfg, draft);
+        }
+        Ok(())
+    })?;
+    Ok(removed)
 }
 
 /// Result of applying a mint locally: the new `RunnerConfig` block and
@@ -334,6 +689,63 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 pub struct AppliedRunner {
     pub runner: RunnerConfig,
     pub is_first_runner: bool,
+    /// The config already held a block with this `runner_id` before this
+    /// call. The server answers a repeated create (same machine and
+    /// project for the engine) with the runner it already has, so this is
+    /// a successful no-op: the existing block is kept as it was.
+    pub already_present: bool,
+}
+
+/// Attached (as context) to an [`apply_enroll_response`] error when a
+/// block with the response's `runner_id` was already in the config. The
+/// runner existed before this call, so a caller must not roll it back:
+/// stripping the block or deleting the server row would remove a runner
+/// that was working. See [`may_roll_back`].
+#[derive(Debug)]
+pub struct KeptExistingRunner;
+
+impl std::fmt::Display for KeptExistingRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this runner was already on this computer; it was left in place")
+    }
+}
+
+/// Whether a caller may roll back (strip the `[[runner]]` block, delete
+/// the server row) after `err` from [`apply_enroll_response`]. False when
+/// the runner existed before the call.
+pub fn may_roll_back(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<KeptExistingRunner>().is_none()
+}
+
+/// The runner ids in the config right now, read before a create so a later
+/// rollback can tell a runner this call made from one that was already
+/// here. An unreadable config gives an empty set.
+pub fn runner_ids_before_create(paths: &Paths) -> std::collections::HashSet<Uuid> {
+    file::load_config(paths)
+        .map(|cfg| cfg.runners.iter().map(|r| r.runner_id).collect())
+        .unwrap_or_default()
+}
+
+/// Whether this call made the runner in `resp`, so a local failure may
+/// strip its block and delete its server row. False when the server says
+/// it returned a runner it already had (`created: false`) or the config
+/// held the id before the create: rolling back would remove a runner that
+/// is working here, or one that lives on after a local sign-out.
+pub fn created_by_this_call(
+    resp: &EnrollResponse,
+    before: &std::collections::HashSet<Uuid>,
+) -> bool {
+    resp.created.unwrap_or(true) && !before.contains(&resp.runner_id)
+}
+
+/// [`may_roll_back`] and [`created_by_this_call`] together: the one check
+/// every create path makes before it rolls back after a local failure.
+pub fn may_roll_back_create(
+    err: &anyhow::Error,
+    resp: &EnrollResponse,
+    before: &std::collections::HashSet<Uuid>,
+) -> bool {
+    may_roll_back(err) && created_by_this_call(resp, before)
 }
 
 #[derive(Debug, Clone)]
@@ -422,7 +834,7 @@ pub async fn apply_enroll_response(
         )
     });
 
-    let (codex, claude_code, cursor_agent, openclaw, grok, muse_code) =
+    let (codex, claude_code, cursor_agent, openclaw, grok, antigravity, muse_code) =
         agent_sections_for(options.agent_kind, options.model, options.reasoning_effort);
     let new_runner = RunnerConfig {
         name: resp.runner_name.clone(),
@@ -439,6 +851,7 @@ pub async fn apply_enroll_response(
         cursor_agent,
         openclaw,
         grok,
+        antigravity,
         muse_code,
         approval_policy: ApprovalPolicySection::default(),
     };
@@ -449,6 +862,9 @@ pub async fn apply_enroll_response(
     let bootstrap_cloud_url = cloud_url.to_string();
     let init_cfg = move || {
         Some(Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),
@@ -458,6 +874,7 @@ pub async fn apply_enroll_response(
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -473,6 +890,7 @@ pub async fn apply_enroll_response(
     let new_runner_for_closure = new_runner.clone();
     let runner_id = new_runner.runner_id;
     let mut is_first_runner = false;
+    let mut already_present = false;
     let cfg_after = file::mutate_config_or_init(paths, init_cfg, |cfg| {
         if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
             anyhow::bail!(
@@ -484,18 +902,81 @@ pub async fn apply_enroll_response(
         if cfg.daemon.cloud_url.is_empty() {
             cfg.daemon.cloud_url = cloud_url.to_string();
         }
+        // A repeated create for a runner this host already has (the server
+        // returns the existing runner_id, e.g. two engine adds for one
+        // project): keep the block that is there and succeed.
+        if cfg
+            .runners
+            .iter()
+            .any(|r| r.runner_id == new_runner_for_closure.runner_id)
+        {
+            already_present = true;
+            return Ok(());
+        }
+        // One engine runner per machine and project (design §5). The
+        // caller checked before enrolling, but outside this lock: two adds
+        // at the same time both pass that check. (The runner cap is checked
+        // by `Config::validate` on this same write.)
+        if new_runner_for_closure.agent.kind == AgentKind::PidashAgent
+            && let Some(existing) = cfg.runners.iter().find(|r| {
+                r.runner_id != new_runner_for_closure.runner_id
+                    && r.agent.kind == AgentKind::PidashAgent
+                    && r.workspace_slug == new_runner_for_closure.workspace_slug
+                    && r.project_slug.as_deref().is_some_and(|p| {
+                        new_runner_for_closure
+                            .project_slug
+                            .as_deref()
+                            .is_some_and(|q| p.eq_ignore_ascii_case(q))
+                    })
+            })
+        {
+            anyhow::bail!(
+                "the Pi Dash Agent is already on for {} in {} (runner {})",
+                existing.project_slug.as_deref().unwrap_or_default(),
+                existing.workspace_slug.as_deref().unwrap_or_default(),
+                existing.name
+            );
+        }
         is_first_runner = cfg.runners.is_empty();
         cfg.runners.push(new_runner_for_closure);
         Ok(())
-    })
-    .context("persisting [[runner]] block under config lock")?;
+    });
+    let cfg_after = match cfg_after {
+        Ok(cfg) => cfg,
+        Err(e) if already_present => {
+            return Err(e
+                .context(KeptExistingRunner)
+                .context("persisting [[runner]] block under config lock"));
+        }
+        Err(e) => return Err(e.context("persisting [[runner]] block under config lock")),
+    };
+    // A runner added again is no longer one the user removed locally.
+    crate::pidash_agent::tombstones::forget(paths, runner_id);
     let new_runner = cfg_after
         .runners
         .iter()
         .find(|runner| runner.runner_id == runner_id)
         .cloned()
         .unwrap_or(new_runner);
+    let applied = AppliedRunner {
+        runner: new_runner,
+        is_first_runner,
+        already_present,
+    };
+    match write_enroll_credentials(paths, resp, cloud_url).await {
+        Ok(()) => Ok(applied),
+        Err(e) if already_present => Err(e.context(KeptExistingRunner)),
+        Err(e) => Err(e),
+    }
+}
 
+/// The credential half of [`apply_enroll_response`], after the block is in
+/// the config.
+async fn write_enroll_credentials(
+    paths: &Paths,
+    resp: &EnrollResponse,
+    cloud_url: &str,
+) -> Result<()> {
     // Credentials write happens AFTER config so a config-write failure
     // (cloud-URL mismatch, validation error, IO) doesn't leave an orphan
     // per-runner credentials file pointing at a runner the supervisor
@@ -512,12 +993,31 @@ pub async fn apply_enroll_response(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
     {
-        write_cli_token(paths, cloud_url, machine_token, false)
-            .context("writing shared dev-machine token to [cli].token")?;
+        // The token belongs to the runner's workspace (design §4.9): store
+        // it in that workspace's slot, never over another workspace's
+        // default `[cli].token`.
+        if resp.workspace_slug.trim().is_empty() {
+            write_cli_token(paths, cloud_url, machine_token, false)
+                .context("writing shared dev-machine token to [cli].token")?;
+        } else {
+            store_workspace_token(
+                paths,
+                cloud_url,
+                &resp.workspace_slug,
+                machine_token,
+                false,
+                false,
+            )
+            .context("writing the workspace's dev-machine token")?;
+        }
     }
     if resp.refresh_token.trim().is_empty() {
-        let has_machine_token = load_cli_token(paths)?
-            .as_deref()
+        let workspace =
+            (!resp.workspace_slug.trim().is_empty()).then_some(resp.workspace_slug.as_str());
+        let has_machine_token = file::load_config(paths)?
+            .cli
+            .as_ref()
+            .and_then(|cli| cli.token_for_workspace(workspace))
             .map(|token| token.starts_with("mt_"))
             .unwrap_or(false);
         if !has_machine_token {
@@ -525,10 +1025,7 @@ pub async fn apply_enroll_response(
                 "cloud did not return per-runner credentials and no dev-machine token is configured"
             );
         }
-        return Ok(AppliedRunner {
-            runner: new_runner,
-            is_first_runner,
-        });
+        return Ok(());
     }
     write_runner_credentials(
         runner_paths.credentials_path(),
@@ -541,11 +1038,7 @@ pub async fn apply_enroll_response(
     )
     .await
     .context("writing per-runner credentials failed")?;
-
-    Ok(AppliedRunner {
-        runner: new_runner,
-        is_first_runner,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -557,7 +1050,7 @@ mod tests {
 
     #[test]
     fn model_routes_to_selected_agent_section() {
-        let (codex, claude, cursor, openclaw, _, _) =
+        let (codex, claude, cursor, openclaw, _, _, _) =
             agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), None);
         assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(codex.model_default, None);
@@ -567,7 +1060,7 @@ mod tests {
 
     #[test]
     fn codex_model_and_effort_are_applied_together() {
-        let (codex, _, _, _, _, _) =
+        let (codex, _, _, _, _, _, _) =
             agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("High"));
         assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
         // Effort is normalized to lowercase.
@@ -579,22 +1072,49 @@ mod tests {
         // The user's example: a Codex model handed to the Claude agent.
         // Non-fatal — the model is dropped (warning printed) and the
         // section is left at its default (None).
-        let (_, claude, _, _, _, _) =
+        let (_, claude, _, _, _, _, _) =
             agent_sections_for(AgentKind::ClaudeCode, Some("gpt-5.5"), None);
         assert_eq!(claude.model_default, None);
     }
 
     #[test]
-    fn effort_ignored_for_non_codex_agents() {
-        let (_, claude, _, _, _, _) =
-            agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), Some("high"));
-        // Model still applies; effort has no home on the claude section.
+    fn effort_ignored_for_agents_without_one() {
+        let (_, _, _, _, grok, _, _) =
+            agent_sections_for(AgentKind::Grok, Some("grok-4.3"), Some("high"));
+        // Model still applies; effort has no home on the grok section.
+        assert_eq!(grok.model_default.as_deref(), Some("grok-4.3"));
+
+        let (_, _, _, _, _, antigravity, _) =
+            agent_sections_for(AgentKind::Antigravity, Some("gemini-4-neon"), Some("high"));
+        // Model still applies; effort has no home on the antigravity section.
+        assert_eq!(antigravity.model_default.as_deref(), Some("gemini-4-neon"));
+    }
+
+    #[test]
+    fn claude_code_effort_is_applied_with_a_model() {
+        let (_, claude, _, _, _, _, _) = agent_sections_for(
+            AgentKind::ClaudeCode,
+            Some("claude-opus-4-8"),
+            Some("XHigh"),
+        );
         assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(claude.effort_default.as_deref(), Some("xhigh"));
+        // No model: dropped, like Codex and Muse.
+        let (_, claude, _, _, _, _, _) =
+            agent_sections_for(AgentKind::ClaudeCode, None, Some("max"));
+        assert_eq!(claude.effort_default, None);
+        // Not a Claude Code level.
+        let (_, claude, _, _, _, _, _) = agent_sections_for(
+            AgentKind::ClaudeCode,
+            Some("claude-opus-4-8"),
+            Some("ultra"),
+        );
+        assert_eq!(claude.effort_default, None);
     }
 
     #[test]
     fn unknown_codex_effort_is_dropped() {
-        let (codex, _, _, _, _, _) =
+        let (codex, _, _, _, _, _, _) =
             agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
         assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
         assert_eq!(codex.effort_default, None);
@@ -602,7 +1122,7 @@ mod tests {
 
     #[test]
     fn cursor_accepts_any_nonempty_slug() {
-        let (_, _, cursor, _, _, _) = agent_sections_for(
+        let (_, _, cursor, _, _, _, _) = agent_sections_for(
             AgentKind::CursorAgent,
             Some("claude-opus-4-8-thinking-high"),
             None,
@@ -617,7 +1137,7 @@ mod tests {
     fn openclaw_accepts_any_nonempty_slug() {
         // OpenClaw's model space is provider-agnostic (resolved by the
         // Gateway), so any non-empty slug routes to its section.
-        let (codex, claude, cursor, openclaw, _, _) =
+        let (codex, claude, cursor, openclaw, _, _, _) =
             agent_sections_for(AgentKind::OpenClaw, Some("anthropic/claude-opus-4-8"), None);
         assert_eq!(
             openclaw.model_default.as_deref(),
@@ -630,7 +1150,7 @@ mod tests {
 
     #[test]
     fn blank_model_is_treated_as_unset() {
-        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
+        let (codex, _, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
         assert_eq!(codex.model_default, None);
     }
 
@@ -638,9 +1158,38 @@ mod tests {
     fn codex_effort_dropped_when_model_inapplicable() {
         // A Claude model handed to codex: the model is dropped, and the
         // effort meant for it must not survive onto codex's default model.
-        let (codex, _, _, _, _, _) =
+        let (codex, _, _, _, _, _, _) =
             agent_sections_for(AgentKind::Codex, Some("claude-opus-4-8"), Some("high"));
         assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn muse_code_effort_is_applied() {
+        let (_, _, _, _, _, _, muse) =
+            agent_sections_for(AgentKind::MuseCode, Some("muse-spark"), Some("MAX"));
+        assert_eq!(muse.model_default.as_deref(), Some("muse-spark"));
+        assert_eq!(muse.effort_default.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn muse_code_effort_dropped_without_a_model() {
+        let (_, _, _, _, _, _, muse) = agent_sections_for(AgentKind::MuseCode, None, Some("ultra"));
+        assert_eq!(muse.model_default, None);
+        assert_eq!(muse.effort_default, None);
+    }
+
+    #[test]
+    fn muse_code_rejects_a_tier_it_does_not_have() {
+        let (_, _, _, _, _, _, muse) =
+            agent_sections_for(AgentKind::MuseCode, Some("muse-spark"), Some("turbo"));
+        assert_eq!(muse.effort_default, None);
+    }
+
+    #[test]
+    fn codex_rejects_a_muse_only_tier() {
+        let (codex, _, _, _, _, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("max"));
         assert_eq!(codex.effort_default, None);
     }
 
@@ -648,7 +1197,7 @@ mod tests {
     fn codex_effort_dropped_without_a_model() {
         // Effort is meaningless without an explicit model (see the
         // CodexSection::effort_default contract).
-        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
+        let (codex, _, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
         assert_eq!(codex.model_default, None);
         assert_eq!(codex.effort_default, None);
     }
@@ -657,10 +1206,10 @@ mod tests {
     fn bare_prefix_models_are_rejected() {
         // A dash-terminated prefix with nothing after it is an incomplete
         // slug, not a model — it must not become a bogus model_default.
-        let (_, claude, _, _, _, _) =
+        let (_, claude, _, _, _, _, _) =
             agent_sections_for(AgentKind::ClaudeCode, Some("claude-"), None);
         assert_eq!(claude.model_default, None);
-        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
+        let (codex, _, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
         assert_eq!(codex.model_default, None);
     }
 
@@ -668,7 +1217,7 @@ mod tests {
     fn bare_openai_reasoning_models_are_accepted() {
         // `o3` / `o4` are valid bare model names; the bare-prefix guard
         // must not reject them.
-        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
+        let (codex, _, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
         assert_eq!(codex.model_default.as_deref(), Some("o3"));
     }
 
@@ -690,6 +1239,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_runner_this_call_created_may_be_rolled_back() {
+        let mut resp = sample_response("r");
+        let empty = std::collections::HashSet::new();
+        // A server without the field never returns an existing runner.
+        assert!(created_by_this_call(&resp, &empty));
+        resp.created = Some(true);
+        assert!(created_by_this_call(&resp, &empty));
+        // The server returned one it already had.
+        resp.created = Some(false);
+        assert!(!created_by_this_call(&resp, &empty));
+        // The config held the id before the create.
+        resp.created = Some(true);
+        let before: std::collections::HashSet<_> = [resp.runner_id].into_iter().collect();
+        assert!(!created_by_this_call(&resp, &before));
+        let err = anyhow::anyhow!("creating the folder failed");
+        assert!(!may_roll_back_create(&err, &resp, &before));
+        assert!(may_roll_back_create(&err, &resp, &empty));
+    }
+
     fn sample_response(runner_name: &str) -> EnrollResponse {
         EnrollResponse {
             runner_id: Uuid::new_v4(),
@@ -705,6 +1274,7 @@ mod tests {
             protocol_version: 4,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         }
     }
 
@@ -756,6 +1326,35 @@ mod tests {
         assert_eq!(cfg.runners.len(), 2);
     }
 
+    /// PIDESKAPP-122 review: enrolling a runner of a second workspace
+    /// stores the returned machine token in that workspace's slot and
+    /// leaves the default workspace's token alone.
+    #[tokio::test]
+    async fn enrolment_token_goes_to_the_runners_workspace_slot() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "legacy-user-token", false).unwrap();
+        write_cli_workspace(&paths, "acme").unwrap();
+
+        let mut resp = sample_response("b1");
+        resp.workspace_slug = "beta".into();
+        resp.refresh_token = String::new();
+        resp.machine_token = Some("mt_beta".into());
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wb"), AgentKind::Codex),
+        )
+        .await
+        .unwrap();
+
+        let cli = file::load_config(&paths).unwrap().cli.expect("cli section");
+        assert_eq!(cli.token.as_deref(), Some("legacy-user-token"));
+        assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+        assert_eq!(cli.token_for_workspace(Some("beta")), Some("mt_beta"));
+    }
+
     #[test]
     fn default_working_dir_is_named_and_exclusive_per_runner() {
         let tmp = tempdir().unwrap();
@@ -802,9 +1401,83 @@ mod tests {
         .await
         .unwrap();
         let wd = &applied.runner.workspace.working_dir;
-        assert!(wd.starts_with(paths.data_dir.join("workspaces")), "wd: {wd:?}");
+        assert!(
+            wd.starts_with(paths.data_dir.join("workspaces")),
+            "wd: {wd:?}"
+        );
         // The persisted config validates (exclusive dir, no collision).
         file::load_config(&paths).unwrap().validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_repeated_create_for_the_same_runner_keeps_the_block() {
+        // The server answers a second create for the same machine and
+        // project with the runner it already has.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("engine");
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
+        )
+        .await
+        .unwrap();
+        let again = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd2"), AgentKind::PidashAgent),
+        )
+        .await
+        .unwrap();
+        assert!(again.already_present);
+        assert_eq!(again.runner.workspace.working_dir, tmp.path().join("wd1"));
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(cfg.runners[0].workspace.working_dir, tmp.path().join("wd1"));
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_repeated_create_forbids_rollback() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("engine");
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
+        )
+        .await
+        .unwrap();
+        // A folder where the credentials file goes: the write fails.
+        let creds = paths.for_runner(resp.runner_id).credentials_path();
+        std::fs::remove_file(&creds).unwrap();
+        std::fs::create_dir_all(&creds).unwrap();
+        let err = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
+        )
+        .await
+        .unwrap_err();
+        assert!(!may_roll_back(&err), "{err:#}");
+        // A brand-new runner that fails the same way may be rolled back.
+        let fresh = sample_response("fresh");
+        let creds = paths.for_runner(fresh.runner_id).credentials_path();
+        std::fs::create_dir_all(&creds).unwrap();
+        let err = apply_enroll_response(
+            &paths,
+            &fresh,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd3"), AgentKind::Codex),
+        )
+        .await
+        .unwrap_err();
+        assert!(may_roll_back(&err), "{err:#}");
     }
 
     #[tokio::test]
@@ -997,14 +1670,143 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         });
         file::write_config(&paths, &cfg).unwrap();
 
-        clear_cli_token(&paths).unwrap();
+        clear_cli_token(&paths, None).unwrap();
         let after = file::load_config(&paths).unwrap();
         assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
         assert_eq!(after.runners.len(), 1, "runner block must be preserved");
+    }
+
+    #[test]
+    fn store_workspace_token_adds_a_workspace_next_to_the_default() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_workspace_token(&paths, "https://example.com", "acme", "mt_a", true, false).unwrap();
+        // `pidash auth login --workspace beta`
+        store_workspace_token(&paths, "https://example.com", "beta", "mt_b", false, false).unwrap();
+        assert_eq!(load_cli_token(&paths).unwrap().as_deref(), Some("mt_a"));
+        assert_eq!(load_cli_workspace(&paths).unwrap().as_deref(), Some("acme"));
+        assert_eq!(
+            load_workspace_token(&paths, Some("beta"))
+                .unwrap()
+                .as_deref(),
+            Some("mt_b")
+        );
+        assert_eq!(
+            load_workspace_token(&paths, Some("acme"))
+                .unwrap()
+                .as_deref(),
+            Some("mt_a")
+        );
+
+        // Signing out one workspace leaves the other.
+        assert!(clear_workspace_token(&paths, "beta", None).unwrap());
+        assert_eq!(load_workspace_token(&paths, Some("beta")).unwrap(), None);
+        assert_eq!(load_cli_token(&paths).unwrap().as_deref(), Some("mt_a"));
+
+        // A different cloud is refused before anything is approved.
+        assert!(bind_cloud(&paths, "https://other.example.com", false).is_err());
+    }
+
+    #[test]
+    fn a_sign_in_stores_credentials_account_and_event_in_one_write() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let credential = crate::pidash_agent::api::IssuedPidashAgentCredential {
+            token: "ec_new".into(),
+            expires_at: None,
+        };
+        store_sign_in(
+            &paths,
+            &SignIn {
+                cloud_url: "https://example.com",
+                slug: "acme",
+                token: "mt_a",
+                as_default: true,
+                force: false,
+                engine: Some((
+                    &credential,
+                    crate::config::schema::EngineSignInState::Active,
+                )),
+                email: Some("dev@example.com"),
+                user_id: Some("u-1"),
+            },
+        )
+        .unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        let cli = cfg.cli.unwrap();
+        assert_eq!(cli.token.as_deref(), Some("mt_a"));
+        assert_eq!(cli.engine_credential.unwrap().token, "ec_new");
+        assert_eq!(cli.account_user_id.as_deref(), Some("u-1"));
+        let event = cfg.auth_event.unwrap();
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.kind, AuthEventKind::SignedIn);
+
+        // Another cloud is refused before anything is written.
+        assert!(check_cloud_binding(&paths, "https://other.example.com", false).is_err());
+        assert!(check_cloud_binding(&paths, "https://other.example.com", true).is_ok());
+        assert!(check_cloud_binding(&paths, "https://example.com", false).is_ok());
+    }
+
+    #[test]
+    fn store_account_records_the_signed_in_user() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_account(&paths, Some("dev@example.com"), Some("u-1")).unwrap();
+        let cli = file::load_config(&paths).unwrap().cli.unwrap();
+        assert_eq!(cli.account_email.as_deref(), Some("dev@example.com"));
+        assert_eq!(cli.account_user_id.as_deref(), Some("u-1"));
+    }
+
+    #[test]
+    fn auth_events_only_increase_and_share_the_token_clear() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_workspace_token(&paths, "https://example.com", "acme", "mt_a", true, false).unwrap();
+
+        record_auth_event(
+            &paths,
+            AuthEventKind::SignedIn,
+            None,
+            Some("dev@example.com"),
+            Some("u-1"),
+            "https://example.com",
+        )
+        .unwrap();
+        let first = file::load_config(&paths).unwrap().auth_event.unwrap();
+        assert_eq!(first.seq, 1);
+        assert_eq!(first.kind, AuthEventKind::SignedIn);
+        assert!(first.reason.is_none());
+        assert_eq!(
+            first.account.unwrap().email.as_deref(),
+            Some("dev@example.com")
+        );
+
+        // The sign-out event rides the same write as the token clear.
+        clear_cli_token(
+            &paths,
+            Some(&AuthEventDraft {
+                kind: AuthEventKind::SignedOut,
+                reason: Some(AuthEventReason::Logout),
+                email: Some("dev@example.com".into()),
+                user_id: Some("u-1".into()),
+                cloud_url: "https://example.com".into(),
+            }),
+        )
+        .unwrap();
+        let after = file::load_config(&paths).unwrap();
+        assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
+        let second = after.auth_event.unwrap();
+        assert_eq!(second.seq, 2, "seq only increases");
+        assert_eq!(second.kind, AuthEventKind::SignedOut);
+        assert_eq!(second.reason, Some(AuthEventReason::Logout));
     }
 }

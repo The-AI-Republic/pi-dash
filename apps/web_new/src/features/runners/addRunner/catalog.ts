@@ -8,7 +8,15 @@
 // machine-wide global.
 
 /** Agent identifiers accepted on the runner CLI's `--agent` flag. */
-export const RUNNER_AGENTS = ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"] as const;
+export const RUNNER_AGENTS = [
+  "claude-code",
+  "codex",
+  "cursor-agent",
+  "open-claw",
+  "grok",
+  "antigravity",
+  "muse-code",
+] as const;
 export type RunnerAgent = (typeof RUNNER_AGENTS)[number];
 
 /** Human labels, in picker order. */
@@ -18,6 +26,7 @@ export const AGENT_LABELS: Record<RunnerAgent, string> = {
   "cursor-agent": "Cursor",
   "open-claw": "OpenClaw",
   grok: "Grok",
+  antigravity: "Antigravity",
   "muse-code": "Muse Code",
 };
 
@@ -32,7 +41,7 @@ export interface ModelChoice {
   label: string;
   /** Value for `--model`; the sentinel omits it. */
   model?: string;
-  /** Value for `--reasoning-effort` (Codex only). */
+  /** Value for `--reasoning-effort` (Codex, Claude Code and Muse Code). */
   reasoningEffort?: string;
 }
 
@@ -104,6 +113,17 @@ const GROK_MODELS: ModelChoice[] = [
   { id: "grok-code-fast-1", label: "Grok Code Fast 1", model: "grok-code-fast-1" },
 ];
 
+/**
+ * Antigravity models (NEWPIDASH-396). Slugs follow the documented `agy`
+ * model ids; the bridge matches the chosen slug against the server's
+ * advertised session options case-insensitively and falls back to the
+ * server default on a miss, so a drifted slug degrades instead of failing.
+ */
+const ANTIGRAVITY_MODELS: ModelChoice[] = [
+  { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", model: "gemini-4-hydrogen" },
+  { id: "gemini-4-neon", label: "Gemini 4 Neon", model: "gemini-4-neon" },
+];
+
 /** Model choices per agent, sentinel first. */
 export const MODEL_CHOICES: Record<RunnerAgent, ModelChoice[]> = {
   "claude-code": [AGENT_DEFAULT, ...CLAUDE_MODELS],
@@ -111,6 +131,7 @@ export const MODEL_CHOICES: Record<RunnerAgent, ModelChoice[]> = {
   "cursor-agent": [AGENT_DEFAULT, ...CURSOR_MODELS],
   "open-claw": [AGENT_DEFAULT],
   grok: [AGENT_DEFAULT, ...GROK_MODELS],
+  antigravity: [AGENT_DEFAULT, ...ANTIGRAVITY_MODELS],
   "muse-code": [AGENT_DEFAULT],
 };
 
@@ -125,6 +146,7 @@ export const PRESELECTED_MODEL: Record<RunnerAgent, string> = {
   "cursor-agent": DEFAULT_MODEL_ID,
   "open-claw": DEFAULT_MODEL_ID,
   grok: DEFAULT_MODEL_ID,
+  antigravity: DEFAULT_MODEL_ID,
   "muse-code": DEFAULT_MODEL_ID,
 };
 
@@ -136,6 +158,85 @@ export function selectedModelLabel(agent: RunnerAgent, id: string): string {
 /** The CLI contribution of a selection; the sentinel and unknown ids emit nothing. */
 export function modelContribution(agent: RunnerAgent, id: string): { model?: string; reasoningEffort?: string } {
   const choice = MODEL_CHOICES[agent].find((candidate) => candidate.id === id);
+  if (choice?.model === undefined) return {};
+  return {
+    model: choice.model,
+    ...(choice.reasoningEffort === undefined ? {} : { reasoningEffort: choice.reasoningEffort }),
+  };
+}
+
+/** Effort display labels (the `:<effort>` id suffixes stay machine values). */
+export const EFFORT_LABELS: Record<string, string> = {
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+/** One catalog row as the add-runner form reads it. */
+export interface CatalogRow {
+  model: string;
+  label: string;
+  reasoning_efforts: string[];
+  sort_order: number;
+  is_preselected: boolean;
+}
+
+/**
+ * Expand catalog rows into picker choices for one agent: the Default
+ * sentinel first, then one choice per row (one per effort for rows
+ * offering efforts, with the effort label appended). Rows sort by
+ * (sort_order, model) — the server already orders them, this keeps the
+ * picker deterministic if the cache is used directly.
+ */
+export function choicesForAgent(rows: readonly CatalogRow[]): ModelChoice[] {
+  const ordered = [...rows].sort((a, b) => a.sort_order - b.sort_order || a.model.localeCompare(b.model));
+  const choices: ModelChoice[] = [AGENT_DEFAULT];
+  for (const entry of ordered) {
+    if (entry.reasoning_efforts.length === 0) {
+      choices.push({ id: entry.model, label: entry.label, model: entry.model });
+    } else {
+      for (const effort of entry.reasoning_efforts) {
+        choices.push({
+          id: `${entry.model}:${effort}`,
+          label: `${entry.label} (${EFFORT_LABELS[effort] ?? effort})`,
+          model: entry.model,
+          reasoningEffort: effort,
+        });
+      }
+    }
+  }
+  return choices;
+}
+
+/**
+ * The preselected choice id for one agent's catalog rows: the first
+ * expanded choice of the preselected row (the first effort when the
+ * row offers efforts), or the Default sentinel when none is marked.
+ */
+export function preselectedId(rows: readonly CatalogRow[]): string {
+  const marked = rows.find((entry) => entry.is_preselected);
+  if (marked === undefined) return DEFAULT_MODEL_ID;
+  if (marked.reasoning_efforts.length === 0) return marked.model;
+  const firstEffort = marked.reasoning_efforts[0];
+  return firstEffort === undefined ? DEFAULT_MODEL_ID : `${marked.model}:${firstEffort}`;
+}
+
+/** Label for a selection against resolved choices; unknown ids read as the default. */
+export function selectedModelLabelFrom(choices: readonly ModelChoice[], id: string): string {
+  return choices.find((choice) => choice.id === id)?.label ?? DEFAULT_MODEL_LABEL;
+}
+
+/** The CLI contribution of a selection against resolved choices. */
+export function modelContributionFrom(
+  choices: readonly ModelChoice[],
+  id: string
+): { model?: string; reasoningEffort?: string } {
+  const choice = choices.find((candidate) => candidate.id === id);
   if (choice?.model === undefined) return {};
   return {
     model: choice.model,

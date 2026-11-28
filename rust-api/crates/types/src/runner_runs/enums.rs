@@ -22,7 +22,7 @@
 //!
 //! Translation notes:
 //!
-//! * Same enum API as the D-11 ports (PIDASHCONV-482, `db::dispatch::status`):
+//! * Same enum API as the D-11 ports (PIDASHCONV-482, `db::agent_runs::status`):
 //!   `Display` renders the value as `str(member)` does in Django, serde
 //!   reads/writes the value, and unknown values are rejected as Django
 //!   choice validation would. D-11 keeps its own `db`-local copy of

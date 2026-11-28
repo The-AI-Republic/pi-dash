@@ -35,15 +35,18 @@
 //! (`fx-gha-03-project.json`), FX-PERM-01
 //! (`fx-perm-01-permission-matrix.json`, the three project-github rows).
 //!
-//! Status reads join `workspaces`/`github_repositories`/`git_repositories`
-//! with NO `deleted_at` filter on the joined rows — only the base
-//! sync/binding row carries the default-manager filter. Probed live
-//! (probe W: a soft-deleted workspace still reports its binding): the
-//! Done-layer `repository_sync_for_project_sql` /
+//! Status reads join `workspaces`/`git_repositories` with NO
+//! `deleted_at` filter on the joined rows — only the base binding row
+//! carries the default-manager filter. Probed live (probe W: a
+//! soft-deleted workspace still reports its binding): the Done-layer
+//! `repository_sync_for_project_sql` /
 //! `github_binding_for_project_sql` builders filter the joined workspace
 //! row and would answer `{bound: False}` there, so this module owns its
-//! two status SELECTs. Foundation crates are read-only; the builders are
-//! left untouched.
+//! status SELECT. Foundation crates are read-only; the builders are
+//! left untouched. All reads and writes here are git-only
+//! (`git_repositories`/`git_repository_bindings`); the legacy
+//! `github_repositories`/`github_repository_syncs` tables are frozen
+//! and no longer touched (PDASHOSS01-358).
 //!
 //! Ported bugs and quirks (translate, don't redesign — also listed in
 //! the PR):
@@ -205,18 +208,11 @@ async fn workspace_role(
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// Active project role for `(user, project_id, slug)`, or `None`.
@@ -227,19 +223,11 @@ async fn project_role(
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// Membership facts for one `Gate::Project` row: the allowed-role flags
@@ -304,17 +292,11 @@ async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Resul
         return Ok(id);
     }
     let normalized = normalize_resolve_identifier(raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(normalized)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    row.map(|(id,)| id)
-        .ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = crate::app_issues::access::project_id_by_identifier(&db, slug, &normalized)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    row.ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 fn raw_body(status: StatusCode, body: &'static str) -> Response {
@@ -584,46 +566,8 @@ fn parse_object(
 // status reads (github.py:1097-1146)
 // ---------------------------------------------------------------------------
 
-/// One legacy-sync status row: `(sync id, enabled, synced_at, error,
-/// repo id, owner, name, url)`.
-type LegacyRow = (
-    Uuid,
-    bool,
-    Option<DateTime<Utc>>,
-    String,
-    i64,
-    String,
-    String,
-    Option<String>,
-);
-
-/// One legacy sync with its repository for the `bound: True` branch.
-struct LegacyStatus {
-    id: Uuid,
-    is_sync_enabled: bool,
-    last_synced_at: Option<DateTime<Utc>>,
-    last_sync_error: String,
-    repository_id: i64,
-    owner: String,
-    name: String,
-    url: Option<String>,
-}
-
-/// One fallback status row: `(binding id, enabled, synced_at, error,
-/// external id, namespace, name, web url)`.
-type FallbackRow = (
-    Uuid,
-    bool,
-    Option<DateTime<Utc>>,
-    String,
-    String,
-    String,
-    String,
-    String,
-);
-
 /// One github-provider `GitRepositoryBinding` with its repository for
-/// the fallback branch.
+/// the `bound: True` branch.
 struct FallbackStatus {
     id: Uuid,
     is_sync_enabled: bool,
@@ -635,101 +579,81 @@ struct FallbackStatus {
     web_url: String,
 }
 
-/// `GithubRepositorySync.objects.filter(project_id, workspace__slug)
-/// .select_related("repository").first()` (`github.py:1097-1102`). The
-/// joined rows carry no deleted filter (probed live); ordering is the
-/// model default (`-created_at`).
-async fn fetch_legacy_status(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-    slug: &str,
-) -> Result<Option<LegacyStatus>, Denial> {
-    let row: Option<LegacyRow> = sqlx::query_as(
-        r#"SELECT s.id, s.is_sync_enabled, s.last_synced_at, s.last_sync_error,
-                      r.repository_id, r.owner, r.name, r.url
-               FROM github_repository_syncs s
-               JOIN workspaces w ON w.id = s.workspace_id
-               JOIN github_repositories r ON r.id = s.repository_id
-               WHERE s.deleted_at IS NULL AND s.project_id = $1 AND w.slug = $2
-               ORDER BY s.created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(
-        |(
-            id,
-            is_sync_enabled,
-            last_synced_at,
-            last_sync_error,
-            repository_id,
-            owner,
-            name,
-            url,
-        )| {
-            LegacyStatus {
-                id,
-                is_sync_enabled,
-                last_synced_at,
-                last_sync_error,
-                repository_id,
-                owner,
-                name,
-                url,
-            }
-        },
-    ))
-}
-
 /// `GitRepositoryBinding.objects.filter(project_id, workspace__slug,
 /// repository__provider="github").select_related("repository").first()`
-/// (`github.py:1104-1112`), shared by the GET fallback and the
-/// PATCH/DELETE no-sync branches. Same join-filter rule as above.
+/// (`github.py:1104-1112`), shared by the GET status read. Same
+/// join-filter rule as above.
+#[derive(Debug, sea_orm::FromQueryResult)]
+#[allow(non_snake_case)]
+struct FallbackRow {
+    id: Uuid,
+    is_sync_enabled: bool,
+    last_synced_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    last_sync_error: String,
+    git_repositories__external_id: String,
+    git_repositories__namespace: String,
+    git_repositories__name: String,
+    git_repositories__web_url: String,
+}
+
 async fn fetch_fallback_status(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<FallbackStatus>, Denial> {
-    let row: Option<FallbackRow> = sqlx::query_as(
-        r#"SELECT b.id, b.is_sync_enabled, b.last_synced_at, b.last_sync_error,
-                  r.external_id, r.namespace, r.name, r.web_url
-           FROM git_repository_bindings b
-           JOIN workspaces w ON w.id = b.workspace_id
-           JOIN git_repositories r ON r.id = b.repository_id
-           WHERE b.deleted_at IS NULL AND b.project_id = $1 AND w.slug = $2
-           AND r.provider = 'github'
-           ORDER BY b.created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(
-        |(
-            id,
-            is_sync_enabled,
-            last_synced_at,
-            last_sync_error,
-            external_id,
-            namespace,
-            name,
-            web_url,
-        )| {
-            FallbackStatus {
-                id,
-                is_sync_enabled,
-                last_synced_at,
-                last_sync_error,
-                external_id,
-                namespace,
-                name,
-                web_url,
-            }
-        },
-    ))
+    use pidash_db::entity::{git_repositories, git_repository_bindings, workspaces};
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<FallbackRow> = git_repository_bindings::Entity::find()
+        .select_only()
+        .columns([
+            git_repository_bindings::Column::Id,
+            git_repository_bindings::Column::IsSyncEnabled,
+            git_repository_bindings::Column::LastSyncedAt,
+            git_repository_bindings::Column::LastSyncError,
+        ])
+        .column_as(
+            git_repositories::Column::ExternalId,
+            "git_repositories__external_id",
+        )
+        .column_as(
+            git_repositories::Column::Namespace,
+            "git_repositories__namespace",
+        )
+        .column_as(git_repositories::Column::Name, "git_repositories__name")
+        .column_as(
+            git_repositories::Column::WebUrl,
+            "git_repositories__web_url",
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitRepositories.def(),
+        )
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(git_repositories::Column::Provider.eq("github"))
+        .order_by_desc(git_repository_bindings::Column::CreatedAt)
+        .into_model::<FallbackRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| FallbackStatus {
+        id: row.id,
+        is_sync_enabled: row.is_sync_enabled,
+        last_synced_at: row.last_synced_at.map(|at| at.with_timezone(&chrono::Utc)),
+        last_sync_error: row.last_sync_error,
+        external_id: row.git_repositories__external_id,
+        namespace: row.git_repositories__namespace,
+        name: row.git_repositories__name,
+        web_url: row.git_repositories__web_url,
+    }))
 }
 
 fn synced_at_text(last_synced_at: &Option<DateTime<Utc>>) -> Value {
@@ -740,37 +664,7 @@ fn synced_at_text(last_synced_at: &Option<DateTime<Utc>>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Legacy `bound: True` shape (`github.py:1131-1146`): `repository.id`
-/// is the integer `repository_id`.
-fn legacy_body(status: &LegacyStatus) -> Value {
-    let mut repository = serde_json::Map::with_capacity(4);
-    repository.insert("id".to_owned(), Value::from(status.repository_id));
-    repository.insert("owner".to_owned(), Value::String(status.owner.clone()));
-    repository.insert("name".to_owned(), Value::String(status.name.clone()));
-    repository.insert(
-        "url".to_owned(),
-        status.url.clone().map(Value::String).unwrap_or(Value::Null),
-    );
-    let mut map = serde_json::Map::with_capacity(6);
-    map.insert("bound".to_owned(), Value::Bool(true));
-    map.insert("id".to_owned(), Value::String(status.id.to_string()));
-    map.insert("repository".to_owned(), Value::Object(repository));
-    map.insert(
-        "is_sync_enabled".to_owned(),
-        Value::Bool(status.is_sync_enabled),
-    );
-    map.insert(
-        "last_synced_at".to_owned(),
-        synced_at_text(&status.last_synced_at),
-    );
-    map.insert(
-        "last_sync_error".to_owned(),
-        Value::String(status.last_sync_error.clone()),
-    );
-    Value::Object(map)
-}
-
-/// Fallback `bound: True` shape (`github.py:1115-1130`):
+/// `bound: True` shape (`github.py:1115-1130`):
 /// `repository.id` is the string `external_id`.
 fn fallback_body(status: &FallbackStatus) -> Value {
     let mut repository = serde_json::Map::with_capacity(4);
@@ -831,13 +725,6 @@ async fn get_status(
     if let Err(response) = check_feature(&state) {
         return response;
     }
-    let legacy = match fetch_legacy_status(&pool, &project_id, &slug).await {
-        Ok(status) => status,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Some(status) = legacy {
-        return json_response(legacy_body(&status));
-    }
     let fallback = match fetch_fallback_status(&pool, &project_id, &slug).await {
         Ok(status) => status,
         Err(denial) => return denial.into_response(),
@@ -860,11 +747,10 @@ fn enabled_flag(fields: &Vec<(String, BodyField)>) -> Result<bool, Response> {
 }
 
 /// `PATCH workspaces/<slug>/projects/<id>/github/`
-/// (`GithubProjectStatusEndpoint.patch`, `github.py:1148-1172`): with a
-/// legacy sync, save `is_sync_enabled` on it (audit columns untouched,
-/// probed) and mirror to the github-provider bindings; without one,
-/// update the bindings directly. Both `UPDATE`s touch only the named
-/// column. No sync and no updated binding row is the 404.
+/// (`GithubProjectStatusEndpoint.patch`, `github.py:1148-1172`): save
+/// `is_sync_enabled` on the github-provider bindings. The `UPDATE`
+/// touches only the named column (audit columns untouched, probed).
+/// No updated binding row is the 404.
 async fn patch_status(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -910,48 +796,56 @@ async fn patch_status(
         Ok(enabled) => enabled,
         Err(response) => return response,
     };
-    let sync_id: Option<(Uuid,)> = match sqlx::query_as(
-        r#"SELECT s.id FROM github_repository_syncs s
-           JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.deleted_at IS NULL AND s.project_id = $1 AND w.slug = $2
-           ORDER BY s.created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    if let Some((id,)) = sync_id {
-        if sqlx::query("UPDATE github_repository_syncs SET is_sync_enabled = $1 WHERE id = $2")
-            .bind(enabled)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .is_err()
-        {
-            return Denial::ServerError.into_response();
+    use pidash_db::entity::{git_repositories, git_repository_bindings};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    // The binding update (`UPDATE ... FROM workspaces, git_repositories`):
+    // no join in update_many, so the workspace and the github-hosted
+    // repositories resolve first and the update runs by id sets.
+    let mirror_workspace: Option<Uuid> =
+        match pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, &slug).await {
+            Ok(workspace) => workspace,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+    let mirrored = match mirror_workspace {
+        None => 0,
+        Some(workspace_id) => {
+            let repo_ids: Vec<Uuid> = match git_repositories::Entity::find()
+                .select_only()
+                .column(git_repositories::Column::Id)
+                .filter(git_repositories::Column::Provider.eq("github"))
+                .into_tuple()
+                .all(&db)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(_) => return Denial::ServerError.into_response(),
+            };
+            if repo_ids.is_empty() {
+                0
+            } else {
+                match git_repository_bindings::Entity::update_many()
+                    .col_expr(
+                        git_repository_bindings::Column::IsSyncEnabled,
+                        sea_orm::sea_query::Expr::value(enabled),
+                    )
+                    .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+                    .filter(git_repository_bindings::Column::WorkspaceId.eq(workspace_id))
+                    .filter(
+                        git_repository_bindings::Column::RepositoryId
+                            .is_in(repo_ids.iter().copied()),
+                    )
+                    .filter(git_repository_bindings::Column::DeletedAt.is_null())
+                    .exec(&db)
+                    .await
+                {
+                    Ok(result) => result.rows_affected,
+                    Err(_) => return Denial::ServerError.into_response(),
+                }
+            }
         }
-    }
-    let mirrored = match sqlx::query(
-        r#"UPDATE git_repository_bindings b SET is_sync_enabled = $3
-           FROM workspaces w, git_repositories r
-           WHERE b.workspace_id = w.id AND b.repository_id = r.id
-           AND b.deleted_at IS NULL AND b.project_id = $1 AND w.slug = $2
-           AND r.provider = 'github'"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .bind(enabled)
-    .execute(&pool)
-    .await
-    {
-        Ok(result) => result.rows_affected(),
-        Err(_) => return Denial::ServerError.into_response(),
     };
-    if sync_id.is_none() && mirrored == 0 {
+    if mirrored == 0 {
         return raw_body(StatusCode::NOT_FOUND, NO_BINDING_BODY);
     }
     json_response(serde_json::json!({"is_sync_enabled": enabled}))
@@ -994,73 +888,106 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &'static str, id: &Uuid
     }
 }
 
-/// The binding-side unbind shared by both DELETE branches
-/// (`github.py:1184-1188,1199-1203`): per github-provider binding, soft
-/// delete its comment syncs, then its issue syncs (queryset deletes —
-/// `deleted_at` only), then soft delete the binding itself (instance
-/// delete — `deleted_at`, `updated_at`, `updated_by`, plus the cascade
-/// task). Returns the soft-deleted binding ids for task enqueue. Takes
-/// the open connection so the legacy-sync branch runs it inside its
-/// transaction while the no-sync branch passes an autocommit pooled
-/// connection, exactly like Django (PIDASHCONV-1466).
+/// The binding-side unbind (`github.py:1184-1188`): per github-provider
+/// binding, soft delete its comment syncs, then its issue syncs
+/// (queryset deletes — `deleted_at` only), then soft delete the binding
+/// itself (instance delete — `deleted_at`, `updated_at`, `updated_by`,
+/// plus the cascade task). Returns the soft-deleted binding ids for
+/// task enqueue. Runs on an autocommit pooled connection, exactly like
+/// Django (PIDASHCONV-1466).
 async fn unbind_git_bindings(
-    conn: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     actor_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Vec<Uuid>, Denial> {
-    let ids: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT b.id FROM git_repository_bindings b
-           JOIN workspaces w ON w.id = b.workspace_id
-           JOIN git_repositories r ON r.id = b.repository_id
-           WHERE b.deleted_at IS NULL AND b.project_id = $1 AND w.slug = $2
-           AND r.provider = 'github'
-           ORDER BY b.created_at DESC"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    for (id,) in &ids {
-        sqlx::query(
-            r#"UPDATE git_comment_syncs SET deleted_at = now()
-               WHERE deleted_at IS NULL AND issue_sync_id IN (
-                   SELECT id FROM git_issue_syncs WHERE binding_id = $1 AND deleted_at IS NULL
-               )"#,
+    use pidash_db::entity::{
+        git_comment_syncs, git_issue_syncs, git_repositories, git_repository_bindings, workspaces,
+    };
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let ids: Vec<Uuid> = git_repository_bindings::Entity::find()
+        .select_only()
+        .column(git_repository_bindings::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::Workspaces.def(),
         )
-        .bind(id)
-        .execute(&mut *conn)
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitRepositories.def(),
+        )
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(git_repositories::Column::Provider.eq("github"))
+        .order_by_desc(git_repository_bindings::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
         .await
         .map_err(|_| Denial::ServerError)?;
-        sqlx::query(
-            r#"UPDATE git_issue_syncs SET deleted_at = now()
-               WHERE binding_id = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .execute(&mut *conn)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        sqlx::query(
-            r#"UPDATE git_repository_bindings
-               SET deleted_at = now(), updated_at = now(), updated_by_id = $1
-               WHERE id = $2"#,
-        )
-        .bind(actor_id)
-        .bind(id)
-        .execute(&mut *conn)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    for id in &ids {
+        let now: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        let child_ids: Vec<Uuid> = git_issue_syncs::Entity::find()
+            .select_only()
+            .column(git_issue_syncs::Column::Id)
+            .filter(git_issue_syncs::Column::BindingId.eq(*id))
+            .filter(git_issue_syncs::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if !child_ids.is_empty() {
+            git_comment_syncs::Entity::update_many()
+                .col_expr(
+                    git_comment_syncs::Column::DeletedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .filter(git_comment_syncs::Column::IssueSyncId.is_in(child_ids.iter().copied()))
+                .filter(git_comment_syncs::Column::DeletedAt.is_null())
+                .exec(db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+        }
+        git_issue_syncs::Entity::update_many()
+            .col_expr(
+                git_issue_syncs::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(git_issue_syncs::Column::BindingId.eq(*id))
+            .filter(git_issue_syncs::Column::DeletedAt.is_null())
+            .exec(db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        git_repository_bindings::Entity::update_many()
+            .col_expr(
+                git_repository_bindings::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                git_repository_bindings::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                git_repository_bindings::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(*actor_id),
+            )
+            .filter(git_repository_bindings::Column::Id.eq(*id))
+            .exec(db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
-    Ok(ids.into_iter().map(|(id,)| id).collect())
+    Ok(ids)
 }
 
 /// `DELETE workspaces/<slug>/projects/<id>/github/`
-/// (`GithubProjectStatusEndpoint.delete`, `github.py:1174-1205`): without
-/// a legacy sync, unbind the github-provider bindings; with one, do it
-/// atomically after synchronously soft-deleting the dependent sync rows
-/// (queryset deletes) and the sync itself (instance delete + task), so
-/// the §6.8 lock predicate releases with the unbind.
+/// (`GithubProjectStatusEndpoint.delete`, `github.py:1174-1205`):
+/// unbind the github-provider bindings (generic issue/comment sync rows
+/// soft-deleted per binding via [`unbind_git_bindings`], so the §6.8
+/// lock predicate releases with the unbind). No surrounding
+/// transaction: Django runs this loop with no `transaction.atomic()`,
+/// so the unbind stays on an autocommit pooled connection.
 async fn delete_status(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -1093,91 +1020,21 @@ async fn delete_status(
     if let Err(response) = check_feature(&state) {
         return response;
     }
-    let sync_id: Option<(Uuid,)> = match sqlx::query_as(
-        r#"SELECT s.id FROM github_repository_syncs s
-           JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.deleted_at IS NULL AND s.project_id = $1 AND w.slug = $2
-           ORDER BY s.created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
+    let mut tasks: Vec<(&'static str, Uuid)> = Vec::new();
+    // Django runs this loop with no surrounding transaction, so the
+    // unbind stays on an autocommit pooled connection.
+    let mut connection = match pool.acquire().await {
+        Ok(connection) => connection,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let mut tasks: Vec<(&'static str, Uuid)> = Vec::new();
-    if let Some((id,)) = sync_id {
-        // `transaction.atomic()` (`github.py:1190`): the sync writes
-        // and the binding unbind below commit or roll back together,
-        // so a mid-unbind failure never half-unbinds the project
-        // (PIDASHCONV-1466).
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mut binding_ids: Vec<Uuid> = Vec::new();
-        let failed = sqlx::query(
-            r#"UPDATE github_comment_syncs SET deleted_at = now()
-               WHERE deleted_at IS NULL AND issue_sync_id IN (
-                   SELECT id FROM github_issue_syncs
-                   WHERE repository_sync_id = $1 AND deleted_at IS NULL
-               )"#,
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-            || sqlx::query(
-                r#"UPDATE github_issue_syncs SET deleted_at = now()
-                   WHERE repository_sync_id = $1 AND deleted_at IS NULL"#,
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .is_err()
-            || sqlx::query(
-                r#"UPDATE github_repository_syncs
-                   SET deleted_at = now(), updated_at = now(), updated_by_id = $1
-                   WHERE id = $2"#,
-            )
-            .bind(actor.id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .is_err()
-            || match unbind_git_bindings(&mut tx, &actor.id, &project_id, &slug).await {
-                Ok(ids) => {
-                    binding_ids = ids;
-                    false
-                }
-                Err(_) => true,
+    let connection = pidash_db::orm_tx::TxConn::new(&mut connection);
+    match unbind_git_bindings(&connection, &actor.id, &project_id, &slug).await {
+        Ok(ids) => {
+            for id in &ids {
+                tasks.push(("gitrepositorybinding", *id));
             }
-            || tx.commit().await.is_err();
-        if failed {
-            return Denial::ServerError.into_response();
         }
-        tasks.push(("githubrepositorysync", id));
-        for binding_id in &binding_ids {
-            tasks.push(("gitrepositorybinding", *binding_id));
-        }
-    } else {
-        // No legacy sync (`github.py:1183-1189`): Django runs this
-        // loop with no surrounding transaction, so the unbind stays
-        // on an autocommit pooled connection here too.
-        let mut connection = match pool.acquire().await {
-            Ok(connection) => connection,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        match unbind_git_bindings(&mut connection, &actor.id, &project_id, &slug).await {
-            Ok(ids) => {
-                for id in &ids {
-                    tasks.push(("gitrepositorybinding", *id));
-                }
-            }
-            Err(denial) => return denial.into_response(),
-        }
+        Err(denial) => return denial.into_response(),
     }
     for (model, id) in &tasks {
         enqueue_soft_delete(&pool, model, id).await;
@@ -1285,64 +1142,14 @@ impl TxnError {
     }
 }
 
-fn txn_error(error: sqlx::Error) -> TxnError {
+fn txn_error(error: sea_orm::DbErr) -> TxnError {
+    let error = pidash_db::orm_tx::into_sqlx(error);
     if let Some(db_error) = error.as_database_error() {
         if db_error.code().as_deref() == Some("23505") {
             return TxnError::Conflict;
         }
     }
     TxnError::Server
-}
-
-/// `GithubRepository.objects.get_or_create(project, repository_id,
-/// defaults=...)` (`github.py:1034-1044`): a hit reuses the row with no
-/// write; a miss inserts (audit `created_by` set, the
-/// `get_or_create` full-save shape).
-#[allow(clippy::too_many_arguments)]
-async fn get_or_create_repo(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    actor_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    repository_id: i64,
-    owner: &str,
-    name: &str,
-    canonical_url: &str,
-) -> Result<Uuid, TxnError> {
-    let hits: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM github_repositories
-           WHERE project_id = $1 AND repository_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(repository_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(txn_error)?;
-    match hits.as_slice() {
-        [(id,)] => Ok(*id),
-        [] => {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                r#"INSERT INTO github_repositories
-                   (id, created_at, updated_at, created_by_id, project_id, workspace_id,
-                    name, url, config, repository_id, owner)
-                   VALUES ($1, now(), now(), $2, $3, $4, $5, $6, '{}', $7, $8)"#,
-            )
-            .bind(id)
-            .bind(actor_id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(name)
-            .bind(canonical_url)
-            .bind(repository_id)
-            .bind(owner)
-            .execute(&mut **tx)
-            .await
-            .map_err(txn_error)?;
-            Ok(id)
-        }
-        _ => Err(TxnError::Server),
-    }
 }
 
 /// `Label.objects.get_or_create(project, name="github",
@@ -1352,47 +1159,59 @@ async fn get_or_create_repo(
 /// probed live) and the blank defaults (`description`/`external_id`/
 /// `external_source` all `""`, `parent` null, probed live).
 async fn get_or_create_label(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl sea_orm::ConnectionTrait,
     actor_id: &Uuid,
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<Uuid, TxnError> {
-    let hits: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM labels
-           WHERE project_id = $1 AND name = 'github' AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(txn_error)?;
+    use pidash_db::entity::labels;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+    let hits: Vec<Uuid> = labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(labels::Column::Name.eq("github"))
+        .filter(labels::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
+        .await
+        .map_err(txn_error)?;
     match hits.as_slice() {
-        [(id,)] => Ok(*id),
+        [id] => Ok(*id),
         [] => {
-            let max: Option<(Option<f64>,)> = sqlx::query_as(
-                r#"SELECT MAX(sort_order) FROM labels
-                   WHERE project_id = $1 AND deleted_at IS NULL"#,
-            )
-            .bind(project_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(txn_error)?;
+            let max: Option<Option<f64>> = labels::Entity::find()
+                .select_only()
+                .column_as(labels::Column::SortOrder.max(), "largest")
+                .filter(labels::Column::ProjectId.eq(*project_id))
+                .filter(labels::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await
+                .map_err(txn_error)?;
             let sort_order = max
-                .and_then(|(value,)| value)
+                .flatten()
                 .map(|value| value + 10000.0)
                 .unwrap_or(65535.0);
             let id = Uuid::new_v4();
-            sqlx::query(
-                r#"INSERT INTO labels
-                   (id, created_at, updated_at, created_by_id, project_id, workspace_id,
-                    name, description, color, sort_order, external_id, external_source)
-                   VALUES ($1, now(), now(), $2, $3, $4, 'github', '', '#1f2328', $5, '', '')"#,
-            )
-            .bind(id)
-            .bind(actor_id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(sort_order)
-            .execute(&mut **tx)
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            labels::ActiveModel {
+                id: Set(id),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(*actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                project_id: Set(Some(*project_id)),
+                workspace_id: Set(*workspace_id),
+                name: Set("github".to_owned()),
+                description: Set(String::new()),
+                color: Set("#1f2328".to_owned()),
+                sort_order: Set(sort_order),
+                external_id: Set(Some(String::new())),
+                external_source: Set(Some(String::new())),
+                parent_id: Set(None),
+            }
+            .insert(db)
             .await
             .map_err(txn_error)?;
             Ok(id)
@@ -1406,35 +1225,40 @@ async fn get_or_create_label(
 /// auth_type`, else a legacy `DEGRADED` PAT row), the `GitRepository`
 /// `update_or_create` (a hit is a full save: defaults plus `updated_at`
 /// / `updated_by`), hard delete of the existing project binding, then the
-/// fresh binding mirroring the sync (`RUNNER_MANAGED` for private repos,
-/// else `PUBLIC`).
+/// fresh binding (`RUNNER_MANAGED` for private repos, else `PUBLIC`).
+/// Returns the new binding id, which the bind response surfaces as `id`
+/// (the legacy sync row it used to mirror no longer exists).
 #[allow(clippy::too_many_arguments)]
 async fn upsert_git_binding(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl sea_orm::ConnectionTrait,
     actor_id: &Uuid,
     project_id: &Uuid,
     workspace_id: &Uuid,
     workspace_integration_id: &Uuid,
     raw_token: &str,
-    sync_id: &Uuid,
     verified: &serde_json::Map<String, Value>,
     owner: &str,
     name: &str,
-) -> Result<(), TxnError> {
-    let account: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM git_provider_accounts
-           WHERE workspace_id = $1 AND provider = 'github' AND host_url = $2
-           AND workspace_integration_id = $3 AND deleted_at IS NULL
-           ORDER BY auth_type ASC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(GITHUB_HOST_URL)
-    .bind(workspace_integration_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(txn_error)?;
+) -> Result<Uuid, TxnError> {
+    use pidash_db::entity::{git_provider_accounts, git_repositories};
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    };
+    let account: Option<Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq(GITHUB_HOST_URL))
+        .filter(git_provider_accounts::Column::WorkspaceIntegrationId.eq(*workspace_integration_id))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .order_by_asc(git_provider_accounts::Column::AuthType)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(txn_error)?;
     let account_id = match account {
-        Some((id,)) => id,
+        Some(id) => id,
         None => {
             let id = Uuid::new_v4();
             let credential = serde_json::json!({
@@ -1442,25 +1266,34 @@ async fn upsert_git_binding(
                 "host_url": GITHUB_HOST_URL,
                 "token": raw_token,
             });
-            sqlx::query(
-                r#"INSERT INTO git_provider_accounts
-                   (id, created_at, updated_at, created_by_id, workspace_id,
-                    provider, host_url, auth_type, external_account_id,
-                    external_account_login, display_name, capabilities,
-                    credential_config, workspace_integration_id,
-                    status, last_check_error, metadata)
-                   VALUES ($1, now(), now(), $2, $3, 'github', $4, 'pat', $5,
-                           '', 'Legacy GitHub integration', '{}', $6, $7, 'degraded',
-                           'Backfilled while binding legacy GitHub repository', '{}')"#,
-            )
-            .bind(id)
-            .bind(actor_id)
-            .bind(workspace_id)
-            .bind(GITHUB_HOST_URL)
-            .bind(format!("legacy:{workspace_integration_id}"))
-            .bind(credential)
-            .bind(workspace_integration_id)
-            .execute(&mut **tx)
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            git_provider_accounts::ActiveModel {
+                id: Set(id),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(*actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(*workspace_id),
+                provider: Set("github".to_owned()),
+                host_url: Set(GITHUB_HOST_URL.to_owned()),
+                auth_type: Set("pat".to_owned()),
+                external_account_id: Set(format!("legacy:{workspace_integration_id}")),
+                external_account_login: Set(String::new()),
+                display_name: Set("Legacy GitHub integration".to_owned()),
+                capabilities: Set(serde_json::json!({})),
+                credential_config: Set(credential),
+                workspace_integration_id: Set(Some(*workspace_integration_id)),
+                status: Set("degraded".to_owned()),
+                verified_at: Set(None),
+                suspended_at: Set(None),
+                last_checked_at: Set(None),
+                last_check_error: Set(
+                    "Backfilled while binding legacy GitHub repository".to_owned()
+                ),
+                metadata: Set(serde_json::json!({})),
+            }
+            .insert(db)
             .await
             .map_err(txn_error)?;
             id
@@ -1498,132 +1331,138 @@ async fn upsert_git_binding(
             .unwrap_or(""),
     );
     let is_private = verified.get("private").is_some_and(json_truthy);
-    let repo_hits: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM git_repositories
-           WHERE provider = 'github' AND host_url = $1 AND external_id = $2
-           AND deleted_at IS NULL"#,
-    )
-    .bind(GITHUB_HOST_URL)
-    .bind(&external_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(txn_error)?;
+    use pidash_db::entity::git_repository_bindings;
+    let repo_hits: Vec<Uuid> = git_repositories::Entity::find()
+        .select_only()
+        .column(git_repositories::Column::Id)
+        .filter(git_repositories::Column::Provider.eq("github"))
+        .filter(git_repositories::Column::HostUrl.eq(GITHUB_HOST_URL))
+        .filter(git_repositories::Column::ExternalId.eq(external_id.clone()))
+        .filter(git_repositories::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
+        .await
+        .map_err(txn_error)?;
     let repo_id = match repo_hits.as_slice() {
-        [(id,)] => {
-            sqlx::query(
-                r#"UPDATE git_repositories
-                   SET namespace = $1, name = $2, full_name = $3, web_url = $4,
-                       clone_url_http = $5, clone_url_ssh = $6, default_branch = $7,
-                       is_private = $8, metadata = $9,
-                       updated_at = now(), updated_by_id = $10
-                   WHERE id = $11"#,
-            )
-            .bind(&lower_owner)
-            .bind(&lower_name)
-            .bind(&full_name)
-            .bind(web_url)
-            .bind(clone_http)
-            .bind(clone_ssh)
-            .bind(default_branch)
-            .bind(is_private)
-            .bind(Value::Object(verified.clone()))
-            .bind(actor_id)
-            .bind(id)
-            .execute(&mut **tx)
+        [id] => {
+            use sea_orm::{ActiveModelTrait, Set};
+            let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+            git_repositories::ActiveModel {
+                id: Set(*id),
+                namespace: Set(lower_owner.clone()),
+                name: Set(lower_name.clone()),
+                full_name: Set(full_name.clone()),
+                web_url: Set(web_url.to_owned()),
+                clone_url_http: Set(clone_http.to_owned()),
+                clone_url_ssh: Set(clone_ssh.to_owned()),
+                default_branch: Set(default_branch.to_owned()),
+                is_private: Set(is_private),
+                metadata: Set(Value::Object(verified.clone())),
+                updated_at: Set(bumped),
+                updated_by_id: Set(Some(*actor_id)),
+                ..Default::default()
+            }
+            .update(db)
             .await
             .map_err(txn_error)?;
             *id
         }
         [] => {
+            use sea_orm::{ActiveModelTrait, Set};
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
             let id = Uuid::new_v4();
-            sqlx::query(
-                r#"INSERT INTO git_repositories
-                   (id, created_at, updated_at, created_by_id,
-                    provider, host_url, external_id, namespace, name, full_name,
-                    web_url, clone_url_http, clone_url_ssh, default_branch,
-                    is_private, metadata)
-                   VALUES ($1, now(), now(), $2,
-                           'github', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
-            )
-            .bind(id)
-            .bind(actor_id)
-            .bind(GITHUB_HOST_URL)
-            .bind(&external_id)
-            .bind(&lower_owner)
-            .bind(&lower_name)
-            .bind(&full_name)
-            .bind(web_url)
-            .bind(clone_http)
-            .bind(clone_ssh)
-            .bind(default_branch)
-            .bind(is_private)
-            .bind(Value::Object(verified.clone()))
-            .execute(&mut **tx)
+            git_repositories::ActiveModel {
+                id: Set(id),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(*actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                provider: Set("github".to_owned()),
+                host_url: Set(GITHUB_HOST_URL.to_owned()),
+                external_id: Set(external_id.clone()),
+                namespace: Set(lower_owner.clone()),
+                name: Set(lower_name.clone()),
+                full_name: Set(full_name.clone()),
+                web_url: Set(web_url.to_owned()),
+                clone_url_http: Set(clone_http.to_owned()),
+                clone_url_ssh: Set(clone_ssh.to_owned()),
+                default_branch: Set(default_branch.to_owned()),
+                is_private: Set(is_private),
+                metadata: Set(Value::Object(verified.clone())),
+            }
+            .insert(db)
             .await
             .map_err(txn_error)?;
             id
         }
         _ => return Err(TxnError::Server),
     };
-    let existing: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM git_repository_bindings
-           WHERE project_id = $1 AND deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(txn_error)?;
-    if let Some((id,)) = existing {
+    let existing: Option<Uuid> = git_repository_bindings::Entity::find()
+        .select_only()
+        .column(git_repository_bindings::Column::Id)
+        .filter(git_repository_bindings::Column::ProjectId.eq(*project_id))
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .order_by_desc(git_repository_bindings::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(txn_error)?;
+    if let Some(id) = existing {
         // `existing.delete(soft=False)` (`github.py:404-406`): the Collector
         // takes the issue/comment syncs first — the FKs have no
         // `ON DELETE CASCADE`, so the bare parent DELETE would 23503 at
         // COMMIT once anything synced.
-        super::handlers_git_repo::delete_git_binding_children(tx, &[id])
+        super::handlers_git_repo::delete_git_binding_children(db, &[id])
             .await
             .map_err(txn_error)?;
-        sqlx::query("DELETE FROM git_repository_bindings WHERE id = $1")
-            .bind(id)
-            .execute(&mut **tx)
+        git_repository_bindings::Entity::delete_many()
+            .filter(git_repository_bindings::Column::Id.eq(id))
+            .exec(db)
             .await
             .map_err(txn_error)?;
     }
-    let metadata = serde_json::json!({"legacy_github_repository_sync_id": sync_id.to_string()});
     let clone_auth_mode = if is_private {
         "runner_managed"
     } else {
         "public"
     };
-    sqlx::query(
-        r#"INSERT INTO git_repository_bindings
-           (id, created_at, updated_at, created_by_id, project_id, workspace_id,
-            repository_id, provider_account_id, actor_id, is_sync_enabled,
-            clone_auth_mode, last_sync_error, metadata)
-           VALUES ($1, now(), now(), $2, $3, $4, $5, $6, $7, false, $8, '', $9)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(repo_id)
-    .bind(account_id)
-    .bind(actor_id)
-    .bind(clone_auth_mode)
-    .bind(metadata)
-    .execute(&mut **tx)
-    .await
-    .map_err(txn_error)?;
-    Ok(())
+    let binding_id = Uuid::new_v4();
+    {
+        use sea_orm::{ActiveModelTrait, Set};
+        let stamped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        git_repository_bindings::ActiveModel {
+            id: Set(binding_id),
+            created_at: Set(stamped),
+            updated_at: Set(stamped),
+            created_by_id: Set(Some(*actor_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            project_id: Set(*project_id),
+            workspace_id: Set(*workspace_id),
+            repository_id: Set(repo_id),
+            provider_account_id: Set(account_id),
+            actor_id: Set(*actor_id),
+            is_sync_enabled: Set(false),
+            clone_auth_mode: Set(clone_auth_mode.to_owned()),
+            last_synced_at: Set(None),
+            last_sync_error: Set(String::new()),
+            metadata: Set(serde_json::json!({})),
+        }
+        .insert(db)
+        .await
+        .map_err(txn_error)?;
+    }
+    Ok(binding_id)
 }
 
 /// `POST workspaces/<slug>/projects/<id>/github/bind/`
 /// (`GithubProjectBindEndpoint.post`, `github.py:981-1082`): verify the
-/// URL upstream, then — inside one transaction — rebind (hard delete the
-/// existing sync so the conditional unique on `project` never trips),
-/// get-or-create the repository and the `github` label, create the sync
-/// (always `is_sync_enabled=False`, even on rebind), upsert the
-/// `GitRepositoryBinding` mirror, and persist the canonical URL on the
-/// project when it differs (Bind doubles as the General-Settings save).
+/// URL upstream, then — inside one transaction — get-or-create the
+/// `github` label, upsert the `GitRepositoryBinding` (always
+/// `is_sync_enabled=False`, even on rebind), and persist the canonical
+/// URL on the project when it differs (Bind doubles as the
+/// General-Settings save). The response `id` is the binding id.
 async fn post_bind(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -1673,24 +1512,25 @@ async fn post_bind(
         Some(parsed) => parsed,
         None => return raw_body(StatusCode::BAD_REQUEST, BAD_URL_BODY),
     };
-    let workspace_id: Uuid = match sqlx::query_as::<_, (Uuid,)>(
-        "SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL",
-    )
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(Some((id,))) => id,
-        Ok(None) => return raw_body(StatusCode::NOT_FOUND, NO_WORKSPACE_BODY),
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let project: Option<(Uuid, String)> = match sqlx::query_as(
-        "SELECT id, repo_url FROM projects WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .bind(workspace_id)
-    .fetch_optional(&pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let workspace_id: Uuid =
+        match pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, &slug).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return raw_body(StatusCode::NOT_FOUND, NO_WORKSPACE_BODY),
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let project: Option<(Uuid, String)> = match projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .column(projects::Column::RepoUrl)
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
@@ -1699,12 +1539,12 @@ async fn post_bind(
         Some(project) => project,
         None => return raw_body(StatusCode::NOT_FOUND, NO_PROJECT_BODY),
     };
-    let integration_id = match fetch_integration_id_by_provider(&pool).await {
+    let integration_id = match fetch_integration_id_by_provider(&db).await {
         Ok(id) => id,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let workspace_integration = match integration_id {
-        Some(id) => match fetch_workspace_integration(&pool, workspace_id, id).await {
+        Some(id) => match fetch_workspace_integration(&db, workspace_id, id).await {
             Ok(wi) => wi,
             Err(_) => return Denial::ServerError.into_response(),
         },
@@ -1727,7 +1567,10 @@ async fn post_bind(
         Ok(verified) => verified,
         Err(response) => return response,
     };
-    let repository_id = match python_repo_id(verified.get("id")) {
+    // The id check stays (the 502 when GitHub returns no repository
+    // id); the value itself is unused — the git path derives the
+    // external id from `verified` directly.
+    let _repository_id = match python_repo_id(verified.get("id")) {
         Ok(0) => return raw_body(StatusCode::BAD_GATEWAY, NO_REPO_ID_BODY),
         Ok(id) => id,
         Err(()) => return Denial::ServerError.into_response(),
@@ -1753,14 +1596,13 @@ async fn post_bind(
         raw_token,
         &current_repo_url,
         &canonical_text,
-        repository_id,
         &owner,
         &name,
         &verified,
     )
     .await;
-    let sync_id = match outcome {
-        Ok(sync_id) => sync_id,
+    let binding_id = match outcome {
+        Ok(binding_id) => binding_id,
         Err(error) => return error.into_response(),
     };
     if tx.commit().await.is_err() {
@@ -1771,7 +1613,7 @@ async fn post_bind(
         Err(()) => return Denial::ServerError.into_response(),
     };
     let mut map = serde_json::Map::with_capacity(6);
-    map.insert("id".to_owned(), Value::String(sync_id.to_string()));
+    map.insert("id".to_owned(), Value::String(binding_id.to_string()));
     map.insert("repository".to_owned(), repository);
     map.insert("is_sync_enabled".to_owned(), Value::Bool(false));
     map.insert("last_synced_at".to_owned(), Value::Null);
@@ -1781,7 +1623,7 @@ async fn post_bind(
 }
 
 /// The bind writes inside `transaction.atomic()` (`github.py:1026-1065`),
-/// returning the new sync id. Any unique violation is the 409.
+/// returning the new binding id. Any unique violation is the 409.
 #[allow(clippy::too_many_arguments)]
 async fn bind_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1792,72 +1634,19 @@ async fn bind_transaction(
     raw_token: &str,
     current_repo_url: &str,
     canonical_url: &str,
-    repository_id: i64,
     owner: &str,
     name: &str,
     verified: &serde_json::Map<String, Value>,
 ) -> Result<Uuid, TxnError> {
-    let existing: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM github_repository_syncs
-           WHERE project_id = $1 AND deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(txn_error)?;
-    if let Some((id,)) = existing {
-        // Rebind (`github.py:1026-1032`): Collector-cascade the issue and
-        // comment syncs first — the FKs have no `ON DELETE CASCADE`, so
-        // the bare parent DELETE would 23503 at COMMIT once anything synced.
-        super::handlers_git_repo::delete_github_sync_children(tx, &[id])
-            .await
-            .map_err(txn_error)?;
-        sqlx::query("DELETE FROM github_repository_syncs WHERE id = $1")
-            .bind(id)
-            .execute(&mut **tx)
-            .await
-            .map_err(txn_error)?;
-    }
-    let repo_id = get_or_create_repo(
-        tx,
-        actor_id,
-        project_id,
-        workspace_id,
-        repository_id,
-        owner,
-        name,
-        canonical_url,
-    )
-    .await?;
-    let label_id = get_or_create_label(tx, actor_id, project_id, workspace_id).await?;
-    let sync_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO github_repository_syncs
-           (id, created_at, updated_at, created_by_id, project_id, workspace_id,
-            repository_id, credentials, actor_id, workspace_integration_id,
-            label_id, is_sync_enabled, last_sync_error)
-           VALUES ($1, now(), now(), $2, $3, $4, $5, '{}', $6, $7, $8, false, '')"#,
-    )
-    .bind(sync_id)
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(repo_id)
-    .bind(actor_id)
-    .bind(workspace_integration_id)
-    .bind(label_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(txn_error)?;
-    upsert_git_binding(
-        tx,
+    let conn = pidash_db::orm_tx::TxConn::new(tx);
+    let _label_id = get_or_create_label(&conn, actor_id, project_id, workspace_id).await?;
+    let binding_id = upsert_git_binding(
+        &conn,
         actor_id,
         project_id,
         workspace_id,
         workspace_integration_id,
         raw_token,
-        &sync_id,
         verified,
         owner,
         name,
@@ -1865,15 +1654,22 @@ async fn bind_transaction(
     .await?;
     if current_repo_url != canonical_url {
         pidash_services::domain::projects::stamp_text_field(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             pidash_services::domain::projects::ProjectTextField::RepoUrl,
             canonical_url,
             *project_id,
         )
         .await
-        .map_err(txn_error)?;
+        .map_err(|error| {
+            if let Some(db_error) = error.as_database_error() {
+                if db_error.code().as_deref() == Some("23505") {
+                    return TxnError::Conflict;
+                }
+            }
+            TxnError::Server
+        })?;
     }
-    Ok(sync_id)
+    Ok(binding_id)
 }
 
 #[cfg(test)]
@@ -1884,7 +1680,7 @@ mod tests {
     #[test]
     fn soft_delete_message_shape() {
         let id = Uuid::nil();
-        let message = soft_delete_message("githubrepositorysync", &id);
+        let message = soft_delete_message("gitrepositorybinding", &id);
         assert_eq!(
             message.task,
             pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
@@ -1893,7 +1689,7 @@ mod tests {
             message.args,
             vec![
                 Value::String("db".to_owned()),
-                Value::String("githubrepositorysync".to_owned()),
+                Value::String("gitrepositorybinding".to_owned()),
                 Value::String(id.to_string()),
             ]
         );
@@ -2137,17 +1933,17 @@ mod tests {
 
     #[test]
     fn status_shapes_keep_key_order() {
-        let legacy = LegacyStatus {
+        let fallback = FallbackStatus {
             id: Uuid::nil(),
-            is_sync_enabled: false,
+            is_sync_enabled: true,
             last_synced_at: None,
             last_sync_error: String::new(),
-            repository_id: 7,
-            owner: "o".to_owned(),
+            external_id: "7".to_owned(),
+            namespace: "o".to_owned(),
             name: "r".to_owned(),
-            url: Some("https://github.com/o/r".to_owned()),
+            web_url: "https://github.com/o/r".to_owned(),
         };
-        let body = legacy_body(&legacy);
+        let body = fallback_body(&fallback);
         let keys: Vec<&str> = body
             .as_object()
             .expect("object")
@@ -2165,19 +1961,6 @@ mod tests {
                 "last_sync_error"
             ]
         );
-        assert_eq!(body["repository"]["id"], Value::from(7));
-
-        let fallback = FallbackStatus {
-            id: Uuid::nil(),
-            is_sync_enabled: true,
-            last_synced_at: None,
-            last_sync_error: String::new(),
-            external_id: "7".to_owned(),
-            namespace: "o".to_owned(),
-            name: "r".to_owned(),
-            web_url: "https://github.com/o/r".to_owned(),
-        };
-        let body = fallback_body(&fallback);
         assert_eq!(body["repository"]["id"], Value::String("7".to_owned()));
         assert_eq!(body["is_sync_enabled"], Value::Bool(true));
     }

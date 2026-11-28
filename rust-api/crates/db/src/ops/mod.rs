@@ -9,8 +9,8 @@
 //! * [`instance`] — the `Pod` backfill scan/insert plus the scheduler
 //!   dry-run reads (PIDASHCONV-809). `InstanceConfiguration`/`Instance`
 //!   SQL stays in `crate::license` (D-01).
-//! * [`prompting`] — `PromptTemplate` / `PromptSectionOverride` statements
-//!   behind the prompting reseed + revalidate commands (PIDASHCONV-810).
+//! * [`prompting`] — `PromptSectionOverride` statements behind the
+//!   prompting revalidate command (PIDASHCONV-810; reseed removed NEWPIDASH-404).
 
 pub mod instance;
 pub mod prompting;

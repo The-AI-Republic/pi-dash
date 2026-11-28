@@ -12,6 +12,17 @@ export const ASSISTANT_CAPTION = "Ask about your issues, create work, or start a
 export const ASSISTANT_PLACEHOLDER = "Ask Pi Dash to do something…";
 /** Composer label for assistive technology. */
 export const ASSISTANT_COMPOSER_LABEL = "Message the assistant";
+/** Label of the OpenHub model picker in the composer (NEWPIDASH-303). */
+export const ASSISTANT_MODEL_PICKER_LABEL = "Assistant model";
+/** Failure notice title when the composer model picker's write is refused. */
+export const MODEL_PICKER_FAILED_TITLE = "Model change failed";
+/** Fallback detail when the model write carries no server message. */
+export const MODEL_PICKER_FAILED_FALLBACK = "The model could not be changed";
+/** Notice title when a free-plan pick would charge credit the plan cannot pay. */
+export const MODEL_PICKER_BLOCKED_TITLE = "Model needs credit";
+/** Body of the blocked-pick notice, mirroring the Settings guard. */
+export const MODEL_PICKER_BLOCKED_BODY =
+  "Free plans can use free models only. Switch to a free model or top up to use this one.";
 /** Send action label. */
 export const ASSISTANT_SEND_LABEL = "Send message";
 /** Stop action label (owned by the thread slice; the gate only proves it hides). */
@@ -71,16 +82,22 @@ export const API_KEY_REQUIRED_TITLE = "API key required";
 export const UNTITLED_CONVERSATION = "Untitled conversation";
 /** Empty-state line inside a conversation with no messages yet. */
 export const EMPTY_CONVERSATION_HINT = ASSISTANT_CAPTION;
-/** Empty state for the conversation rail (members only; not shown on a refusal). */
+/** Empty state for the conversation history (members only; not shown on a refusal). */
 export const NO_CONVERSATIONS = "No conversations yet.";
-/** Heading above the conversation rail. */
-export const CONVERSATION_RAIL_TITLE = "Conversations";
-/** New-conversation rail action. */
+/** New-conversation action in the assistant page header. */
 export const NEW_CONVERSATION_LABEL = "New chat";
-/** Brand line at the top of the conversation rail, matched exactly by the AGT-061 scenario. */
-export const CONVERSATION_RAIL_BRAND = "Pi Dash AI";
+/**
+ * History button label in the assistant page header, and the title of the
+ * history dialog it opens (parity/specs/agents.md §11, AGT-044/AGT-061).
+ */
+export const CHAT_HISTORY_TITLE = "Chat History";
 /** Fallback label for a tool-activity link the server sent without one. */
 export const TOOL_LINK_FALLBACK = "View";
+/**
+ * Heading of the desktop panel shown when the Pi Dash Agent is
+ * unavailable (NEWPIDASH-300). The server's reason sentence follows.
+ */
+export const DESKTOP_AGENT_UNAVAILABLE_TITLE = "The Pi Dash Agent isn't available";
 
 /**
  * Dashboard card suggestion chips (AGT-048), in display order. Picking one

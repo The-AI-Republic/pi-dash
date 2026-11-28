@@ -396,24 +396,20 @@ struct SttRow {
 }
 
 async fn fetch_stt_row(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<SttRow, Denial> {
-    let row = sqlx::query(
-        "SELECT \"base_url\", \"model_name\", \"api_key_encrypted\" \
-         FROM \"assistant_user_stt_config\" WHERE \"user_id\" = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_stt_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_stt_config::Column::UserId.eq(*user_id))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(match row {
         Some(row) => {
-            let api_key_encrypted: Option<Vec<u8>> =
-                row.try_get("api_key_encrypted").unwrap_or(None);
-            let has_api_key = pidash_db::assistant::models::has_secret(&api_key_encrypted);
+            let has_api_key = pidash_db::assistant::models::has_secret(&row.api_key_encrypted);
             SttRow {
-                base_url: row.try_get("base_url").unwrap_or_default(),
-                model_name: row.try_get("model_name").unwrap_or_default(),
-                api_key_encrypted,
+                base_url: row.base_url,
+                model_name: row.model_name,
+                api_key_encrypted: row.api_key_encrypted,
                 has_api_key,
             }
         }

@@ -39,6 +39,7 @@ pub mod auth;
 pub mod delete_cmds;
 pub mod desktop;
 pub mod enroll;
+pub mod machine_identity;
 pub mod manage;
 pub mod projects;
 pub mod teardown;

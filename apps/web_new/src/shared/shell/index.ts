@@ -16,7 +16,7 @@ export {
 } from "./document.js";
 export type { DocumentHead, HeadTag, OverlayPortalProps, OverlayRootId } from "./document.js";
 export { FAVORITES_SECTION_OPEN_KEY, isFavoritesSectionOpen, setFavoritesSectionOpen } from "./favorites.js";
-export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
+export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundNotice, NotFoundPage } from "./NotFoundPage.js";
 export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
 export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";

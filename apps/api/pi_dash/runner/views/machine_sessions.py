@@ -18,7 +18,13 @@ Three verbs, mirroring the per-runner session:
 - ``DELETE /api/v1/runner/dev-machines/<mid>/sessions/<sid>/`` — clean
   shutdown.
 - ``POST   /api/v1/runner/dev-machines/<mid>/sessions/<sid>/poll`` —
-  long-poll; body carries ``ack``.
+  long-poll; body carries ``ack`` and, optionally, the heartbeat's
+  ``engine_state`` (``{"state": ..., "reason_code": ...}``).
+
+One machine session serves every workspace on the machine (design §4.9):
+it may be opened, polled and closed with the token of any workspace the
+daemon holds for this machine. Revoking or expiring the token it was opened
+with ends it.
 """
 
 from __future__ import annotations
@@ -100,6 +106,10 @@ class MachineSessionOpenEndpoint(APIView):
             MachineSession.objects.create(
                 id=new_sid,
                 dev_machine=machine,
+                # Any workspace's token of this machine may open the one
+                # machine session (design §4.9); remember which, so revoking
+                # that token ends the session.
+                machine_token=request.auth_machine_token,
                 protocol_version=settings.RUNNER_PROTOCOL_VERSION,
                 last_seen_at=timezone.now(),
             )
@@ -178,7 +188,7 @@ def _poll_bookkeeping(machine, body: Dict[str, Any], sid):
     Returns ``(error, plan)`` — exactly one is non-None.
     """
     try:
-        session = MachineSession.objects.get(id=sid, dev_machine=machine)
+        session = MachineSession.objects.select_related("machine_token").get(id=sid, dev_machine=machine)
     except MachineSession.DoesNotExist:
         return (
             {"payload": {"error": "session_evicted"}, "status": status.HTTP_409_CONFLICT},
@@ -193,12 +203,40 @@ def _poll_bookkeeping(machine, body: Dict[str, Any], sid):
             None,
         )
 
+    opened_with = session.machine_token
+    if opened_with is not None and (opened_with.revoked_at is not None or opened_with.is_expired()):
+        # The token the session was opened with is gone: end the session, as
+        # a revoked token always did. The daemon re-opens it with another
+        # workspace's token if it holds one (design §4.9).
+        reason = "machine_token_revoked" if opened_with.revoked_at is not None else "machine_token_expired"
+        MachineSession.objects.filter(pk=session.pk, revoked_at__isnull=True).update(
+            revoked_at=timezone.now(), revoked_reason=reason
+        )
+        return (
+            {
+                "payload": {"error": "session_evicted", "reason": reason},
+                "status": status.HTTP_409_CONFLICT,
+            },
+            None,
+        )
+
     ack_ids: List[str] = list(body.get("ack") or [])
 
     now_ts = timezone.now()
     session.last_seen_at = now_ts
     session.save(update_fields=["last_seen_at"])
     DevMachine.objects.filter(pk=machine.id).update(last_seen_at=now_ts)
+
+    engine_state = body.get("engine_state")
+    if isinstance(engine_state, dict):
+        from pi_dash.runner.services.engine_state import record_engine_state_report
+
+        try:
+            record_engine_state_report(machine, engine_state)
+        except Exception:
+            # A malformed or racing report must never break the poll that
+            # delivers the machine's control messages.
+            logger.exception("engine_state report failed for machine %s", machine.id)
 
     if ack_ids:
         machine_outbox.ack_for_session(machine.id, ack_ids)

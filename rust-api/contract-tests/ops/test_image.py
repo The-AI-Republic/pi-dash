@@ -51,7 +51,10 @@ SCRIPTS = [
 ]
 
 WAIT = "pidash-api ops wait_for_db"
-WAIT_MIG = "pidash-api ops wait_for_migrations"
+# NEWPIDASH-378: entrypoints run the fail-fast `check_migrations` where the
+# Python fleet waited. The golden steps below still name the wait (they pin
+# the Python boot); each replay maps its wait step to this check evidence.
+CHECK_MIG = "pidash-api ops check_migrations"
 REGISTER = 'pidash-api ops instance register-instance "$MACHINE_SIGNATURE"'
 CONFIGURE = "pidash-api ops instance configure-instance"
 BUCKET = "pidash-api ops create_bucket"
@@ -61,7 +64,7 @@ CACHE = "pidash-api ops clear_cache"
 EXPECTED_COMMANDS = {
     "api": [
         WAIT,
-        WAIT_MIG,
+        CHECK_MIG,
         REGISTER,
         CONFIGURE,
         BUCKET,
@@ -70,7 +73,7 @@ EXPECTED_COMMANDS = {
     ],
     "api-local": [
         WAIT,
-        WAIT_MIG,
+        CHECK_MIG,
         REGISTER,
         CONFIGURE,
         BUCKET,
@@ -79,12 +82,12 @@ EXPECTED_COMMANDS = {
     ],
     "worker": [
         WAIT,
-        WAIT_MIG,
-        'exec pidash-api worker --concurrency "$concurrency"',
+        CHECK_MIG,
+        'exec pidash-api worker "${worker_args[@]}"',
     ],
-    "worker-local": [WAIT, WAIT_MIG, "exec pidash-api worker"],
-    "beat": [WAIT, WAIT_MIG, "pidash-api worker"],
-    "beat-local": [WAIT, WAIT_MIG, "exec pidash-api worker"],
+    "worker-local": [WAIT, CHECK_MIG, "exec pidash-api worker"],
+    "beat": [WAIT, CHECK_MIG, "pidash-api worker"],
+    "beat-local": [WAIT, CHECK_MIG, "exec pidash-api worker"],
     "migrator": [WAIT, "python manage.py migrate $1"],
 }
 
@@ -94,6 +97,7 @@ EXPECTED_COMMANDS = {
 HELP_PREFIXES = [
     ("ops", "wait_for_db"),
     ("ops", "wait_for_migrations"),
+    ("ops", "check_migrations"),
     ("ops", "instance", "register-instance"),
     ("ops", "instance", "configure-instance"),
     ("ops", "create_bucket"),
@@ -104,8 +108,9 @@ HELP_PREFIXES = [
 
 # Script-local variables (assigned by the scripts themselves, not read
 # from the environment): the signature collectors (api :11-21),
-# MACHINE_SIGNATURE (api export :21, read back at :24), and the worker
-# concurrency math (:19-28). Everything else $-referenced is an env dep.
+# MACHINE_SIGNATURE (api export :21, read back at :24), the worker
+# concurrency math (:19-28), and the Phase 2 worker queue/args locals
+# (queue, worker_args). Everything else $-referenced is an env dep.
 LOCAL_VARS = {
     "HOSTNAME",
     "MAC_ADDRESS",
@@ -115,6 +120,8 @@ LOCAL_VARS = {
     "SIGNATURE",
     "MACHINE_SIGNATURE",
     "concurrency",
+    "queue",
+    "worker_args",
 }
 
 # Runbook-table variables consumed by the Rust binary rather than the
@@ -307,7 +314,7 @@ def test_replay_api():
         "api",
         [
             ("wait_for_db (:3)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             ("machine signature", [("verbatim_py", _signature_span())]),
             ('register_instance "$MACHINE_SIGNATURE"', [("cmd", REGISTER)]),
             ("configure_instance (:27)", [("cmd", CONFIGURE)]),
@@ -327,7 +334,7 @@ def test_replay_api_local():
                 "same wait/signature/register/configure/bucket/cache steps",
                 [
                     ("cmd", WAIT),
-                    ("cmd", WAIT_MIG),
+                    ("cmd", CHECK_MIG),
                     ("verbatim_py", _signature_span()),
                     ("cmd", REGISTER),
                     ("cmd", CONFIGURE),
@@ -361,11 +368,17 @@ def test_replay_worker():
         "worker",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:6)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:6)", [("cmd", CHECK_MIG)]),
             ("concurrency resolution", [("verbatim_py", _worker_math())]),
             ("exec celery", [("cmd", EXPECTED_COMMANDS["worker"][-1])]),
         ],
     )
+    # Phase 2: worker_args carries --concurrency/--queue and optional --no-scheduler
+    text = read_script("worker")
+    assert 'worker_args=(--concurrency "$concurrency" --queue "$queue")' in text
+    assert "worker_args+=(--no-scheduler)" in text
+    assert "WORKER_QUEUE" in text
+    assert "WORKER_NO_SCHEDULER" in text
 
 
 def test_replay_worker_local():
@@ -373,7 +386,7 @@ def test_replay_worker_local():
         "worker-local",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             (
                 "exec watchmedo auto-restart",
                 [
@@ -390,7 +403,7 @@ def test_replay_beat():
         "beat",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:6)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:6)", [("cmd", CHECK_MIG)]),
             ("celery -A pi_dash beat -l info (:8", [("cmd", "pidash-api worker")]),
         ],
     )
@@ -401,7 +414,7 @@ def test_replay_beat_local():
         "beat-local",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             (
                 "exec watchmedo auto-restart",
                 [
@@ -553,6 +566,17 @@ def test_dockerfile_copies():
             assert "pidash-api/" not in line.split("COPY", 1)[1].replace(
                 "/tmp/pidash-api", ""
             ), f"Rust sources leak into the image: {line}"
+
+
+def test_dockerfile_builder_needs_no_apps_api():
+    # NEWPIDASH-376: templates are vendored under rust-api/templates, so the
+    # builder stage compiles with only the Rust tree in context. (The
+    # runtime stage still copies seeds + package.json fallbacks from
+    # apps/api until NEWPIDASH-377 lands — those are asserted above, and
+    # this case pins exactly the builder COPY that went away.)
+    text = dockerfile_text()
+    assert "COPY rust-api ./rust-api" in text
+    assert "COPY apps/api ./apps/api" not in text
 
 
 def test_dockerfile_perms_and_logs():

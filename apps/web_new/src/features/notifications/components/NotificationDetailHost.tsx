@@ -14,16 +14,18 @@ import * as React from "react";
 
 import { Avatar, IconButton, Spinner } from "@pidash/kit";
 import { getAppClient } from "../../../core/api/client.js";
-import { ROLE_MEMBER, useWorkspace } from "../../../core/session/index.js";
+import { ROLE_MEMBER, useMe, useWorkspace } from "../../../core/session/index.js";
 import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { projectMembershipQueryOptions } from "../../auth/index.js";
 import {
   IssueAgentActionsEntry,
+  canRunIssue,
   IssueDetailRoot,
   IssuePropertiesSidebar,
   TriageDetailRoot,
   issueDetailQueryOptions,
 } from "../../issues/index.js";
+import { projectDetailsQueryOptions } from "../../projects/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { formatNotificationAge } from "../lib/relativeAge.js";
 
@@ -38,19 +40,6 @@ export function NotificationDetailHost({
   selection,
   onClose,
 }: NotificationDetailHostProps): React.ReactElement {
-  // The access read is per project and per selection, never the warmed
-  // workspace role map: its own fetch runs while the pane shows the
-  // loading state, and a triage item then embeds the issues-owned
-  // triage content (spec §5, §12).
-  const access = useQuery({
-    ...projectMembershipQueryOptions(getAppClient(), workspaceSlug, selection?.projectId ?? ""),
-    enabled: selection !== null,
-  });
-  const issue = useQuery({
-    ...issueDetailQueryOptions(getAppClient(), workspaceSlug, selection?.projectId ?? "", selection?.issueId ?? ""),
-    enabled: selection !== null && !access.isPending,
-  });
-
   if (selection === null) {
     return (
       <div data-testid="notifications-detail-pane" className="grid h-full place-items-center p-(--space-8) text-center">
@@ -70,6 +59,36 @@ export function NotificationDetailHost({
       </div>
     );
   }
+
+  return <NotificationDetailPane workspaceSlug={workspaceSlug} selection={selection} onClose={onClose} />;
+}
+
+function NotificationDetailPane({
+  workspaceSlug,
+  selection,
+  onClose,
+}: {
+  workspaceSlug: string;
+  selection: NotificationCardData;
+  onClose: () => void;
+}): React.ReactElement {
+  const me = useMe();
+  // The access read is per project and per selection, never the warmed
+  // workspace role map: its own fetch runs while the pane shows the
+  // loading state, and a triage item then embeds the issues-owned
+  // triage content (spec §5, §12).
+  const access = useQuery({
+    ...projectMembershipQueryOptions(getAppClient(), workspaceSlug, selection.projectId),
+    enabled: true,
+  });
+  const issue = useQuery({
+    ...issueDetailQueryOptions(getAppClient(), workspaceSlug, selection.projectId, selection.issueId),
+    enabled: !access.isPending,
+  });
+  const projectQuery = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
+  const project = Array.isArray(projectQuery.data)
+    ? projectQuery.data.find((row) => row.id === selection.projectId)
+    : undefined;
 
   if (access.isPending || issue.isPending) {
     return (
@@ -160,6 +179,13 @@ export function NotificationDetailHost({
               projectId={selection.projectId}
               issue={issue.data}
               editable={editable}
+              canRun={canRunIssue({
+                policy: project?.settings?.issue_run_policy,
+                viewerId: me.data?.id ?? null,
+                creatorId: issue.data.created_by,
+                assigneeIds: issue.data.assignee_ids,
+                memberRole: project?.member_role ?? null,
+              })}
             />
           }
         />
@@ -178,10 +204,10 @@ function IssuePreviewDetail(props: {
   sidebar: React.ReactNode;
 }): React.ReactElement {
   const { workspace } = useWorkspace(props.workspaceSlug);
-  // The browse detail's writable rule: member standing plus a live,
-  // unsynced row. Archived and synced items keep their agent controls
-  // inert here just as they do on the full detail.
-  const writable = props.editable && props.issue.archived_at === null && !props.issue.is_synced;
+  // The browse detail's writable rule: member standing plus a live
+  // row. Archived items keep their agent controls inert here just as
+  // they do on the full detail; synced items stay writable.
+  const writable = props.editable && props.issue.archived_at === null;
   return (
     <IssueDetailRoot
       workspaceSlug={props.workspaceSlug}

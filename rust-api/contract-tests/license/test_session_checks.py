@@ -322,3 +322,18 @@ def test_fresh_session_signout_applies_save_effects(world):
     assert token != before[1] and len(token) == 64, "save() must rotate token"
     assert token_updated_at > before[2], "save() must re-stamp token_updated_at"
     assert display_name == "admin", "save() must fill an empty display_name"
+
+
+def test_signout_stamps_peer_address_without_forwarded_header(world):
+    """NEWPIDASH-42: a live admin sign-out with no X-Forwarded-For stamps
+    ``last_logout_ip`` with the peer address. Django's ``get_client_ip``
+    (``utils/ip_address.py``) falls back to ``REMOTE_ADDR``; the Rust port
+    fell back to ``''``. The client below sends no forwarding header, so
+    both backends must record the contract-stack peer (127.0.0.1)."""
+    client = _primed_client_with_cookie(signing.ADMIN_SESSION_COOKIE, world["admin_key"])
+    assert "x-forwarded-for" not in client.headers
+    res = client.post("/api/instances/admins/sign-out/", data={})
+    assert res.status_code == 302, (res.status_code, res.text[:200])
+    ip, at = _logout_stamps(world["db"], "admin@example.com")
+    assert ip == "127.0.0.1", ip
+    assert at is not None

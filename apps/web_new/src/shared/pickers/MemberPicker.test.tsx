@@ -634,7 +634,12 @@ describe("MemberPicker chip", () => {
     const chip = await screen.findByRole("button", { name: "Assignees: Ana, Max" });
     expect(chip.querySelector("span.truncate")).toBeNull();
     expect(chip.className).not.toContain("border");
-    expect(chip).toHaveAttribute("title", "Ana, Max");
+    expect(chip).not.toHaveAttribute("title");
     expect(document.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Assignees: Ana, Max — The people responsible for doing this work."
+    );
   });
 });

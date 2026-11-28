@@ -18,6 +18,7 @@ import {
   instantZoneDay,
   projectOffsetChip,
   projectToday,
+  resolveViewerTimeZone,
   zoneOffsetMinutes,
 } from "./cycleDates.js";
 
@@ -192,6 +193,22 @@ describe("formatCycleSpanText", () => {
   });
 });
 
+describe("resolveViewerTimeZone", () => {
+  it("prefers the profile zone when set", () => {
+    expect(resolveViewerTimeZone("Asia/Tokyo")).toBe("Asia/Tokyo");
+    expect(resolveViewerTimeZone(" Europe/Berlin ")).toBe("Europe/Berlin");
+  });
+
+  it("falls back to the browser zone when the profile is unset, empty, or invalid", () => {
+    const system = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(resolveViewerTimeZone(null)).toBe(system);
+    expect(resolveViewerTimeZone(undefined)).toBe(system);
+    expect(resolveViewerTimeZone("")).toBe(system);
+    expect(resolveViewerTimeZone("   ")).toBe(system);
+    expect(resolveViewerTimeZone("Mars/Olympus")).toBe(system);
+  });
+});
+
 describe("cycleSpanModel", () => {
   it("carries the chip and the viewer tooltip when zones differ", () => {
     const model = cycleSpanModel(SEP_01, "2026-12-31T12:00:00Z", NY, "UTC");
@@ -200,6 +217,24 @@ describe("cycleSpanModel", () => {
     expect(model.chip).toMatch(/^UTC [+-]/);
     expect(model.tooltip).toContain("your timezone");
     expect(model.tooltip).toContain("2026");
+  });
+
+  it("renders the tooltip in the profile zone, not the browser zone (CYC-044)", () => {
+    // Project America/New_York, profile Asia/Tokyo, browser Europe/Berlin would diverge.
+    // The tooltip must use the viewer passed (simulating the profile via resolveViewerTimeZone).
+    const start = "2026-09-01T20:00:00Z";
+    const end = "2026-09-18T20:00:00Z";
+    const project = "America/New_York";
+    const profile = "Asia/Tokyo";
+    const fallback = "Europe/Berlin";
+    const modelWithProfile = cycleSpanModel(start, end, project, resolveViewerTimeZone(profile));
+    const modelWithFallback = cycleSpanModel(start, end, project, fallback);
+    // Profile Tokyo shifts to Sep 02-19, browser Berlin stays Sep 01-18.
+    expect(modelWithProfile.tooltip).toContain(formatCycleSpanText(start, end, profile));
+    expect(modelWithFallback.tooltip).toContain(formatCycleSpanText(start, end, fallback));
+    expect(modelWithProfile.tooltip).not.toBe(modelWithFallback.tooltip);
+    expect(modelWithProfile.tooltip).toContain("Sep 02 - 19");
+    expect(modelWithFallback.tooltip).toContain("Sep 01 - 18");
   });
 
   it("keeps the chip but drops the tooltip in the same zone", () => {

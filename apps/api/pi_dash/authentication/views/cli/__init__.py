@@ -10,6 +10,10 @@ from .device import (
     DeviceMachineTokenEndpoint,
     WorkspaceListEndpoint,
 )
+from .handoff import (
+    DesktopHandoffIssueEndpoint,
+    DesktopHandoffRedeemEndpoint,
+)
 
 __all__ = [
     "DeviceCodeStartEndpoint",
@@ -18,4 +22,6 @@ __all__ = [
     "DeviceCodeRevokeEndpoint",
     "DeviceMachineTokenEndpoint",
     "WorkspaceListEndpoint",
+    "DesktopHandoffIssueEndpoint",
+    "DesktopHandoffRedeemEndpoint",
 ]

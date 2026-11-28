@@ -40,6 +40,15 @@ pub struct PendingRunFailure {
     /// [`REPLAY_TTL`] so a permanently unreachable cloud can't grow the
     /// journal without bound.
     pub recorded_at: DateTime<Utc>,
+    /// Why the daemon shut down (NEWPIDASH-253 trigger token, e.g.
+    /// `SIGTERM`). `None` on entries journaled before trigger carriage
+    /// shipped; replay sends the stored `detail` verbatim either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    /// Previous systemd exit the daemon already knew at drain time
+    /// (e.g. `oom-kill`). Same compat rule as [`Self::trigger`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_exit: Option<String>,
 }
 
 /// How long replay keeps retrying an entry before giving up. After this
@@ -171,6 +180,8 @@ mod tests {
             detail: detail.to_string(),
             ended_at: Utc::now(),
             recorded_at: Utc::now(),
+            trigger: None,
+            previous_exit: None,
         }
     }
 
@@ -220,5 +231,48 @@ mod tests {
         std::fs::create_dir_all(paths.data_dir.clone()).unwrap();
         std::fs::write(journal_path(&paths), b"not json{{{").unwrap();
         assert!(load(&paths).is_empty());
+    }
+
+    #[test]
+    fn trigger_and_previous_exit_round_trip() {
+        // NEWPIDASH-253: the shutdown trigger is carried through the
+        // drain journal into the replayed RunFailed detail.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let mut e = entry(
+            Uuid::new_v4(),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+        );
+        e.trigger = Some("SIGTERM".to_string());
+        e.previous_exit = Some("oom-kill".to_string());
+        record_all(&paths, std::slice::from_ref(&e)).unwrap();
+        let loaded = load(&paths);
+        assert_eq!(loaded, vec![e]);
+        assert_eq!(loaded[0].trigger.as_deref(), Some("SIGTERM"));
+        assert_eq!(loaded[0].previous_exit.as_deref(), Some("oom-kill"));
+    }
+
+    #[test]
+    fn legacy_journal_without_trigger_loads_as_none() {
+        // Released runners wrote journals without the new fields; new
+        // code must still read them (serde defaults) and replay verbatim.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(paths.data_dir.clone()).unwrap();
+        let raw = serde_json::json!([
+            {
+                "runner_id": Uuid::new_v4(),
+                "run_id": Uuid::new_v4(),
+                "reason": "daemon_restart",
+                "detail": "daemon shutdown requested",
+                "ended_at": Utc::now().to_rfc3339(),
+                "recorded_at": Utc::now().to_rfc3339(),
+            }
+        ]);
+        std::fs::write(journal_path(&paths), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let loaded = load(&paths);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].trigger, None);
+        assert_eq!(loaded[0].previous_exit, None);
     }
 }

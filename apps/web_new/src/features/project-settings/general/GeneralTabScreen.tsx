@@ -48,6 +48,7 @@ import {
   reseatGeneralForm,
   saveFailureMessage,
   shapeIdentifier,
+  stagesChanged,
   uploadedEmblem,
   validateGeneralFields,
   type GeneralFieldErrors,
@@ -161,21 +162,23 @@ function GeneralTabBody({
           return;
         }
       }
-      await save.mutateAsync(buildGeneralPayload({ values, cadenceDirty })).then(
-        (saved) => {
-          lastStored.current = saved;
-          setValues((current) => reseatGeneralForm(saved, current));
-          if (cadenceDirty) setCadenceDirty(true);
-        },
-        (error: unknown) => {
-          const conflict = generalConflictError(error);
-          if (conflict !== null) {
-            setErrors((current) => ({ ...current, [conflict.field]: conflict.message }));
-            return;
+      await save
+        .mutateAsync(buildGeneralPayload({ values, cadenceDirty, stagesDirty: stagesChanged(values, stored) }))
+        .then(
+          (saved) => {
+            lastStored.current = saved;
+            setValues((current) => reseatGeneralForm(saved, current));
+            if (cadenceDirty) setCadenceDirty(true);
+          },
+          (error: unknown) => {
+            const conflict = generalConflictError(error);
+            if (conflict !== null) {
+              setErrors((current) => ({ ...current, [conflict.field]: conflict.message }));
+              return;
+            }
+            notifyError(PROJECT_SAVE_FAILED_TITLE, saveFailureMessage(error));
           }
-          notifyError(PROJECT_SAVE_FAILED_TITLE, saveFailureMessage(error));
-        }
-      );
+        );
     } finally {
       setCheckingIdentifier(false);
       setSubmitting(false);
@@ -232,13 +235,7 @@ function GeneralTabBody({
         onChange={(repoUrl) => update({ repoUrl })}
         onBind={(repoUrl) => bind.mutate({ repoUrl })}
       />
-      <ExecutionSection
-        values={values}
-        errors={errors}
-        disabled={!canEdit}
-        executorOptions={stored.agent_executor_options}
-        onChange={update}
-      />
+      <ExecutionSection values={values} errors={errors} disabled={!canEdit} onChange={update} />
       {canEdit ? (
         <GeneralDangerZone workspaceSlug={workspaceSlug} projectId={projectId} projectName={stored.name} />
       ) : null}

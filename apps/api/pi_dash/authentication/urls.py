@@ -4,6 +4,8 @@
 
 from django.urls import path
 
+from pi_dash.authentication.views.cli.handoff import DesktopHandoffRedeemEndpoint
+
 from .views import (
     CSRFTokenEndpoint,
     ForgotPasswordEndpoint,
@@ -149,5 +151,13 @@ urlpatterns = [
         "spaces/gitea/callback/",
         GiteaCallbackSpaceEndpoint.as_view(),
         name="space-gitea-callback",
+    ),
+    # Desktop session handoff redeem (desktop_unified_signin §5): the app
+    # redeems its single-use code here over the native transport (the cloud
+    # serves this under /api/auth/). Issue stays on /api/v1/auth/.
+    path(
+        "desktop-handoff/redeem/",
+        DesktopHandoffRedeemEndpoint.as_view(),
+        name="auth-desktop-handoff-redeem",
     ),
 ]

@@ -46,9 +46,10 @@
 //!    (`if data:` on an empty `ValuesQuerySet` is `False`, `:236-237`).
 //! 4. The project-timezone round-trip (`:78-88`) is semantically
 //!    `timezone.now()` — the value is ported (`:now`), not the detour.
-//! 5. Archive counts and `assignee_ids` omit the bridge
+//! 5. Archive counts and `assignee_ids` omitted the bridge
 //!    (`issue_cycle__deleted_at IS NULL`) guard the base queryset has —
-//!    the asymmetry is ported via `bridge_deleted_guard: false`.
+//!    the asymmetry was ported via `bridge_deleted_guard: false` and is
+//!    fixed by NEWPIDASH-219 (DIFF-19); archive now passes `true`.
 //! 6. Transfer to an unknown `new_cycle_id` dereferences `None.end_date`
 //!    (`AttributeError` -> 500, `:59-62`) — ported, never guarded.
 //!
@@ -124,8 +125,9 @@ impl GroupFilter {
 /// guards (`base.py:114-151`, `archive.py:137-207`).
 ///
 /// `bridge_deleted_guard = true` adds `cycle_issues.deleted_at IS NULL`
-/// (base queryset); `false` omits it (archive queryset AND the transfer
-/// old-cycle counts, which never had it — ported asymmetry, bug 5).
+/// (base queryset and, since NEWPIDASH-219 / DIFF-19, the archive
+/// queryset); `false` omits it (kept parameter for the parameterized
+/// asymmetry — ported bug 5; no archive caller uses it after the fix).
 pub fn count_issues_sql(filter: GroupFilter, bridge_deleted_guard: bool) -> String {
     let bridge = if bridge_deleted_guard {
         " AND cycle_issues.deleted_at IS NULL"
@@ -149,8 +151,8 @@ pub fn status_case_sql() -> String {
 
 /// `assignee_ids = COALESCE(ARRAY_AGG(DISTINCT ...), '{}')`
 /// (`base.py:168-178`, `archive.py:224-233`). The base path also requires
-/// the assignee bridge to be live; archive does not (ported asymmetry,
-/// bug 5).
+/// the assignee bridge to be live; archive does too since NEWPIDASH-219
+/// / DIFF-19 (ported bug 5, now fixed).
 pub fn assignee_ids_sql(bridge_deleted_guard: bool) -> String {
     let bridge = if bridge_deleted_guard {
         " AND issue_assignee.deleted_at IS NULL"
@@ -585,17 +587,22 @@ mod tests {
     }
 
     #[test]
-    fn archive_counts_drop_bridge_guard() {
-        // Ported bug 5: the archive queryset omits the bridge deleted_at
-        // guard the base queryset has.
+    fn archive_counts_keep_bridge_guard() {
+        // Ported bug 5, fixed by NEWPIDASH-219 (DIFF-19): the archive
+        // queryset now carries the bridge deleted_at guard the base
+        // queryset has (calls pass `true`).
         for group in ["completed", "cancelled", "started", "unstarted", "backlog"] {
-            let sql = count_issues_sql(GroupFilter::Eq(group), false);
-            assert!(!sql.contains("cycle_issues.deleted_at IS NULL"), "{group}");
+            let sql = count_issues_sql(GroupFilter::Eq(group), true);
+            assert!(sql.contains("cycle_issues.deleted_at IS NULL"), "{group}");
             assert!(sql.contains(&format!("issue.state_group = '{group}'")));
         }
         // Archive cancelled is plain `=`, not the base `IN` shape.
-        let cancelled = count_issues_sql(GroupFilter::Eq("cancelled"), false);
+        let cancelled = count_issues_sql(GroupFilter::Eq("cancelled"), true);
         assert!(!cancelled.contains("IN ("));
+        // The `false` parameterization still omits (kept for the
+        // parameterized asymmetry; no archive caller uses it).
+        let omitted = count_issues_sql(GroupFilter::All, false);
+        assert!(!omitted.contains("cycle_issues.deleted_at IS NULL"));
     }
 
     #[test]
@@ -610,14 +617,19 @@ mod tests {
     }
 
     #[test]
-    fn assignee_ids_coalesce_empty_and_guard_asymmetry() {
+    fn assignee_ids_coalesce_empty_and_guard() {
         let base = assignee_ids_sql(true);
         assert!(base.contains("COALESCE(ARRAY_AGG(DISTINCT issue_assignees.user_id)"));
         assert!(base.contains("issue_assignees.user_id IS NOT NULL"));
         assert!(base.contains("issue_assignee.deleted_at IS NULL"));
         assert!(base.ends_with(", '{}')"));
-        let archive = assignee_ids_sql(false);
-        assert!(!archive.contains("issue_assignee.deleted_at IS NULL"));
+        // Archive guards the assignee bridge too (NEWPIDASH-219, DIFF-19).
+        let archive = assignee_ids_sql(true);
+        assert!(archive.contains("issue_assignee.deleted_at IS NULL"));
+        // The `false` parameterization still omits (kept for the
+        // parameterized asymmetry; no archive caller uses it).
+        let omitted = assignee_ids_sql(false);
+        assert!(!omitted.contains("issue_assignee.deleted_at IS NULL"));
     }
 
     #[test]

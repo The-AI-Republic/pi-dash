@@ -65,19 +65,14 @@ pub use activity_dispatch::{
     is_activity_task, is_known_activity_type, is_valid_uuid, issue_flat_json,
     register_activity_task, run_activity, serialize_notification_rows, DispatchError,
     IssueActivityCall, IssueFlatRow, RedisOrigin, StoredActivityRow, ACTIVITY_TYPES,
-    FIND_COMMENT_ISSUE_SQL, FIND_COMMENT_REACTION_SQL, FIND_CREATED_ISSUE_SQL, FIND_CYCLE_SQL,
-    FIND_ESTIMATE_SQL, FIND_ISSUE_FLAT_SQL, FIND_ISSUE_REACTION_SQL, FIND_ISSUE_REF_SQL,
-    FIND_ISSUE_SQL, FIND_LABEL_SQL, FIND_LATEST_ACTIVITY_SQL, FIND_MODULE_SQL, FIND_PARENT_SQL,
-    FIND_PROJECT_WORKSPACE_SQL, FIND_STATE_SQL, FIND_USER_SQL, INSERT_SUBSCRIBERS_SQL,
-    ISSUE_ACTIVITY_TASK, NOTIFICATIONS_TASK, ORIGIN_TTL_SECS, TOUCH_ACTIVITY_SQL,
+    ISSUE_ACTIVITY_TASK, NOTIFICATIONS_TASK, ORIGIN_TTL_SECS,
 };
 
 pub use automation::{
     actor_string, archive_current_instance, archive_requested_data, build_issue_activity_job,
-    close_requested_data, cutoff_for, find_candidate_issues_sql, is_automation_task,
-    module_day_for, register_automation_handlers, run_archive_and_close, AutomationError,
-    ARCHIVE_AND_CLOSE_TASK, ARCHIVE_PROJECTS_SQL, BULK_BATCH_SIZE, CLOSED_STATE_GROUPS,
-    CLOSE_PROJECTS_SQL, FIND_CANCELLED_STATE_SQL, OPEN_STATE_GROUPS,
+    close_requested_data, cutoff_for, is_automation_task, module_day_for,
+    register_automation_handlers, run_archive_and_close, AutomationError, ARCHIVE_AND_CLOSE_TASK,
+    BULK_BATCH_SIZE, CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS,
 };
 pub use link_crawl::{register_link_crawl_handler, TASK_NAMES};
 pub use sinks::{
@@ -86,10 +81,9 @@ pub use sinks::{
     parse_track_event_call, post_capture, posthog_configuration_from_env, process_logs_handler,
     python_str, register_sink_tasks, resolve_posthog_config, route_for_logs, track_event_handler,
     ActivityLogRow, CaptureRequest, LogSink, ProcessLogsCall, SinkError, TrackEventCall,
-    API_ACTIVITY_LOG_INSERT, MONGO_COLLECTION, NOT_CONFIGURED_WARNING, POSTHOG_API_KEY_VAR,
-    POSTHOG_BATCH_PATH, POSTHOG_DEFAULT_HOST, POSTHOG_HOST_VAR, POSTHOG_LIB, POSTHOG_LIB_VERSION,
-    POSTHOG_TIMEOUT_SECS, POSTHOG_USER_AGENT, PROCESS_LOGS_TASK, TRACK_EVENT_TASK,
-    WORKSPACE_OWNER_SQL,
+    MONGO_COLLECTION, NOT_CONFIGURED_WARNING, POSTHOG_API_KEY_VAR, POSTHOG_BATCH_PATH,
+    POSTHOG_DEFAULT_HOST, POSTHOG_HOST_VAR, POSTHOG_LIB, POSTHOG_LIB_VERSION, POSTHOG_TIMEOUT_SECS,
+    POSTHOG_USER_AGENT, PROCESS_LOGS_TASK, TRACK_EVENT_TASK,
 };
 pub use visit_page::{
     is_visit_page_task, page_transaction_message, recent_visited_task_message,

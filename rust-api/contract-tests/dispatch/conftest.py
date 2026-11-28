@@ -1,20 +1,19 @@
 """Shared fixtures for the dispatch task-oracle suite (PIDASHCONV-22, D-11).
 
+Trimmed by P3 step B to the surviving surface: the managed wait expiry
+oracle (``test_expire_waiting_runs.py``), the beat pin
+(``test_beat_schedule.py``), and the wire pin (``test_celery_wire.py``).
+The cloud-execution helpers died with the retired suites.
+
 Every test seeds its own world straight into Postgres (unique tag per test)
 and deletes only its own rows afterwards. Jobs go to the broker in Celery
 wire format (``_harness.celery.Broker``); the live Django worker executes
 them. Nothing here imports Django.
-
-``AgentRun`` rows are seeded with raw SQL. Column lists mirror
-``apps/api/pi_dash/runner/models.py`` (``AgentRun`` → ``agent_run``,
-``Pod`` → ``pod``); ``work_item``/``scheduler_binding`` stay NULL so the
-run resolves its project through ``pod.project`` (``cloud_agent/tasks.py``
-``run_cloud_agent`` falls back to ``run.pod.project``), which keeps the
-seeded world to users + workspace + project + pod.
 """
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
@@ -27,13 +26,10 @@ from _harness.seed import Seeder, SeedTracker
 
 # Executor / status literals from pi_dash/core/agent_execution.py and
 # pi_dash/runner/models.py AgentRunStatus.
-CLOUD_AGENT = "cloud_agent"
 MANAGED_RUNNER = "managed_runner"
 LOCAL_RUNNER = "local_runner"
 QUEUED = "queued"
-RUNNING = "running"
 FAILED = "failed"
-COMPLETED = "completed"
 CANCELLED = "cancelled"
 
 #: How long to wait for the worker to produce a DB effect. Tasks are fast
@@ -96,6 +92,11 @@ def world(seeder):
     return _membership_world(seeder)
 
 
+def create_member_world(seeder, *, role=20):
+    """Public wrapper over the membership world (one tenant's base)."""
+    return _membership_world(seeder, role=role)
+
+
 def create_pod(seeder, workspace_id, project_id, owner_id, *, name="Contract pod"):
     pod_id = str(uuid.uuid4())
     seeder.db.execute(
@@ -115,7 +116,7 @@ def create_agent_run(
     pod_id,
     creator_id,
     *,
-    executor_kind=CLOUD_AGENT,
+    executor_kind=MANAGED_RUNNER,
     status=QUEUED,
     prompt="contract run",
     tool_plan="{}",
@@ -123,6 +124,7 @@ def create_agent_run(
     started_ago_seconds=None,
     lease_in_seconds=None,
     cancel_reason=None,
+    work_item_id=None,
 ):
     """Seed one ``agent_run`` row. ``created_ago_seconds`` backdates
     ``created_at`` for expiry tests; ``started_ago_seconds`` backdates
@@ -136,29 +138,29 @@ def create_agent_run(
     seeder.db.execute(
         """INSERT INTO agent_run
            (id, status, prompt, run_config, required_capabilities, thread_id,
-            lease_expires_at, done_payload, error_details, created_at, assigned_at,
+            lease_expires_at, done_payload, error_details, failure_reason, created_at, assigned_at,
             started_at, ended_at, owner_id, workspace_id, runner_id, work_item_id,
             parent_run_id, pod_id, created_by_id, pinned_runner_id,
             scheduler_binding_id, llm_model,
             trigger, prompt_manifest, executor_kind, dispatch_attempts,
             cancel_requested_at, cancel_reason, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
-            phase_kind, agent_metadata, usage)
+            phase_kind, agent_metadata, usage, pin_kind, work_type)
            VALUES (%s,%s,%s,'{}','[]','',
                    %s,
-                   NULL,'{}',%s,NULL,
+                   NULL,'{}','',%s,NULL,
                    %s,
-                   NULL,NULL,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,'',
+                   NULL,NULL,%s,NULL,%s,NULL,%s,%s,NULL,NULL,'',
                    'direct',NULL,%s,0,
                    %s,
                    %s,%s,
-                   NULL,NULL,'','{}','{}')""",
+                   NULL,NULL,'','{}','{}','locality','')""",
         (
             run_id, status, prompt,
             now + timedelta(seconds=lease_in_seconds) if lease_in_seconds is not None else None,
             now - timedelta(seconds=created_ago_seconds),
             now - timedelta(seconds=started_ago_seconds) if started_ago_seconds is not None else None,
-            workspace_id, pod_id, creator_id,
+            workspace_id, work_item_id, pod_id, creator_id,
             executor_kind,
             now if cancel_reason is not None else None,
             cancel_reason or "",
@@ -245,3 +247,70 @@ def wait_for_queue_drain(broker, *, queue="celery", baseline=0, timeout=WORKER_T
                 return
         time.sleep(poll)
     raise AssertionError(f"timed out waiting for queue {queue!r} to drain to {baseline}")
+
+
+STUB_MODEL = "oracle-stub"
+
+_channel = None
+
+
+def _live_channel():
+    """The live worker's delivery channel, detected once per process.
+
+    A Django worker answers Celery inspect and consumes the redis wire;
+    otherwise the Rust worker claims ``rust_job_queue`` rows. Exactly one
+    worker runs in any contract run, so exactly one channel delivers.
+    """
+    global _channel
+    from _harness import broker_probe, rust_queue
+
+    if _channel is None:
+        try:
+            live = bool(broker_probe.registered_tasks(timeout=5.0))
+        except Exception:
+            live = False
+        _channel = "celery" if live else "rust_queue"
+        if _channel == "rust_queue":
+            rust_queue.ensure_schema()
+    return _channel
+
+
+def publish_task(broker, task, args=()):
+    """Publish an arbitrary task through the live worker's channel."""
+    if _live_channel() == "celery":
+        broker.publish(task, list(args))
+    else:
+        from _harness import rust_queue
+
+        rust_queue.publish(task, list(args))
+
+
+def seed_llm_config(
+    seeder,
+    user_id,
+    base_url,
+    api_key,
+    *,
+    provider_kind="openai_compatible",
+    model_name=STUB_MODEL,
+):
+    """Seed a decryptable BYOK config pointing at a stub endpoint.
+
+    The Fernet token is encrypted with the backend's
+    ``ASSISTANT_ENCRYPTION_KEY`` so both Django and Rust decrypt the same
+    ciphertext.
+    """
+    import os
+
+    from cryptography.fernet import Fernet
+
+    key = os.environ["ASSISTANT_ENCRYPTION_KEY"].encode("utf-8")
+    token = Fernet(key).encrypt(api_key.encode("utf-8"))
+    seeder.db.execute(
+        """INSERT INTO assistant_user_llm_config
+           (provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at, user_id)
+           VALUES (%s,%s,%s,%s,NULL,now(),now(),%s)""",
+        (provider_kind, base_url, model_name, token, user_id),
+    )
+

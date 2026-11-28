@@ -2,7 +2,6 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/issue.py:372-421`
 //! (`IssueRelationChoices`, `IssueRelation`) and `:471-485` (`IssueLink`),
-//! `db/models/integration/github.py:217-262` (`GithubPullRequestLink`),
 //! `db/models/integration/git.py:224-272` (`GitCodeReviewLink`) and
 //! `db/models/asset.py:28-100` (`FileAsset`), adopting the Django-owned
 //! schema column-for-column; migrations are not ported — Django stays
@@ -24,7 +23,7 @@
 //!
 //! # Reads are soft-delete scoped
 //!
-//! All five tables inherit the soft-delete marker (`deleted_at`, from
+//! All four tables inherit the soft-delete marker (`deleted_at`, from
 //! `SoftDeleteModel` in `pi_dash/db/mixins.py:61-67`) and the default
 //! manager filters `deleted_at IS NULL` (`objects = SoftDeletionManager`,
 //! `mixins.py:66`; `all_objects` is the plain unscoped manager,
@@ -36,14 +35,14 @@
 //!
 //! `ProjectBaseModel.save()` (`db/models/project.py:309-311`) sets
 //! `workspace` from `project.workspace` on every save: Rust inserts and
-//! updates of `IssueLink`, `IssueRelation`, `GithubPullRequestLink` and
-//! `GitCodeReviewLink` must resolve `workspace_id` from the `project_id`
+//! updates of `IssueLink`, `IssueRelation` and `GitCodeReviewLink` must
+//! resolve `workspace_id` from the `project_id`
 //! row explicitly. `FileAsset` extends `BaseModel` instead, whose `save()`
 //! only stamps the audit users (`db/models/base.py:23-44`) — no backfill.
 //!
 //! # No `delete()` override
 //!
-//! None of the five models defines `delete()`; deletion is
+//! None of the four models defines `delete()`; deletion is
 //! `SoftDeleteModel.delete` (`mixins.py:72-78`), which stamps
 //! `deleted_at` and calls `save()` — so destroy DOES emit
 //! `pre_save`/`post_save`. There is no code to port here (shared kernel
@@ -51,15 +50,14 @@
 //!
 //! # Overlap with merged defs (deliberate local ports)
 //!
-//! Four of the five tables also appear in other domains' merged db defs:
-//! `space::columns::{issue_link, issue_relation}` (D-02, columns only),
-//! `integrations::github_models::github_pull_request_link` and
+//! Three of the four tables also appear in other domains' merged db defs:
+//! `space::columns::{issue_link, issue_relation}` (D-02, columns only) and
 //! `integrations::git_models::git_code_review_link` (D-05, columns +
 //! row structs, but no `__str__` ports, no verbose `Meta` names, no
 //! max-length, choice or audit-FK consts). This module still ports
-//! all four units in full: D-26 owns the relations/links/PR/review
+//! all three units in full: D-26 owns the relations/links/PR/review
 //! endpoints (PIDASHCONV-653) and their querysets (PIDASHCONV-648/650),
-//! and the fixture records these four as first-class units.
+//! and the fixture records these three as first-class units.
 //! Cross-domain column duplication is
 //! established practice (`v1_assets` and `app_assets` carry identical
 //! `file_assets` `COLUMNS`); each domain's models layer is the contract
@@ -83,8 +81,8 @@
 //! literals verbatim and the tests assert they equal the fixture. They
 //! are deliberately NOT reused from `integrations::*`, even though that
 //! domain merged the same tables: the fixture instructs "SQL literal
-//! pinned here" for all five, this issue carries no cross-domain
-//! dependency, and two entries are JSON paths (`metadata.…`) plus a
+//! pinned here" for both, this issue carries no cross-domain
+//! dependency, and one entry is a JSON path (`metadata.…`) plus a
 //! traversal note that a plain `COLUMNS` reuse would not capture.
 //!
 //! # Ported quirks (translate as-is)
@@ -99,17 +97,14 @@
 //!   choices and the reverse map are validation/display data. Note the
 //!   reverse-only values (`blocking`, `start_after`, `finish_after`,
 //!   `implements`) are NOT valid forward values.
-//! * `repo_owner`/`repo_name` are lowercased at attach time (queries
-//!   layer, `utils/github_pr_links.py`); the model stores whatever it is
-//!   given. No normalization here.
 //! * The review link's two active-unique constraints split on
 //!   `repo_external_id` empty vs non-empty (`git.py:254-265`): rows with
 //!   an id dedupe on `(provider, host_url, repo_external_id,
 //!   external_iid)`, rows without on `(provider, host_url, namespace,
 //!   repo_name, external_iid)`. Ported as two `NAME`/`COLUMNS`/`WHERE`
 //!   triples.
-//! * Review-link `state` has three values (`open`/`closed`/`merged`)
-//!   while PR-link `state` has two (`open`/`closed`). Ported as-is.
+//! * Review-link `state` has three values (`open`/`closed`/`merged`).
+//!   Ported as-is.
 //! * `DRAFT_ISSUE_ATTACHMENT` has no `asset_url` branch (`asset.py:79-100`
 //!   enumerates 9 of the 10 `EntityTypeContext` values): the property
 //!   returns `None`. Covered by the merged defs; noted here so the
@@ -334,154 +329,10 @@ pub mod issue_relation {
     }
 }
 
-/// `github_pull_request_links` table (`integration/github.py:217-262`).
-///
-/// Standalone (not tied to `GithubIssueSync`/`GithubRepository`) so that
-/// issues with no mirrored GitHub issue can still reference PRs
-/// (`github.py:218-226`). The `title`/`state`/`merged`/`draft` snapshot
-/// is display-only, refreshed by the GitHub App `pull_request` webhook;
-/// it never drives the linked issue's workflow state.
-pub mod github_pull_request_link {
-    use super::OnDelete;
-    use serde::{Deserialize, Serialize};
-
-    /// Physical table (`Meta.db_table`, `github.py:250`).
-    pub const TABLE: &str = "github_pull_request_links";
-    /// Default ordering (`Meta.ordering`, `github.py:251`).
-    pub const ORDERING: &str = "-created_at";
-    /// `verbose_name` (`github.py:248`).
-    pub const VERBOSE_NAME: &str = "Github Pull Request Link";
-    /// `verbose_name_plural` (`github.py:249`).
-    pub const VERBOSE_NAME_PLURAL: &str = "Github Pull Request Links";
-
-    /// Columns in fixture FX-ISS-09 order: 8 inherited audit/project
-    /// columns, then `issue_id` (`github.py:232`), `repo_owner` (`:233`),
-    /// `repo_name` (`:234`), `pr_number` (`:235`), `url` (`:236`),
-    /// `title` (`:238`), `state` (`:239`), `merged` (`:240`), `draft`
-    /// (`:241`) and `pr_updated_at` (`:242`). FK columns use the Django
-    /// attnames.
-    pub const COLUMNS: &[&str] = &[
-        "id",
-        "created_at",
-        "updated_at",
-        "created_by_id",
-        "updated_by_id",
-        "deleted_at",
-        "project_id",
-        "workspace_id",
-        "issue_id",
-        "repo_owner",
-        "repo_name",
-        "pr_number",
-        "url",
-        "title",
-        "state",
-        "merged",
-        "draft",
-        "pr_updated_at",
-    ];
-
-    /// `repo_owner` bound (`github.py:233`, `CharField(max_length=255)`).
-    pub const REPO_OWNER_MAX_LENGTH: usize = 255;
-    /// `repo_name` bound (`github.py:234`, `CharField(max_length=255)`).
-    pub const REPO_NAME_MAX_LENGTH: usize = 255;
-    /// `pr_number` floor (`github.py:235`, `PositiveIntegerField`, whose
-    /// implicit validator is `MinValueValidator(0)`).
-    pub const PR_NUMBER_MIN: i32 = 0;
-    /// `url` bound (`github.py:236`, `URLField(max_length=500)`).
-    pub const URL_MAX_LENGTH: usize = 500;
-    /// `title` bound (`github.py:238`, `CharField(max_length=500)`).
-    pub const TITLE_MAX_LENGTH: usize = 500;
-    /// `title` default (`github.py:238`, `blank=True, default=""`).
-    pub const TITLE_DEFAULT: &str = "";
-    /// `state` bound (`github.py:239`, `CharField(max_length=12)`).
-    pub const STATE_MAX_LENGTH: usize = 12;
-    /// `state` default (`github.py:239`, `State.OPEN`).
-    pub const STATE_DEFAULT: &str = "open";
-    /// `State` values + labels in declaration order
-    /// (`github.py:228-230`).
-    pub const STATE_CHOICES: &[(&str, &str)] = &[("open", "Open"), ("closed", "Closed")];
-    /// `merged` default (`github.py:240`).
-    pub const MERGED_DEFAULT: bool = false;
-    /// `draft` default (`github.py:241`).
-    pub const DRAFT_DEFAULT: bool = false;
-
-    /// Active-unique constraint name (`github.py:256`): one issue per PR
-    /// while active (the `IntegrityError` race in attach is guarded by
-    /// this constraint, `utils/github_pr_links.py:165-174`).
-    pub const UNIQUE_PR_NAME: &str = "github_pr_link_unique_per_pr_when_active";
-    /// Active-unique constraint columns (`github.py:254`), as attnames.
-    pub const UNIQUE_PR_COLUMNS: &[&str] = &["repo_owner", "repo_name", "pr_number"];
-    /// Active-unique constraint condition (`github.py:255`,
-    /// `Q(deleted_at__isnull=True)`), unquoted semantic form.
-    pub const UNIQUE_PR_WHERE: &str = "deleted_at IS NULL";
-
-    /// `(repo_owner, repo_name, pr_number)` index name (`github.py:260`).
-    pub const INDEX_PR_NAME: &str = "github_pr_l_repo_ow_idx";
-    /// `(repo_owner, repo_name, pr_number)` index columns
-    /// (`github.py:260`).
-    pub const INDEX_PR_COLUMNS: &[&str] = &["repo_owner", "repo_name", "pr_number"];
-    /// `issue` index name (`github.py:261`).
-    pub const INDEX_ISSUE_NAME: &str = "github_pr_l_issue_idx";
-    /// `issue` index columns (`github.py:261`), as attnames.
-    pub const INDEX_ISSUE_COLUMNS: &[&str] = &["issue_id"];
-
-    /// `issue` FK: `CASCADE` (`github.py:232`).
-    pub const ISSUE_ON_DELETE: OnDelete = OnDelete::Cascade;
-    /// `issue` FK `related_name` (`github.py:232`).
-    pub const ISSUE_RELATED_NAME: &str = "github_pull_requests";
-    /// `project` FK: `CASCADE` (`project.py:303`).
-    pub const PROJECT_ON_DELETE: OnDelete = OnDelete::Cascade;
-    /// `workspace` FK: `CASCADE` (`project.py:304`).
-    pub const WORKSPACE_ON_DELETE: OnDelete = OnDelete::Cascade;
-    /// `created_by` FK: `SET_NULL`, nullable (`mixins.py:29-35`).
-    pub const CREATED_BY_ON_DELETE: OnDelete = OnDelete::SetNull;
-    /// `updated_by` FK: `SET_NULL`, nullable (`mixins.py:36-42`).
-    pub const UPDATED_BY_ON_DELETE: OnDelete = OnDelete::SetNull;
-
-    /// One pull-request-link row. `pr_number` is a Postgres integer
-    /// (`PositiveIntegerField`); `title`/`state`/`merged`/`draft` are the
-    /// webhook-refreshed display snapshot, never `NULL`.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    pub struct GithubPullRequestLink {
-        pub id: uuid::Uuid,
-        pub created_at: chrono::DateTime<chrono::Utc>,
-        pub updated_at: chrono::DateTime<chrono::Utc>,
-        pub created_by_id: Option<uuid::Uuid>,
-        pub updated_by_id: Option<uuid::Uuid>,
-        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub project_id: uuid::Uuid,
-        pub workspace_id: uuid::Uuid,
-        pub issue_id: uuid::Uuid,
-        pub repo_owner: String,
-        pub repo_name: String,
-        pub pr_number: i32,
-        pub url: String,
-        pub title: String,
-        pub state: String,
-        pub merged: bool,
-        pub draft: bool,
-        pub pr_updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    impl std::fmt::Display for GithubPullRequestLink {
-        /// `__str__` (`github.py:244-245`):
-        /// `"{repo_owner}/{repo_name}#{pr_number} <{issue_id}>"` — every
-        /// part is owned by the row, so a full `Display` (not a label
-        /// helper) ports it exactly.
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                f,
-                "{}/{}#{} <{}>",
-                self.repo_owner, self.repo_name, self.pr_number, self.issue_id
-            )
-        }
-    }
-}
-
 /// `git_code_review_links` table (`integration/git.py:224-272`).
 ///
-/// The provider-agnostic sibling of [`github_pull_request_link`]: same
+/// The provider-agnostic successor of the removed legacy
+/// `github_pull_request_links` table (NEWPIDASH-210): same
 /// display-snapshot shape (`title`/`state`/`merged`/`draft`, refreshed
 /// externally, never driving issue workflow), but keyed by provider +
 /// repo identity + external iid instead of owner/name/number.
@@ -694,29 +545,13 @@ pub mod file_asset {
 /// Foreign-table columns D-26 reads that this issue pins as SQL literals
 /// (fixture FX-ISS-09 `foreign_reads`).
 ///
-/// All five tables also have merged `integrations::*` defs (D-05), which
+/// Both tables also have merged `integrations::*` defs (D-05), which
 /// are deliberately NOT reused here: the fixture instructs "SQL literal
 /// pinned here" for each, this issue carries no cross-domain dependency,
-/// and the dotted `metadata.…` entries plus the installation traversal
+/// and the dotted `metadata.…` entry plus the installation traversal
 /// note are read shapes a plain `COLUMNS` reuse would not capture. Query
 /// builders copy these literals verbatim.
 pub mod foreign {
-    /// Physical `github_app_installations` table
-    /// (`integration/github.py:121-141`, `db_table` at `:159`); D-26
-    /// reads the snapshot fetch columns (`utils/github_pr_links.py`).
-    pub const GITHUB_APP_INSTALLATION_TABLE: &str = "github_app_installations";
-    /// Columns D-26 reads on [`GITHUB_APP_INSTALLATION_TABLE`], fixture
-    /// order. `installation_id` (bigint, unique) feeds
-    /// `GithubClient.for_installation`; the row is located via
-    /// `workspace_integration__workspace__slug` +
-    /// `account_login__iexact` (`github_pr_links.py:48-51`).
-    pub const GITHUB_APP_INSTALLATION_COLUMNS_READ: &[&str] = &[
-        "id",
-        "workspace_integration_id",
-        "installation_id",
-        "account_login",
-    ];
-
     /// Physical `git_issue_syncs` table (`integration/git.py:152-170`).
     pub const GIT_ISSUE_SYNC_TABLE: &str = "git_issue_syncs";
     /// Columns D-26 reads on [`GIT_ISSUE_SYNC_TABLE`], fixture order.
@@ -727,25 +562,10 @@ pub mod foreign {
     pub const GIT_ISSUE_SYNC_COLUMNS_READ: &[&str] =
         &["id", "issue_id", "metadata.completion_comment_id"];
 
-    /// Physical `github_issue_syncs` table
-    /// (`integration/github.py:76-90`).
-    pub const GITHUB_ISSUE_SYNC_TABLE: &str = "github_issue_syncs";
-    /// Columns D-26 reads on [`GITHUB_ISSUE_SYNC_TABLE`], fixture order
-    /// (dotted entry is a `metadata` JSON path, as above).
-    pub const GITHUB_ISSUE_SYNC_COLUMNS_READ: &[&str] =
-        &["id", "issue_id", "metadata.completion_comment_id"];
-
     /// Physical `git_comment_syncs` table (`integration/git.py:190-223`).
     pub const GIT_COMMENT_SYNC_TABLE: &str = "git_comment_syncs";
     /// Columns D-26 reads on [`GIT_COMMENT_SYNC_TABLE`], fixture order.
     pub const GIT_COMMENT_SYNC_COLUMNS_READ: &[&str] = &["id", "comment_id"];
-
-    /// Physical `github_comment_syncs` table
-    /// (`integration/github.py:104-120`).
-    pub const GITHUB_COMMENT_SYNC_TABLE: &str = "github_comment_syncs";
-    /// Columns D-26 reads on [`GITHUB_COMMENT_SYNC_TABLE`], fixture
-    /// order.
-    pub const GITHUB_COMMENT_SYNC_COLUMNS_READ: &[&str] = &["id", "comment_id"];
 }
 
 #[cfg(test)]
@@ -753,7 +573,6 @@ mod tests {
     use super::file_asset;
     use super::foreign;
     use super::git_code_review_link;
-    use super::github_pull_request_link;
     use super::issue_link;
     use super::issue_relation;
     use super::OnDelete;
@@ -1001,110 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn github_pr_link_columns_match_fixture() {
-        let v = fixture();
-        assert_eq!(
-            owned(github_pull_request_link::COLUMNS),
-            string_column_names(&v, "github_pr_link")
-        );
-        assert_eq!(github_pull_request_link::COLUMNS.len(), 18);
-        assert_eq!(
-            owned(&github_pull_request_link::COLUMNS[..8]),
-            owned(&models_core::issue::COLUMNS[..8])
-        );
-        let table: &str = github_pull_request_link::TABLE;
-        assert_eq!(table, v["github_pr_link"]["table"].as_str().unwrap());
-        assert_eq!(table, "github_pull_request_links");
-        assert_eq!(github_pull_request_link::ORDERING, "-created_at");
-        assert_eq!(
-            github_pull_request_link::VERBOSE_NAME,
-            "Github Pull Request Link"
-        );
-        assert_eq!(
-            github_pull_request_link::VERBOSE_NAME_PLURAL,
-            "Github Pull Request Links"
-        );
-        assert_eq!(
-            string_nullable(&v, "github_pr_link"),
-            vec![
-                "created_by_id",
-                "updated_by_id",
-                "deleted_at",
-                "pr_updated_at"
-            ]
-        );
-        assert_eq!(github_pull_request_link::REPO_OWNER_MAX_LENGTH, 255);
-        assert_eq!(github_pull_request_link::REPO_NAME_MAX_LENGTH, 255);
-        assert_eq!(github_pull_request_link::PR_NUMBER_MIN, 0);
-        assert_eq!(github_pull_request_link::URL_MAX_LENGTH, 500);
-        assert_eq!(github_pull_request_link::TITLE_MAX_LENGTH, 500);
-        assert_eq!(github_pull_request_link::TITLE_DEFAULT, "");
-        assert_eq!(github_pull_request_link::STATE_MAX_LENGTH, 12);
-        assert_eq!(github_pull_request_link::STATE_DEFAULT, "open");
-        assert_eq!(
-            github_pull_request_link::STATE_CHOICES,
-            &[("open", "Open"), ("closed", "Closed")]
-        );
-        let merged_default: bool = github_pull_request_link::MERGED_DEFAULT;
-        assert!(!merged_default);
-        let draft_default: bool = github_pull_request_link::DRAFT_DEFAULT;
-        assert!(!draft_default);
-        let constraints = constraint_strings(&v, "github_pr_link");
-        assert_eq!(constraints.len(), 2);
-        assert!(constraints[0].contains("(repo_owner,repo_name,pr_number)"));
-        assert!(constraints[0].contains("deleted_at IS NULL"));
-        assert!(constraints[0].contains(github_pull_request_link::UNIQUE_PR_NAME));
-        assert_eq!(
-            github_pull_request_link::UNIQUE_PR_NAME,
-            "github_pr_link_unique_per_pr_when_active"
-        );
-        assert_eq!(
-            github_pull_request_link::UNIQUE_PR_COLUMNS,
-            &["repo_owner", "repo_name", "pr_number"]
-        );
-        assert_eq!(
-            github_pull_request_link::UNIQUE_PR_WHERE,
-            "deleted_at IS NULL"
-        );
-        assert!(constraints[1].contains(github_pull_request_link::INDEX_PR_NAME));
-        assert!(constraints[1].contains(github_pull_request_link::INDEX_ISSUE_NAME));
-        assert_eq!(
-            github_pull_request_link::INDEX_PR_NAME,
-            "github_pr_l_repo_ow_idx"
-        );
-        assert_eq!(
-            github_pull_request_link::INDEX_PR_COLUMNS,
-            &["repo_owner", "repo_name", "pr_number"]
-        );
-        assert_eq!(
-            github_pull_request_link::INDEX_ISSUE_NAME,
-            "github_pr_l_issue_idx"
-        );
-        assert_eq!(github_pull_request_link::INDEX_ISSUE_COLUMNS, &["issue_id"]);
-        assert_eq!(github_pull_request_link::ISSUE_ON_DELETE, OnDelete::Cascade);
-        assert_eq!(
-            github_pull_request_link::ISSUE_RELATED_NAME,
-            "github_pull_requests"
-        );
-        assert_eq!(
-            github_pull_request_link::PROJECT_ON_DELETE,
-            OnDelete::Cascade
-        );
-        assert_eq!(
-            github_pull_request_link::WORKSPACE_ON_DELETE,
-            OnDelete::Cascade
-        );
-        assert_eq!(
-            github_pull_request_link::CREATED_BY_ON_DELETE,
-            OnDelete::SetNull
-        );
-        assert_eq!(
-            github_pull_request_link::UPDATED_BY_ON_DELETE,
-            OnDelete::SetNull
-        );
-    }
-
-    #[test]
     fn git_code_review_link_columns_match_fixture() {
         let v = fixture();
         assert_eq!(
@@ -1341,25 +1056,6 @@ mod tests {
     fn foreign_reads_replay_fixture() {
         let v = fixture();
         assert_eq!(
-            owned(foreign::GITHUB_APP_INSTALLATION_COLUMNS_READ),
-            foreign_columns_read(&v, "github_app_installation")
-        );
-        assert_eq!(
-            foreign::GITHUB_APP_INSTALLATION_COLUMNS_READ,
-            &[
-                "id",
-                "workspace_integration_id",
-                "installation_id",
-                "account_login"
-            ]
-        );
-        let table: &str = foreign::GITHUB_APP_INSTALLATION_TABLE;
-        assert_eq!(table, "github_app_installations");
-        assert!(v["foreign_reads"]["github_app_installation"]["traversal"]
-            .as_str()
-            .unwrap()
-            .contains("account_login__iexact"));
-        assert_eq!(
             owned(foreign::GIT_ISSUE_SYNC_COLUMNS_READ),
             foreign_columns_read(&v, "git_issue_sync")
         );
@@ -1370,16 +1066,6 @@ mod tests {
         let table: &str = foreign::GIT_ISSUE_SYNC_TABLE;
         assert_eq!(table, "git_issue_syncs");
         assert_eq!(
-            owned(foreign::GITHUB_ISSUE_SYNC_COLUMNS_READ),
-            foreign_columns_read(&v, "github_issue_sync")
-        );
-        assert_eq!(
-            foreign::GITHUB_ISSUE_SYNC_COLUMNS_READ,
-            &["id", "issue_id", "metadata.completion_comment_id"]
-        );
-        let table: &str = foreign::GITHUB_ISSUE_SYNC_TABLE;
-        assert_eq!(table, "github_issue_syncs");
-        assert_eq!(
             owned(foreign::GIT_COMMENT_SYNC_COLUMNS_READ),
             foreign_columns_read(&v, "git_comment_sync")
         );
@@ -1389,16 +1075,6 @@ mod tests {
         );
         let table: &str = foreign::GIT_COMMENT_SYNC_TABLE;
         assert_eq!(table, "git_comment_syncs");
-        assert_eq!(
-            owned(foreign::GITHUB_COMMENT_SYNC_COLUMNS_READ),
-            foreign_columns_read(&v, "github_comment_sync")
-        );
-        assert_eq!(
-            foreign::GITHUB_COMMENT_SYNC_COLUMNS_READ,
-            &["id", "comment_id"]
-        );
-        let table: &str = foreign::GITHUB_COMMENT_SYNC_TABLE;
-        assert_eq!(table, "github_comment_syncs");
     }
 
     #[test]
@@ -1406,7 +1082,6 @@ mod tests {
         for table in [
             issue_link::TABLE,
             issue_relation::TABLE,
-            github_pull_request_link::TABLE,
             git_code_review_link::TABLE,
             merged_file_asset::TABLE,
         ] {
@@ -1446,27 +1121,6 @@ mod tests {
             "Ship it https://example.com/spec"
         );
         assert_eq!(issue_relation::IssueRelation::label("A", "B"), "A B");
-        let pr = github_pull_request_link::GithubPullRequestLink {
-            id: uuid::Uuid::nil(),
-            created_at: epoch,
-            updated_at: epoch,
-            created_by_id: None,
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: uuid::Uuid::nil(),
-            workspace_id: uuid::Uuid::nil(),
-            issue_id,
-            repo_owner: "octo".to_string(),
-            repo_name: "hello".to_string(),
-            pr_number: 42,
-            url: "https://github.com/octo/hello/pull/42".to_string(),
-            title: "Fix".to_string(),
-            state: github_pull_request_link::STATE_DEFAULT.to_string(),
-            merged: false,
-            draft: false,
-            pr_updated_at: None,
-        };
-        assert_eq!(pr.to_string(), format!("octo/hello#42 <{issue_id}>"));
         let review = git_code_review_link::GitCodeReviewLink {
             id: uuid::Uuid::nil(),
             created_at: epoch,

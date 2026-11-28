@@ -12,7 +12,6 @@ from django.db import transaction
 import re
 
 # Module imports
-from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models import Project, ProjectIdentifier, WorkspaceMember, State, Estimate
 
 from pi_dash.utils.content_validator import (
@@ -22,28 +21,30 @@ from .base import BaseSerializer
 
 
 def _validate_default_agent_executor(data) -> None:
-    """Refuse a project default that could never dispatch on this instance.
+    """Store ``local_runner`` for a project default (built_engine_as_runner §6).
 
-    Project-level policy only: whether a *particular* member can run on their
-    own desktop is a per-viewer question, and a project owner may legitimately
-    set ``managed_runner`` as the default before anyone has installed the app.
+    Runner is the only executor. Older clients still send ``cloud_agent`` /
+    ``managed_runner``; those are translated, and the project's default pod
+    decides who runs the work.
     """
-    executor = data.get("default_agent_executor")
-    if executor == AgentExecutorKind.CLOUD_AGENT:
-        from pi_dash.core.agent_execution import cloud_agent_is_configured
+    if "default_agent_executor" in data:
+        from pi_dash.core.agent_execution import normalize_executor_write
 
-        if not cloud_agent_is_configured():
-            from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
+        data["default_agent_executor"] = normalize_executor_write(data["default_agent_executor"])
 
-            raise CloudAgentUnavailableAPI()
-    elif executor == AgentExecutorKind.MANAGED_RUNNER:
-        from pi_dash.core.agent_execution import managed_runner_is_enabled
 
-        if not managed_runner_is_enabled():
+
+def _validate_default_work_type(data) -> None:
+    """``default_work_type`` must name a registered work type (or be blank —
+    ``Project.save`` resolves the default at creation)."""
+    work_type = data.get("default_work_type")
+    if work_type:
+        from pi_dash.prompting.work_types import WORK_TYPES
+
+        if work_type not in WORK_TYPES:
             raise serializers.ValidationError(
-                {"default_agent_executor": "Pi Dash Agent is not enabled on this instance"}
+                {"default_work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
             )
-
 
 
 class ProjectCreateSerializer(BaseSerializer):
@@ -124,6 +125,8 @@ class ProjectCreateSerializer(BaseSerializer):
             "repo_url",
             "base_branch",
             "default_agent_executor",
+            "dedicated_runner_lost_action",
+            "default_work_type",
         ]
 
         read_only_fields = [
@@ -138,6 +141,7 @@ class ProjectCreateSerializer(BaseSerializer):
 
     def validate(self, data):
         _validate_default_agent_executor(data)
+        _validate_default_work_type(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 
@@ -282,6 +286,7 @@ class ProjectSerializer(BaseSerializer):
 
     def validate(self, data):
         _validate_default_agent_executor(data)
+        _validate_default_work_type(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 

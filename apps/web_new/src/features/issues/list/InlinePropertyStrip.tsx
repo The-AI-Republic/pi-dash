@@ -77,14 +77,29 @@ export function isOverdue(
   return issue.target_date !== null && issue.target_date !== undefined && issue.target_date <= today;
 }
 
+// Formatters by zone ("" = the viewer's zone). Every list row asks for
+// today on each render, and building an Intl.DateTimeFormat costs far more
+// than formatting with one: uncached, it dominated the 2,000-row scroll
+// budget's long frames.
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function dayFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = dayFormatters.get(timeZone);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      ...(timeZone === "" ? {} : { timeZone }),
+    });
+    dayFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 /** An ISO day rendered in the given zone, or the viewer's zone when absent. */
 export function todayIsoInZone(now: Date = new Date(), timeZone?: string | null): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    ...(timeZone === null || timeZone === undefined || timeZone === "" ? {} : { timeZone }),
-  }).formatToParts(now);
+  const parts = dayFormatter(timeZone ?? "").formatToParts(now);
   const pick = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
   return `${pick("year")}-${pick("month")}-${pick("day")}`;
 }

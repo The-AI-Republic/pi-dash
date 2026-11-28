@@ -34,7 +34,7 @@ export const PROVIDER_UNREACHABLE = "Could not reach the configured provider end
 /** Keyless-composer lockdown line both thread and landing share. */
 export const API_KEY_REMINDER = "Please set your API key in Settings first to start using AI Assistant.";
 
-/** Sidebar/dashboard fallback for untitled threads. */
+/** History/dashboard fallback for untitled threads. */
 export const UNTITLED = "Untitled conversation";
 
 /** Poll the newest toast until `title` shows; resolves with its message. */
@@ -89,7 +89,7 @@ export async function expectErrorLine(driver: Pick<ParityDriver, "assistantError
   return line ?? "";
 }
 
-/** Poll sidebar titles until they equal `titles` top to bottom. */
+/** Poll history titles until they equal `titles` top to bottom. */
 export async function expectSidebarTitles(
   driver: Pick<ParityDriver, "assistantSidebarThreads">,
   titles: string[]

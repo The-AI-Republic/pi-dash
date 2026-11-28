@@ -201,6 +201,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
             host_label: &host_label,
             name: Some(&name),
             pod: None,
+            agent_kind: None,
         },
     )
     .await

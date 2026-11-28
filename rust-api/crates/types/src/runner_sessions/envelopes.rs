@@ -63,11 +63,17 @@ pub const OFFLINE_REJECT_RUNNER: &[&str] = &[
 ];
 
 /// Live machine-scoped message types (`machine_outbox.py:49-54`).
-pub const VALID_TYPES_MACHINE: &[&str] = &["config_push", "create_runner", "ping", "welcome"];
+pub const VALID_TYPES_MACHINE: &[&str] = &[
+    "config_push",
+    "create_runner",
+    "ping",
+    "reconfigure_runner",
+    "welcome",
+];
 
 /// Machine-scoped types that raise `MachineOfflineError` instead of
 /// queueing offline (`machine_outbox.py:62-65`).
-pub const OFFLINE_REJECT_MACHINE: &[&str] = &["config_push", "create_runner"];
+pub const OFFLINE_REJECT_MACHINE: &[&str] = &["config_push", "create_runner", "reconfigure_runner"];
 
 /// Whether `msg_type` is enqueueable on the per-runner outbox.
 pub fn is_valid_runner_type(msg_type: &str) -> bool {
@@ -128,10 +134,20 @@ fn python_str(value: &Value) -> String {
                 i.to_string()
             } else if let Some(u) = n.as_u64() {
                 u.to_string()
-            } else if let Some(f) = n.as_f64() {
-                super::render_float_py(f, false)
             } else {
-                n.to_string()
+                // Beyond i64/u64: an integer literal keeps its exact digits
+                // (`arbitrary_precision` is unified from pidash-api) and
+                // Python `str(int)` echoes them — never route them through
+                // `f64`. Only float-syntax literals take the `repr` path.
+                let token = n.to_string();
+                if token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                    match n.as_f64() {
+                        Some(f) => super::render_float_py(f, false),
+                        None => token,
+                    }
+                } else {
+                    token
+                }
             }
         }
         Value::String(s) => s.clone(),
@@ -323,9 +339,12 @@ pub fn ensure_envelope(message: &Map<String, Value>, fresh_mid: &str) -> Map<Str
 ///
 /// Key order is `v, type, run_id, work_item_id, prompt, repo_url,
 /// repo_ref, git_work_branch, expected_codex_model,
-/// approval_policy_overrides, deadline`. `run_config` lookups default
-/// to `null` exactly like `dict.get` (note `expected_codex_model`
-/// reads the `model` key).
+/// approval_policy_overrides, deadline`, then — only when the run's
+/// `run_config` carries them — `issue_identifier`, `project_identifier`,
+/// `workpad_body`, `workpad_sha256` (NEWPIDASH-320 §6.1, §6.3).
+/// `run_config` lookups default to `null` exactly like `dict.get`
+/// (note `expected_codex_model` reads the `model` key). Old daemons
+/// ignore the new keys; old servers never send them.
 pub fn build_assign_msg(
     run_id: &str,
     work_item_id: Option<&str>,
@@ -333,7 +352,7 @@ pub fn build_assign_msg(
     run_config: &Map<String, Value>,
 ) -> Map<String, Value> {
     let get = |key: &str| run_config.get(key).cloned().unwrap_or(Value::Null);
-    let mut msg = Map::with_capacity(11);
+    let mut msg = Map::with_capacity(15);
     msg.insert("v".to_string(), Value::from(1));
     msg.insert("type".to_string(), Value::String("assign".to_string()));
     msg.insert("run_id".to_string(), Value::String(run_id.to_string()));
@@ -351,6 +370,19 @@ pub fn build_assign_msg(
         get("approval_policy_overrides"),
     );
     msg.insert("deadline".to_string(), Value::Null);
+    for key in [
+        "issue_identifier",
+        "project_identifier",
+        "workpad_body",
+        "workpad_sha256",
+    ] {
+        match run_config.get(key) {
+            Some(value) if !value.is_null() => {
+                msg.insert(key.to_string(), value.clone());
+            }
+            _ => {}
+        }
+    }
     msg
 }
 
@@ -819,6 +851,113 @@ mod tests {
         assert_eq!(Value::Object(rebuilt), *msg);
     }
 
+    /// NEWPIDASH-320 §6.1, §6.3: the run-context keys ride the assign
+    /// envelope only when the run's `run_config` carries them — the
+    /// identifiers for issue and scheduler runs, the workpad snapshot
+    /// for `coding-task` runs, and no workpad keys for any other kind.
+    #[test]
+    fn build_assign_msg_carries_run_context_by_kind() {
+        let base = || {
+            let mut config = Map::new();
+            config.insert(
+                "repo_url".to_string(),
+                Value::String("https://example.com/fx.git".to_string()),
+            );
+            config
+        };
+        // Issue coding-task run: identifiers plus the workpad snapshot.
+        let mut coding = base();
+        coding.insert(
+            "issue_identifier".to_string(),
+            Value::String("FX-7".to_string()),
+        );
+        coding.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        coding.insert(
+            "workpad_body".to_string(),
+            Value::String("# plan".to_string()),
+        );
+        coding.insert(
+            "workpad_sha256".to_string(),
+            Value::String("abc123".to_string()),
+        );
+        let msg = build_assign_msg("run-1", Some("item-1"), "do it", &coding);
+        assert_eq!(
+            msg.get("issue_identifier").and_then(Value::as_str),
+            Some("FX-7")
+        );
+        assert_eq!(
+            msg.get("project_identifier").and_then(Value::as_str),
+            Some("FX")
+        );
+        assert_eq!(
+            msg.get("workpad_body").and_then(Value::as_str),
+            Some("# plan")
+        );
+        assert_eq!(
+            msg.get("workpad_sha256").and_then(Value::as_str),
+            Some("abc123")
+        );
+        let keys: Vec<&str> = msg.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "v",
+                "type",
+                "run_id",
+                "work_item_id",
+                "prompt",
+                "repo_url",
+                "repo_ref",
+                "git_work_branch",
+                "expected_codex_model",
+                "approval_policy_overrides",
+                "deadline",
+                "issue_identifier",
+                "project_identifier",
+                "workpad_body",
+                "workpad_sha256",
+            ]
+        );
+        // Review run: identifiers, but no workpad keys.
+        let mut review = base();
+        review.insert(
+            "issue_identifier".to_string(),
+            Value::String("FX-7".to_string()),
+        );
+        review.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        let msg = build_assign_msg("run-2", Some("item-1"), "review it", &review);
+        assert!(msg.contains_key("issue_identifier"));
+        assert!(msg.contains_key("project_identifier"));
+        assert!(!msg.contains_key("workpad_body"));
+        assert!(!msg.contains_key("workpad_sha256"));
+        // Scheduler run: project only, no issue and no workpad.
+        let mut sched = base();
+        sched.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        let msg = build_assign_msg("run-3", None, "sweep it", &sched);
+        assert!(!msg.contains_key("issue_identifier"));
+        assert_eq!(
+            msg.get("project_identifier").and_then(Value::as_str),
+            Some("FX")
+        );
+        assert!(!msg.contains_key("workpad_body"));
+        assert!(!msg.contains_key("workpad_sha256"));
+        // Old run configs (no context keys) stay byte-identical: nulls
+        // are skipped, never emitted.
+        let mut legacy = base();
+        legacy.insert("issue_identifier".to_string(), Value::Null);
+        let msg = build_assign_msg("run-4", Some("item-1"), "do it", &legacy);
+        assert!(!msg.contains_key("issue_identifier"));
+    }
+
     #[test]
     fn resume_ack_and_cancel_variants_replay_fixture() {
         let fx = fixture();
@@ -909,6 +1048,20 @@ mod tests {
         let old = parsed["old_sid"].as_str();
         let new = parsed["new_sid"].as_str().expect("new_sid");
         assert_eq!(eviction_body(old, new), body);
+    }
+
+    #[test]
+    fn python_str_echoes_big_integers() {
+        // Python `str(int)` echoes exact digits past u64/i64 (the
+        // `str(message.get("mid") ...)` positions); only float-syntax
+        // literals take the `repr` path. Needs the workspace-unified
+        // `arbitrary_precision` (PIDASHCONV-1332).
+        let big: Value = serde_json::from_str("18446744073709551616").expect("int");
+        assert_eq!(python_str(&big), "18446744073709551616");
+        let neg: Value = serde_json::from_str("-9223372036854775809").expect("int");
+        assert_eq!(python_str(&neg), "-9223372036854775809");
+        let float: Value = serde_json::from_str("1e19").expect("float");
+        assert_eq!(python_str(&float), "1e+19");
     }
 
     #[test]

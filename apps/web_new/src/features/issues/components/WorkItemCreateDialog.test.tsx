@@ -1425,6 +1425,18 @@ describe("WorkItemCreateDialog Create more (ISS-119)", () => {
     expect(posts(h.sent)[1]).toEqual({ name: "Second item", ...DEFAULT_TARGET });
   });
 
+  it("does not fire onCreated while Create more is on (parents unmount on it)", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First item");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    expect(h.onCreated).not.toHaveBeenCalled();
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("clears the description editor between items", async () => {
     const user = userEvent.setup();
     const h = setup();
@@ -1538,39 +1550,24 @@ describe("WorkItemCreateDialog default pod (NEWPIDASH-23)", () => {
     expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: TYPE_TWO });
   });
 
-  it("keeps an agent pick over the default pod", async () => {
+  it("offers no agent row and defaults to the pod even when the project's legacy default is an agent", async () => {
     const user = userEvent.setup();
     const h = setup({
       projects: {
         [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
-          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
+          default_agent_executor: "cloud_agent",
+          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "", deprecated: true }],
         }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
     await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
-    await user.click(await screen.findByRole("option", { name: /Pi Dash Cloud Agent/ }));
-    fireEvent.change(titleField(), { target: { value: "In the cloud" } });
+    expect(screen.queryByRole("option", { name: /Pi Dash Cloud Agent/ })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    fireEvent.change(titleField(), { target: { value: "Runner project" } });
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: null, agent_executor: "cloud_agent" });
-  });
-
-  it("leaves the target on the project default when that default is an agent", async () => {
-    const h = setup({
-      projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
-          default_agent_executor: "cloud_agent",
-          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
-        }),
-        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
-      },
-    });
-    await waitFor(() => expect(h.calls.some((call) => call.url.includes("/runners/pods/"))).toBe(true));
-    fireEvent.change(titleField(), { target: { value: "Cloud project" } });
-    save();
-    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "Cloud project" });
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: PARENT_ID, agent_executor: "local_runner" });
   });
 
   it("does not count the preselected pod as work for the discard guard", async () => {
@@ -1587,6 +1584,31 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     const h = setup();
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
     expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("closes silently when an untouched listing prefill is discarded (NEWPIDASH-143)", async () => {
+    const h = setup(
+      {},
+      {
+        initialValues: {
+          stateId: STATE_ID,
+          priority: "high",
+          assigneeIds: ["member-1"],
+          labelIds: ["label-1"],
+          targetDate: "2026-12-01",
+        },
+      }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("closes silently on Escape for an untouched listing prefill (NEWPIDASH-143)", async () => {
+    const h = setup({}, { initialValues: { stateId: STATE_ID } });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
     expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
   });
 
@@ -3156,6 +3178,106 @@ describe("WorkItemCreateDialog type seam (ISS-129)", () => {
     registerIssueTypeExtension({ typePicker: () => <span data-testid="stub-type">Type picker</span> });
     setup({}, { draftSeed: { title: "", input: { name: null } } });
     expect(screen.queryByTestId("stub-type")).not.toBeInTheDocument();
+  });
+});
+
+describe("WorkItemCreateDialog modal refresh (NEWPIDASH-361)", () => {
+  afterEach(() => {
+    resetIssueTypeExtension();
+  });
+
+  function StubTypePicker(props: IssueTypeExtensionProps): React.ReactElement {
+    return (
+      <div>
+        <span data-testid="stub-type-id">{props.typeId ?? "none"}</span>
+        <button type="button" onClick={() => props.onTypeChange(TYPE_ONE)}>
+          Pick one
+        </button>
+      </div>
+    );
+  }
+
+  function setupWithTypes(): { sent: unknown[] } {
+    registerEditionIssuesProviders({
+      workItemTypes: async () => [
+        { id: TYPE_ONE, name: "Bug" },
+        { id: TYPE_TWO, name: "Task", isDefault: true },
+      ],
+    });
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    return setup();
+  }
+
+  it("renders the modal twice as wide and half again as tall, capped at the viewport", () => {
+    setup();
+    const dialog = screen.getByRole("dialog", { name: "Create new work item" });
+    expect(dialog).toHaveClass("max-w-[min(84rem,calc(100vw-2rem))]");
+    expect(dialog).toHaveClass("min-h-[min(44rem,calc(100dvh-2rem))]");
+    // The kit default must not compete: two max-widths resolve to the
+    // default in the Tailwind cascade, which is what kept this modal narrow.
+    expect(dialog).not.toHaveClass("max-w-md");
+  });
+
+  it("renders the issue type as the last property chip", () => {
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    setup();
+    const row = screen.getByTestId("property-chips");
+    expect(row.lastElementChild).toHaveAttribute("aria-label", "Issue type");
+    expect(screen.getByTestId("stub-type-id")).toBeInTheDocument();
+  });
+
+  it("preselects the project default type and carries it in the payload", async () => {
+    const user = userEvent.setup();
+    const h = setupWithTypes();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.type(titleField(), "Default typed");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ type: TYPE_TWO });
+  });
+
+  it("keeps a user pick instead of re-applying the project default", async () => {
+    const user = userEvent.setup();
+    setupWithTypes();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.click(screen.getByRole("button", { name: "Pick one" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+  });
+
+  it("re-defaults the type after a project switch instead of keeping the stale pick", async () => {
+    const user = userEvent.setup();
+    const TYPE_BEACON = "b23e4567-e89b-12d3-a456-426614174010";
+    registerEditionIssuesProviders({
+      workItemTypes: async (input: { workspaceSlug: string; projectId: string }) =>
+        input.projectId === PROJECT_BEACON
+          ? [{ id: TYPE_BEACON, name: "Beacon type", isDefault: true }]
+          : [
+              { id: TYPE_ONE, name: "Bug" },
+              { id: TYPE_TWO, name: "Task", isDefault: true },
+            ],
+    });
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    const h = setup();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.click(screen.getByRole("button", { name: "Pick one" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_BEACON));
+    await user.type(titleField(), "Moved");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ type: TYPE_BEACON });
+  });
+
+  it("shows Field: Value tooltips on the property buttons", async () => {
+    setup();
+    const chip = await screen.findByRole("button", { name: "State: Todo" });
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "State: Todo — The workflow stage this work item is in."
+    );
   });
 });
 

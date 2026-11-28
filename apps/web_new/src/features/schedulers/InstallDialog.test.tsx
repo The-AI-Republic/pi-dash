@@ -52,6 +52,7 @@ export function scheduler(overrides: Partial<Scheduler> = {}): Scheduler {
     prompt: "Review the week",
     color: "#5e6ad2",
     source: "builtin",
+    is_builtin: false,
     is_enabled: true,
     active_binding_count: 0,
     created_at: "2026-10-01T00:00:00Z",

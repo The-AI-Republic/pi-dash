@@ -13,6 +13,16 @@
         reverse_proxy localhost:3004
     }
 
+    # Email logo images (NEWPIDASH-376): the frozen Django collectstatic
+    # output is gone, so the templates' /static/logos/* URLs are served
+    # from the web_new bundle (apps/web_new/public/static/logos/, copied
+    # into /app/web_new by the aio image). Above the generated block on
+    # purpose; the generated /static exclusions must keep missing it.
+    handle /static/logos/* {
+        root * /app/web_new
+        file_server
+    }
+
     # BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)
     handle /sign-in* {
         root * /app/web_new

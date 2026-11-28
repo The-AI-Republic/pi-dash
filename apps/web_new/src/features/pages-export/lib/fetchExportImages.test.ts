@@ -23,6 +23,17 @@ describe("browserFetchExportImageBytes", () => {
     await expect(browserFetchExportImageBytes("https://example.com/a.png")).resolves.toEqual(payload);
   });
 
+  it("fetches through the page transport with credentials, so presigned redirects follow", async () => {
+    const payload = new Uint8Array([137, 80, 78, 71]);
+    const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => payload.buffer }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    await browserFetchExportImageBytes("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("rejects when the picture is missing", async () => {
     vi.stubGlobal(
       "fetch",

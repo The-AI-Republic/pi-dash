@@ -446,10 +446,7 @@ fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandComp
 /// worth warning about. Deduplicated, order of first appearance.
 pub fn inline_secret_env_names(command: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for segment in command
-        .split(['\n', ';', '|'])
-        .flat_map(|s| s.split("&&"))
-    {
+    for segment in command.split(['\n', ';', '|']).flat_map(|s| s.split("&&")) {
         for word in segment.split_whitespace() {
             // `(subshell` / `{ group` openers precede the simple command.
             let word = word.trim_start_matches(['(', '{']);
@@ -461,9 +458,7 @@ pub fn inline_secret_env_names(command: &str) -> Vec<String> {
             };
             let valid = !name.is_empty()
                 && !name.starts_with(|c: char| c.is_ascii_digit())
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !valid {
                 break;
             }
@@ -1078,9 +1073,7 @@ mod tests {
 
     #[test]
     fn inline_secret_env_names_dedupes_and_never_returns_values() {
-        let names = inline_secret_env_names(
-            "DB_PASSWORD=s3cret cmd1 && DB_PASSWORD=s3cret cmd2",
-        );
+        let names = inline_secret_env_names("DB_PASSWORD=s3cret cmd1 && DB_PASSWORD=s3cret cmd2");
         assert_eq!(names, vec!["DB_PASSWORD"]);
         assert!(names.iter().all(|n| !n.contains("s3cret")));
     }
@@ -1188,7 +1181,10 @@ mod tests {
             },
         });
         let text = extract_agent_message_text("item/completed", &params).expect("narrative");
-        assert_eq!(text, "Let me first explore the original color of the button.");
+        assert_eq!(
+            text,
+            "Let me first explore the original color of the button."
+        );
     }
 
     #[test]

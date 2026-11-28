@@ -81,10 +81,12 @@ describe("CycleTransferDialog", () => {
   it("narrows the options by name as the search types", async () => {
     const user = userEvent.setup();
     setup();
-    await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "draft");
+    const field = screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "draft");
     expect(screen.getByRole("option", { name: /^Draft cycle/ })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("Target cycle")).not.toBeInTheDocument());
-    await user.clear(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER));
+    await user.clear(field);
     await waitFor(() => expect(screen.getByRole("option", { name: /^Target cycle/ })).toBeInTheDocument());
   });
 
@@ -97,7 +99,9 @@ describe("CycleTransferDialog", () => {
   it("reports a search that matches nothing separately", async () => {
     const user = userEvent.setup();
     setup();
-    await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "zzz");
+    const field = screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "zzz");
     expect(await screen.findByText(CYCLE_TRANSFER_NO_MATCH)).toBeInTheDocument();
   });
 
@@ -142,6 +146,28 @@ describe("CycleTransferDialog", () => {
     expect(mocks.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("hands the open-time focus to the search field", async () => {
+    setup();
+    const field = screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+  });
+
+  it("keeps the keystrokes once the open-time focus has settled", async () => {
+    // The kit focuses the dialog's first control a frame after mount. On a
+    // busy host that frame lands after the test clicks into the search field,
+    // the field loses focus, and every later keystroke goes to a button: the
+    // search never narrows and the filtered-list wait runs out its budget
+    // (NEWFRONT-1055). Typing only after the field holds focus — which the
+    // dialog now gives it on open — keeps the input the key target.
+    const user = userEvent.setup();
+    setup();
+    const field = screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "draft");
+    expect(field).toHaveValue("draft");
+    await waitFor(() => expect(screen.queryByText("Target cycle")).not.toBeInTheDocument());
+  });
+
   it("clears the search when the dialog reopens", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
@@ -155,7 +181,9 @@ describe("CycleTransferDialog", () => {
         />
       </QueryClientProvider>
     );
-    await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "draft");
+    const field = screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "draft");
     await waitFor(() => expect(screen.queryByText("Target cycle")).not.toBeInTheDocument());
     rerender(
       <QueryClientProvider client={new QueryClient()}>

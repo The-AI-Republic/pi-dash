@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-187): the server titles a new thread from the
-// first message's first line, and the sidebar picks the title up after
+// first message's first line, and the history picks the title up after
 // the send without a manual reload; untitled threads keep the fallback
 // label meanwhile. (The generate-title helper serves only the
 // create-issue modal — no chat surface calls it.) Row: AGT-054.
@@ -21,7 +21,7 @@ import { DUMMY_PROVIDER, UNTITLED, expectSidebarTitles } from "./support";
 const ROWS = ["AGT-054"];
 
 test(
-  specTitle(ROWS, "first send titles the thread and the sidebar updates live"),
+  specTitle(ROWS, "first send titles the thread and the history updates live"),
   { tag: specTags(ROWS) },
   async ({ driver }) => {
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt54"));
@@ -39,7 +39,7 @@ test(
       await driver.assistantOpenThread(workspaceSlug, thread.id);
     });
 
-    await test.step("sidebar shows the untitled fallback", async () => {
+    await test.step("history shows the untitled fallback", async () => {
       await expectSidebarTitles(driver, [UNTITLED]);
     });
 

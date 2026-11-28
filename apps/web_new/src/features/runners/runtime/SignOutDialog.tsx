@@ -1,13 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Desktop sign-out confirmation (RUN-047). Signing out removes
-// credentials and, by default, nothing else: an account's chats with the
-// built-in agent stay on this computer, hidden until that account signs
-// in again. The switch below is the one place a user can ask for them to
-// be deleted instead, so it starts off every time the dialog opens. The
-// root lifecycle loads this chunk on desktop only; with no dialog
-// mounted, confirmation resolves to the keep-history default.
+// The desktop's sign-out confirmation.
+//
+// Signing out of the app signs out Pi Dash on this computer with it
+// (desktop_unified_signin §4): one sign-in, both directions. The only
+// opt-in left is "Also delete chat history" (unticked every time the
+// dialog opens); the computer logout is not optional any more.
 
 import { Button, Dialog, Switch } from "@pidash/kit";
 import * as React from "react";
@@ -45,7 +44,7 @@ export function RuntimeSignOutDialog(): React.ReactElement {
   return (
     <Dialog
       title="Sign out?"
-      description="Signing out removes this account's credentials from this computer. Its chats with the built-in agent stay on this computer, hidden until the account signs in again."
+      description="Signing out removes this account's credentials from this computer. Its chats with the Pi Dash Agent stay on this computer, hidden until the account signs in again."
       open={isOpen}
       onOpenChange={() => settle(null)}
       actions={
@@ -53,22 +52,24 @@ export function RuntimeSignOutDialog(): React.ReactElement {
           <Button variant="ghost" onClick={() => settle(null)}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => settle({ deleteChatHistory })}>
+          <Button variant="primary" onClick={() => settle({ deleteChatHistory, signOutComputer: false })}>
             Sign out
           </Button>
         </>
       }
     >
-      <div className="flex items-center gap-(--space-3)">
-        <Switch
-          checked={deleteChatHistory}
-          onCheckedChange={setDeleteChatHistory}
-          label="Also delete chat history"
-          data-testid="runtime-sign-out-delete-history"
-        />
-        <div className="flex flex-col">
-          <span className="text-body text-(--text)">Also delete chat history</span>
-          <span className="text-caption text-(--text-muted)">Task folders are kept.</span>
+      <div className="flex flex-col gap-(--space-4)">
+        <div className="flex items-center gap-(--space-3)">
+          <Switch
+            checked={deleteChatHistory}
+            onCheckedChange={setDeleteChatHistory}
+            label="Also delete chat history"
+            data-testid="runtime-sign-out-delete-history"
+          />
+          <div className="flex flex-col">
+            <span className="text-body text-(--text)">Also delete chat history</span>
+            <span className="text-caption text-(--text-muted)">Task folders are kept.</span>
+          </div>
         </div>
       </div>
     </Dialog>

@@ -18,7 +18,7 @@ let waiting: Array<(choice: RuntimeSignOutChoice | null) => void> = [];
 let hosts = 0;
 
 function keepHistory(): RuntimeSignOutChoice {
-  return { deleteChatHistory: false };
+  return { deleteChatHistory: false, signOutComputer: false };
 }
 
 function settleWaiting(): void {

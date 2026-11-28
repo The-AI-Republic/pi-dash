@@ -16,13 +16,14 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { usePermissions, useMeSettings, useWorkspaces } from "../../../core/session/index.js";
 import { notifySuccess, resolveFileUrl } from "../../../shared/shell/index.js";
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { workspaceDetailsQueryOptions } from "./api/details.js";
 import { URL_COPIED_TITLE } from "./api/mutations.js";
 import { DeleteWorkspaceSection } from "./components/DeleteWorkspaceSection.js";
 import { WorkspaceDetailsForm } from "./components/WorkspaceDetailsForm.js";
 import { WorkspaceIdentityCard } from "./components/WorkspaceIdentityCard.js";
 import { WorkspaceLogoDialog } from "./components/WorkspaceLogoDialog.js";
-import { postDeletePath, workspaceAddress } from "./rules.js";
+import { postDeletePath } from "./rules.js";
 
 export interface WorkspaceGeneralPageProps {
   workspaceSlug: string;
@@ -84,9 +85,14 @@ export function WorkspaceGeneralPage({ workspaceSlug, onNavigate }: WorkspaceGen
         canManage={canManage}
         onOpenLogo={() => setLogoOpen(true)}
         onCopyAddress={() => {
-          void copyWorkspaceAddress(workspaceAddress(window.location.origin, workspaceSlug), navigator.clipboard, () =>
-            notifySuccess(URL_COPIED_TITLE)
-          );
+          try {
+            void copyWorkspaceAddress(shareableAddress(`/${workspaceSlug}`), navigator.clipboard, () =>
+              notifySuccess(URL_COPIED_TITLE)
+            );
+          } catch {
+            // No hosted origin to share: copy nothing rather than the
+            // desktop bundle origin (silent like a refused clipboard).
+          }
         }}
       />
       <WorkspaceDetailsForm

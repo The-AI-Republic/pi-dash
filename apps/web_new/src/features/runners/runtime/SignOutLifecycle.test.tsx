@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   client: { baseUrl: "https://api.test" },
   agentRuntime: {},
-  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
+  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false, signOutComputer: false })),
   registerSignOutPrompt: vi.fn(),
   disposeRuntimeForSignOut: vi.fn(async (..._args: Array<unknown>) => undefined),
 }));
@@ -52,12 +52,12 @@ describe("RuntimeSignOutLifecycle", () => {
   it("registers the hooks on import and delegates confirmation and disposal", async () => {
     const hooks = getRuntimeSignOutHooks();
     expect(hooks).not.toBeNull();
-    await expect(hooks?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
-    await expect(hooks?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(hooks?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
+    await expect(hooks?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
     expect(harness.confirmRuntimeSignOut).toHaveBeenCalledTimes(2);
-    await hooks?.disposeRuntimeForSignOut({ deleteChatHistory: true });
+    await hooks?.disposeRuntimeForSignOut({ deleteChatHistory: true, signOutComputer: false });
     expect(harness.disposeRuntimeForSignOut).toHaveBeenCalledWith({
-      choice: { deleteChatHistory: true },
+      choice: { deleteChatHistory: true, signOutComputer: false },
       client: harness.client,
       runtime: harness.agentRuntime,
     });

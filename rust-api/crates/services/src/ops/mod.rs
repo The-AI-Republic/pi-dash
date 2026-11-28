@@ -5,7 +5,8 @@
 //! the order boot, users, repair, instance, prompting so sibling rebases
 //! stay mechanical.
 //!
-//! * [`boot`] — `wait_for_db`, `wait_for_migrations`, `clear_cache`
+//! * [`boot`] — `wait_for_db`, `wait_for_migrations`, `check_migrations`,
+//!   `clear_cache`
 //!   (PIDASHCONV-806, fixtures F37-01/F37-02).
 //! * [`storage`] — `create_bucket`, `update_bucket` S3 flows
 //!   (PIDASHCONV-806).
@@ -17,8 +18,8 @@
 //!   and the GitHub probe around those shapes.
 //! * [`seeds`] — the workspace seed data + loader (PIDASHCONV-811,
 //!   fixture F37-10).
-//! * [`prompting`] — reseed + revalidate decisions over the prompting
-//!   kernels (PIDASHCONV-810, fixture F37-09).
+//! * [`prompting`] — revalidate decisions over the prompting kernels
+//!   (PIDASHCONV-810, fixture F37-09; reseed removed NEWPIDASH-404).
 
 pub mod boot;
 pub mod instance;
