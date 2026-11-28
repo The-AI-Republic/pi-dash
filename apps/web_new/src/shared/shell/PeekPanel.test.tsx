@@ -131,6 +131,63 @@ describe("PeekPanel", () => {
     expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
   });
 
+  it("wraps the read-only heading instead of clipping long titles", () => {
+    const longTitle = `${"word ".repeat(40).trim()} ${"x".repeat(80)}`;
+    setup({ title: longTitle, titleAsHeading: true });
+    const heading = screen.getByRole("heading", { name: longTitle });
+    expect(heading.className).toContain("wrap-anywhere");
+    expect(heading.className).toContain("min-w-0");
+  });
+
+  it("keeps the single-line input unless the caller opts into multiline", () => {
+    setup();
+    expect(screen.getByRole("textbox", { name: "Work item title" }).tagName).toBe("INPUT");
+  });
+
+  it("wraps long titles in the opt-in multiline field and grows it", () => {
+    setup({ titleMultiline: true });
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(field.className).toContain("wrap-anywhere");
+    expect(field.className).toContain("whitespace-pre-wrap");
+    expect(field.className).toContain("overflow-hidden");
+    expect(field.className).toContain("resize-none");
+    // Growth comes from `field-sizing: content` in the component (jsdom
+    // drops that property, so it is source-reviewed, not asserted here).
+    expect(field.getAttribute("rows")).toBe("1");
+  });
+
+  it("commits the multiline title on Enter without inserting a newline", async () => {
+    const user = userEvent.setup();
+    const { onCommitTitle } = setup({ titleMultiline: true });
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    await user.clear(field);
+    await user.type(field, "Renamed{Enter}");
+    expect(field).toHaveValue("Renamed");
+    expect(onCommitTitle).toHaveBeenCalledWith("Renamed");
+  });
+
+  it("collapses pasted line breaks to spaces in the multiline field", () => {
+    const { onCommitTitle } = setup({ titleMultiline: true });
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    fireEvent.change(field, { target: { value: "first\nsecond\r\nthird" } });
+    expect(field).toHaveValue("first second third");
+    fireEvent.blur(field);
+    expect(onCommitTitle).toHaveBeenCalledWith("first second third");
+  });
+
+  it("reverts the multiline draft on Escape instead of closing", async () => {
+    const user = userEvent.setup();
+    const { onClose, onCommitTitle } = setup({ titleMultiline: true });
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    await user.clear(field);
+    await user.type(field, "Abandoned draft");
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(field).toHaveValue("Parity first issue");
+    expect(onCommitTitle).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("skips the title block for loading and error bodies", () => {
     setup({ hideTitle: true, children: <p>Loading body</p> });
     expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
