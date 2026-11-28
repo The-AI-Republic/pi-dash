@@ -47,6 +47,7 @@ from pi_dash.runner.views import (
     RunResumedEndpoint,
     RunStartedEndpoint,
     RunStreamUpgradeEndpoint,
+    RunCapacityEndpoint,
     RunnerEnrollEndpoint,
     RunnerRefreshEndpoint,
     RunnerSelfRevokeEndpoint,
@@ -230,6 +231,11 @@ urlpatterns = [
         "runs/<uuid:run_id>/stream/upgrade/",
         RunStreamUpgradeEndpoint.as_view(),
         name="run-stream-upgrade",
+    ),
+    path(
+        "runs/<uuid:run_id>/capacity/",
+        RunCapacityEndpoint.as_view(),
+        name="run-capacity",
     ),
     # Direct chat lifecycle + event upstream.
     path(

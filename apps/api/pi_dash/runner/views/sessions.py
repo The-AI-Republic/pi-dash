@@ -34,7 +34,14 @@ from rest_framework.views import APIView
 
 from pi_dash.utils.db_async import db_sync_to_async
 from pi_dash.runner.authentication import RunnerAccessTokenAuthentication
-from pi_dash.runner.models import RunnerSession, RunnerStatus
+from pi_dash.runner.models import (
+    MACHINE_RUN_QUEUE_CAPABILITY,
+    AgentRun,
+    AgentRunStatus,
+    RunnerSession,
+    RunnerStatus,
+)
+from pi_dash.runner.services import capacity as capacity_service
 from pi_dash.runner.services import chat as chat_service
 from pi_dash.runner.services import outbox, session_service
 
@@ -167,14 +174,14 @@ class RunnerSessionOpenEndpoint(APIView):
 
         old_session_id = None
         new_sid = _uuid.uuid4()
+        # Negotiated capabilities (T1): the daemon advertises what it
+        # supports at open; the matcher reads the stored value on the
+        # runner's current active session to pick the protocol.
+        session_capabilities = capacity_service.parse_session_capabilities(body)
         try:
             with transaction.atomic():
                 _bound_txn_waits()
-                prior = (
-                    RunnerSession.objects.select_for_update()
-                    .filter(runner=runner, revoked_at__isnull=True)
-                    .first()
-                )
+                prior = RunnerSession.objects.select_for_update().filter(runner=runner, revoked_at__isnull=True).first()
                 if prior is not None:
                     old_session_id = str(prior.id)
                     prior.revoked_at = timezone.now()
@@ -185,6 +192,7 @@ class RunnerSessionOpenEndpoint(APIView):
                     id=new_sid,
                     runner=runner,
                     protocol_version=settings.RUNNER_PROTOCOL_VERSION,
+                    capabilities=session_capabilities,
                     last_seen_at=timezone.now(),
                 )
 
@@ -259,9 +267,7 @@ class RunnerSessionOpenEndpoint(APIView):
         # WAITING_FOR_WORKTREE is invisible to the daemon until we push it
         # back. The runner treats this exactly like a fresh Assign. Old
         # runners ignore the unknown response key, so this is additive.
-        redeliver = session_service.build_session_open_redeliver(
-            runner, str(in_flight) if in_flight else None
-        )
+        redeliver = session_service.build_session_open_redeliver(runner, str(in_flight) if in_flight else None)
 
         welcome = {
             "type": "welcome",
@@ -269,6 +275,10 @@ class RunnerSessionOpenEndpoint(APIView):
             "server_time": timezone.now().isoformat(),
             "long_poll_interval_secs": settings.LONG_POLL_INTERVAL_SECS,
             "protocol_version": settings.RUNNER_PROTOCOL_VERSION,
+            # The cloud advertises what it supports alongside the
+            # daemon's open-request list; managed admission needs both
+            # parties to agree (T1).
+            "capabilities": [MACHINE_RUN_QUEUE_CAPABILITY],
         }
         if settings.LATEST_RUNNER_VERSION:
             welcome["latest_runner_version"] = settings.LATEST_RUNNER_VERSION
@@ -325,6 +335,110 @@ def _authenticate_poll_runner(request):
     if result is None:
         return None
     return getattr(request, "auth_runner", None)
+
+
+def _apply_poll_capacity_snapshot(runner, session, sid, status_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the poll's held-token/capacity snapshot (T2); returns the reap entry.
+
+    Polls carry ``held_assignment_token`` + a defaulted ``capacity``
+    snapshot for the held run. Token and session are validated before
+    persisting phase or letting the reported in-flight id suppress
+    reaping: a protocol-1 claim without the exact attempt token does
+    neither (its ``in_flight_run`` is stripped for the reaper). This
+    is unrelated to the retired per-runner desk-capacity hint — it
+    refreshes the held run's ``capacity_wait`` presentation through
+    every normal poll, independent of the observability flag.
+
+    Must be called inside the poll's transaction (Runner already
+    locked): the run row is locked next (Runner → Run order), with
+    no I/O below.
+    """
+    held_raw = status_entry.get("in_flight_run")
+    if not held_raw:
+        return status_entry
+    in_flight = capacity_service.parse_uuid(held_raw)
+    if in_flight is None:
+        return status_entry
+    held_token_raw = status_entry.get("held_assignment_token")
+    snapshot = status_entry.get("capacity")
+    snapshot_dict = snapshot if isinstance(snapshot, dict) else None
+    if held_token_raw is None and snapshot_dict is None:
+        # Plain legacy poll: nothing to fence or persist.
+        return status_entry
+    run = AgentRun.objects.select_for_update().filter(pk=in_flight, runner=runner).first()
+    if run is None:
+        return status_entry
+    if run.assignment_protocol != capacity_service.PROTOCOL_MACHINE_QUEUE:
+        return status_entry
+    provided = capacity_service.parse_uuid(held_token_raw) if held_token_raw is not None else None
+    if not capacity_service.token_matches(run, provided):
+        # Wrong or missing attempt token: the claim must not suppress
+        # reaping nor persist phase.
+        stripped = dict(status_entry)
+        stripped["in_flight_run"] = None
+        return stripped
+    if snapshot_dict is None or run.status != AgentRunStatus.ASSIGNED:
+        return status_entry
+    # Validate the snapshot before persisting anything; malformed
+    # input is ignored rather than half-applied.
+    stored = run.capacity_wait if isinstance(run.capacity_wait, dict) else {}
+    revision = stored.get("revision")
+    raw_revision = snapshot_dict.get("revision")
+    if raw_revision is not None:
+        revision = capacity_service.parse_revision(raw_revision)
+        if revision is None:
+            return status_entry
+    if revision is not None and stored.get("revision") is not None and revision < stored["revision"]:
+        return status_entry
+    raw_phase = snapshot_dict.get("phase")
+    if raw_phase is not None and raw_phase not in (capacity_service.PHASE_WAITING, capacity_service.PHASE_PREPARING):
+        return status_entry
+    queued_at = snapshot_dict.get("queued_at", stored.get("queued_at"))
+    if raw_queued := snapshot_dict.get("queued_at"):
+        from datetime import datetime
+
+        try:
+            datetime.fromisoformat(str(raw_queued).replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return status_entry
+        queued_at = str(raw_queued)
+    queue_position = stored.get("queue_position")
+    if snapshot_dict.get("queue_position") is not None:
+        queue_position = capacity_service.validate_count(snapshot_dict.get("queue_position"), allow_zero=False)
+        if queue_position is None:
+            return status_entry
+    active = stored.get("active")
+    if snapshot_dict.get("active") is not None:
+        active = capacity_service.validate_count(snapshot_dict.get("active"), allow_zero=True)
+        if active is None:
+            return status_entry
+    limit = stored.get("limit")
+    if snapshot_dict.get("limit") is not None:
+        limit = capacity_service.validate_count(snapshot_dict.get("limit"), allow_zero=False)
+        if limit is None or not (capacity_service.CAPACITY_MIN_LIMIT <= limit <= capacity_service.CAPACITY_MAX_LIMIT):
+            return status_entry
+    phase = str(raw_phase) if raw_phase is not None else (stored.get("phase") or capacity_service.PHASE_WAITING)
+    if stored.get("phase") == capacity_service.PHASE_PREPARING and phase == capacity_service.PHASE_WAITING:
+        # A poll refresh never downgrades preparing (same rule as the
+        # capacity waiting action).
+        phase = capacity_service.PHASE_PREPARING
+    if phase == capacity_service.PHASE_PREPARING:
+        queue_position = None
+    cw = {
+        "phase": phase,
+        "assignment_token": str(run.assignment_token) if run.assignment_token is not None else None,
+        "session_id": str(sid),
+        "revision": revision,
+        "queued_at": queued_at,
+        "reported_at": timezone.now().isoformat(),
+        "queue_position": queue_position,
+        "active": active,
+        "limit": limit,
+    }
+    if phase == capacity_service.PHASE_PREPARING and stored.get("admission_id"):
+        cw["admission_id"] = stored["admission_id"]
+    AgentRun.objects.filter(pk=run.pk).update(capacity_wait=cw)
+    return status_entry
 
 
 def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
@@ -395,7 +509,11 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
             # ignored here.
             Runner.objects.filter(pk=runner.id).update(**runner_updates)
             if status_entry:
-                session_service.reap_stale_busy_runs(runner, status_entry)
+                # Held-token/capacity snapshot (T2): validate the claim
+                # for the reaper and refresh the run's waiting
+                # presentation under the same lock order.
+                reap_entry = _apply_poll_capacity_snapshot(runner, session, sid, status_entry)
+                session_service.reap_stale_busy_runs(runner, reap_entry)
     except OperationalError:
         # Same convoy guard as session-open: a lock/statement timeout means
         # this runner's rows are contended — 503 so the daemon retries.
@@ -438,11 +556,7 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
     # real poll for this session, after the heartbeat/status update
     # makes the runner assignable. Keep this as one trigger so a first
     # poll with no prior heartbeat does not double-dispatch.
-    if (
-        (was_stale or became_available or use_zero)
-        and status_allows_drain
-        and not status_entry.get("in_flight_run")
-    ):
+    if (was_stale or became_available or use_zero) and status_allows_drain and not status_entry.get("in_flight_run"):
 
         def _drain_poll_ready_runner(rid=runner.id):
             try:

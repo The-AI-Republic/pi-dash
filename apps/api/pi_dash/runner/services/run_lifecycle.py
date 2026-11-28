@@ -280,11 +280,15 @@ def apply_run_resume_unavailable(
     if run.pin_kind != PinKind.DEDICATED:
         run.pinned_runner = None
     run.assigned_at = None
+    # Requeue ends the attempt: drop its capacity presentation. The
+    # next assignment mints a fresh token/protocol (T1); the stale
+    # values left on this row are overwritten there, never read.
+    run.capacity_wait = None
     if run.parent_run is not None and run.parent_run.thread_id:
         run.parent_run.thread_id = ""
         run.parent_run.save(update_fields=["thread_id"])
     if run.pin_kind == PinKind.DEDICATED:
-        run.save(update_fields=["status", "runner", "assigned_at"])
+        run.save(update_fields=["status", "runner", "assigned_at", "capacity_wait"])
     else:
         run.save(
             update_fields=[
@@ -292,6 +296,7 @@ def apply_run_resume_unavailable(
                 "runner",
                 "pinned_runner",
                 "assigned_at",
+                "capacity_wait",
             ]
         )
 
