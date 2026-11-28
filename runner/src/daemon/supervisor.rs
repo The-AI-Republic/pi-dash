@@ -345,6 +345,10 @@ impl Supervisor {
             // managed terminal signals redeliver their exact payload.
             if let Some(coord) = run_coordinator.as_ref() {
                 replay_terminal_outbox_once(coord, &hello_runners, false).await;
+                // What that pass could not deliver stays reported in flight
+                // when the runner's session opens, until the retry loop
+                // below delivers it.
+                restore_pending_reports(coord, &hello_runners).await;
             }
             // Always-on retry loop (NEWPIDASH-251): normal RunFailed
             // sends journaled mid-run (not only shutdown drains) must
@@ -2207,6 +2211,43 @@ fn release_finished_slot(
 /// `skip_held` (the in-process retry): leave a record alone while the queue
 /// still holds its run. That run's result is held for run-end cleanup and
 /// is the worker's to send.
+/// Report every run whose result is still in the outbox as in flight, so
+/// the cloud's session-open and heartbeat reapers cannot fail it before the
+/// outbox retry delivers its real result (first writer wins, so a failure
+/// written first could never be replaced). Called at startup, after the
+/// first replay and before any runner opens its session; the retry clears
+/// each run once its report is delivered or rejected for good. One run per
+/// runner can be kept this way.
+async fn restore_pending_reports(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+) {
+    let guard = runners.read().await;
+    for entry in coord.terminal_pending() {
+        if entry.pending_terminal_payload.is_none() || coord.holds_run(entry.run_id) {
+            continue;
+        }
+        let Some((_, state, _)) = guard.get(&entry.runner_id) else {
+            continue;
+        };
+        if state.rx_in_flight.borrow().is_some() {
+            continue;
+        }
+        state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id: entry.run_id,
+                thread_id: None,
+                status: "reporting".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        state.set_report_pending(entry.run_id);
+        tracing::info!(run_id = %entry.run_id,
+            "undelivered run result kept in flight until the outbox retry delivers it");
+    }
+}
+
 async fn replay_terminal_outbox_once(
     coord: &crate::daemon::run_queue::Coordinator,
     runners: &Arc<RwLock<HelloRunnerMap>>,
@@ -2268,6 +2309,7 @@ async fn replay_terminal_outbox_once(
                 Err(e) => {
                     tracing::warn!(run_id=%entry.run_id, "unparsable outbox payload; dropping record: {e:#}");
                     let _ = coord.complete_terminal(entry.run_id);
+                    state.clear_report_pending(entry.run_id).await;
                     false
                 }
             }
@@ -9161,6 +9203,84 @@ mod tests {
             inst.state.rx_in_flight.borrow().is_none(),
             "the delivered run is still reported in flight"
         );
+        assert!(coord.terminal_pending().is_empty());
+    }
+
+    /// Review of #3502 at bf9a2ba (MUST 1): a result the startup replay
+    /// could not deliver stays in the outbox, but a runner whose session
+    /// opens without that run in flight lets the cloud's reaper fail the
+    /// run first, and the real result can no longer win finalization. The
+    /// run is reported in flight until the retry delivers its result.
+    #[tokio::test]
+    async fn an_undelivered_report_found_at_startup_stays_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("outbox", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: inst.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let msg = ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        assert!(
+            coord
+                .persist_terminal(run_id, &serde_json::to_vec(&msg).unwrap(), "held")
+                .unwrap()
+        );
+        assert!(coord.release_slot(run_id).unwrap());
+        let runners = hello_map(&inst);
+
+        // The startup replay fails: the cloud is unreachable.
+        drop(out_rx);
+        assert_eq!(
+            replay_terminal_outbox_once(&coord, &runners, false).await,
+            0
+        );
+        restore_pending_reports(&coord, &runners).await;
+        assert_eq!(
+            *inst.state.rx_in_flight.borrow(),
+            Some(run_id),
+            "the session opens without the undelivered run, so the reaper can fail it"
+        );
+
+        // The retry delivers it; then the run stops being reported.
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let mut live = inst.clone();
+        live.out = RunnerOut::new(inst.runner_id, out_tx);
+        let delivered = replay_terminal_outbox_once(&coord, &hello_map(&live), true).await;
+        assert_eq!(delivered, 1);
+        assert!(matches!(
+            out_rx.try_recv().unwrap().body,
+            ClientMsg::RunCompleted { .. }
+        ));
+        assert!(inst.state.rx_in_flight.borrow().is_none());
         assert!(coord.terminal_pending().is_empty());
     }
 
