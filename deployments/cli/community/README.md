@@ -371,26 +371,33 @@ Then run `Start` again. Only remove the volumes if you mean to start with an emp
 
 ### Object storage image (MinIO)
 
-The bundled object storage service (`pi-dash-minio`) uses **`pgsty/minio`**, a third-party image, rather than an official MinIO image. The trust decision and how to re-pin it are recorded here.
+The bundled object storage service (`pi-dash-minio`) uses **`pgsty/silo`**, a third-party image, rather than an official MinIO image. The trust decision and how to re-pin it are recorded here.
 
-**Why not an official image.** MinIO no longer publishes `minio/minio` on Docker Hub, and `quay.io/minio/minio` refuses anonymous pulls. Either one makes a fresh `docker compose up` fail with a pull error. No official, anonymously pullable MinIO server image was available when this was checked (2026-11-28).
+**Why not an official image.** MinIO no longer publishes `minio/minio` on Docker Hub, and `quay.io/minio/minio` refuses anonymous pulls. Either one makes a fresh `docker compose up` fail with a pull error. No official, anonymously pullable MinIO server image is available.
 
-**Why `pgsty/minio`.** It is the community-maintained build of the MinIO server published by the Pigsty project ([github.com/pgsty/minio](https://github.com/pgsty/minio), Docker Hub `pgsty/minio`). It is a drop-in replacement for the old image: same `docker-entrypoint.sh`, runs as root, same `/data` layout, and it ships `mc` (a link to `mcli`), which the `docker-compose-local.yml` bucket bootstrap uses. Existing `uploads` volumes keep working with no `user:` override. Chainguard's free MinIO image was considered and rejected: it only publishes `latest` and runs as non-root, which breaks existing volumes.
+**Why `pgsty/silo`.** It is the Pigsty project's maintained fork of the MinIO server (AGPLv3, [silo.pgsty.com](https://silo.pgsty.com), Docker Hub `pgsty/silo`). It was published as `pgsty/minio` until August 2026, whose last release predates the fix below. It works as a drop-in replacement for the old image:
+
+- The image runs as root and declares the `/data` volume.
+- Its `docker-entrypoint.sh` turns the compose command `server /export --console-address ":9090"` (and a legacy `minio ...`) into `silo server ...`.
+- It ships `mcli` with an `mc` link, which the `docker-compose-local.yml` bucket bootstrap uses. That file's own shell entrypoint calls `silo server`, because the image has no `minio` binary.
+- `silo` serves a data directory written by the previous `pgsty/minio` release (`RELEASE.2026-08-04T00-00-00Z`): buckets and objects read back unchanged, so existing `uploads` volumes keep working with no `user:` override.
+
+Chainguard's free MinIO image was considered and rejected: it only publishes `latest` and runs as non-root, which breaks existing volumes.
+
+**Minimum release: SN-2026-020.** Releases before `RELEASE.2026-11-12T00-00-00Z` have SN-2026-020 (critical), which affects single-pool deployments such as this one. An S3 `DeleteObjects` call with `..` keys could delete objects, or place delete markers, in other buckets ([advisory](https://silo.pgsty.com/blog/security/20261110-bulk-delete-path-traversal/), [release notes](https://silo.pgsty.com/blog/release/silo-20261112/)). A test fails if any compose file pins an older release.
 
 **How it is trusted.** The image is pinned by release tag **and** multi-arch digest, so a pull can only ever fetch the exact image that was reviewed:
 
-|           |                                                                                                                    |
-| --------- | ------------------------------------------------------------------------------------------------------------------ |
-| Image     | `pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372` |
-| Platforms | `linux/amd64`, `linux/arm64` (OCI image index)                                                                     |
-| Verified  | 2026-11-28: Docker Hub resolves the tag to exactly this digest                                                     |
-| Used by   | `deployments/cli/community/docker-compose.yml`, `docker-compose.yml`, `docker-compose-local.yml`                   |
+|           |                                                                                                                                                                                               |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Image     | `pgsty/silo:RELEASE.2026-11-12T00-00-00Z@sha256:c20d112390b9a9ce8c11b8af95ad35bcaa62f4759663c09c936cd8d2b511f329`                                                                             |
+| Platforms | `linux/amd64`, `linux/arm64` (OCI image index)                                                                                                                                                |
+| Verified  | The digest is the one in the upstream release notes. `self-host-checks` resolves the tag to it for both platforms and runs it against a volume written by the previous image, on every change |
+| Used by   | `deployments/cli/community/docker-compose.yml`, `docker-compose.yml`, `docker-compose-local.yml`                                                                                              |
 
-The `self-host-checks` CI workflow re-checks on every change that the pinned reference still resolves for both platforms, and that this table names the same digest as the compose files.
+The `self-host-checks` CI workflow re-checks all of this on every change. It confirms that the pinned reference still resolves for both platforms, that this table names the same digest as the compose files, and that the image serves an existing volume and bootstraps the local bucket.
 
-**Re-pinning.** Never switch to `latest`. To move to a newer release, pick a tag from Docker Hub and read the upstream release notes. Resolve its digest with `docker buildx imagetools inspect pgsty/minio:<tag>` and confirm that it lists `linux/amd64` and `linux/arm64`. Then update the compose files and this table in the same change. If an official MinIO image becomes anonymously pullable again, prefer it.
-
----
+## **Re-pinning.** Never switch to `latest`. To move to a newer release, pick a tag from Docker Hub and read the upstream release notes and security advisories. Resolve its digest with `docker buildx imagetools inspect pgsty/silo:<tag>` and confirm that it matches the release notes and lists `linux/amd64` and `linux/arm64`. Then update the compose files and this table in the same change. If an official MinIO image becomes anonymously pullable again, prefer it.
 
 ### View Logs
 

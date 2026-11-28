@@ -113,7 +113,8 @@ function getEnvValue() {
         grep -q "^$key=" "$file"
         if [ $? -eq 0 ]; then
             local value
-            value=$(grep "^$key=" "$file" | cut -d'=' -f2)
+            # Everything after the first "=": URLs and secrets may contain "=".
+            value=$(grep "^$key=" "$file" | cut -d'=' -f2-)
             echo "$value"
         else
             echo ""
@@ -136,14 +137,22 @@ function updateEnvFile() {
         if [ $? -ne 0 ]; then
             echo "$key=$value" >> "$file"
             return
-        else 
-            if [ "$OS_NAME" == "Darwin" ]; then
-                value=$(echo "$value" | sed 's/|/\\|/g')
-                sed -i '' "s|^$key=.*|$key=$value|g" "$file"
-            else
-                value=$(echo "$value" | sed 's/\//\\\//g')
-                sed -i "s/^$key=.*/$key=$value/g" "$file"
-            fi
+        else
+            # Rewrite the line in bash, not with a sed replacement, where
+            # "&", "\\" and the delimiter are special: the value is kept
+            # byte for byte. Writing back through the same file keeps its
+            # owner and mode.
+            local tmp line
+            tmp=$(mktemp)
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [[ $line == "$key="* ]]; then
+                    printf '%s=%s\n' "$key" "$value"
+                else
+                    printf '%s\n' "$line"
+                fi
+            done < "$file" > "$tmp"
+            cat "$tmp" > "$file"
+            rm -f "$tmp"
         fi
     else
         echo "File not found: $file"
@@ -200,7 +209,10 @@ function syncEnvFile(){
     if [ -f "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" ]; then
         updateCustomVariables
         
-        # READ keys of pi_dash.env and update the values from pi_dash.env.bak
+        # READ keys of pi_dash.env and update the values from pi_dash.env.bak.
+        # Read a snapshot: updateEnvFile rewrites pi_dash.env in place.
+        local current
+        current=$(cat "$DOCKER_ENV_PATH")
         while IFS= read -r line
         do
             # ignore is the line is empty or starts with #
@@ -212,7 +224,7 @@ function syncEnvFile(){
             if [ -n "$value" ]; then
                 updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
             fi
-        done < "$DOCKER_ENV_PATH"
+        done <<< "$current"
     fi
     echo "Environment variables synced successfully" >&2
 }
@@ -441,6 +453,7 @@ POSTGRES_REFUSAL = re.compile(
     r'|database "[^"]*" does not exist'
     r'|role "[^"]*" is not permitted to log in'
     r"|no pg_hba\.conf entry for "
+    r'|permission denied for database "'
     r")"
 )
 
@@ -604,7 +617,13 @@ function checkBundledCredentials() {
         reported=1
         case $status in
             MISMATCH)
-                if [ "$service" == "PostgreSQL" ]; then
+                if [[ $service == "PostgreSQL" && $detail == *"permission denied for database"* ]]; then
+                    # The login works; the role lacks CONNECT on the database.
+                    echo "" >&2
+                    echo "   $service: $detail ❌" >&2
+                    echo "   Run GRANT CONNECT ON DATABASE <name> TO <role> as the database owner," >&2
+                    echo "   or set DATABASE_URL in $DOCKER_ENV_PATH to a role that may connect." >&2
+                elif [ "$service" == "PostgreSQL" ]; then
                     credentialMismatch "$service" "$detail" "DATABASE_URL"
                 else
                     credentialMismatch "$service" "$detail" "AMQP_URL"

@@ -183,11 +183,69 @@ describe("install.sh credential preflight", () => {
     assert.match(out, /ValueError: bad port/);
   });
 
+  it("says how to fix a role that may not connect to its database", () => {
+    const probe =
+      'credential-check\\tMISMATCH\\tPostgreSQL\\tpermission denied for database "pi-dash" DETAIL: User does not have CONNECT privilege.\\n';
+    const { status, out } = runCheck({ probe });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /permission denied for database/);
+    assert.match(out, /GRANT CONNECT/);
+  });
+
   it("ignores other output from the container", () => {
     const probe = `Creating pi-dash-api-run ... done\nWARNING: something\n${OK}`;
     const { status, out } = runCheck({ probe });
     assert.equal(status, 0, out);
     assert.doesNotMatch(out, /⚠️|❌/);
+  });
+});
+
+describe("install.sh env file values", () => {
+  // Upgrades carry every value from the old pi_dash.env into the new one
+  // (syncEnvFile). A connection URL must survive byte for byte, including
+  // characters that are special to cut and sed.
+  const URL_VALUE = "postgresql://pi-dash:a=b&c\\d/e|f@pi-dash-db:5432/pi-dash?sslmode=disable&x=1";
+
+  /** Source install.sh in a scratch dir, run `body`, return the env file. */
+  function runEnv(body, { env = "", backup = null, osName = "Linux" } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "pidash-env-"));
+    const envFile = join(dir, "pi_dash.env");
+    writeFileSync(envFile, env);
+    if (backup !== null) writeFileSync(join(dir, "pi_dash.env.bak"), backup);
+    const script = [
+      `cd ${JSON.stringify(dir)}`,
+      `SETUP_SH_SOURCE_ONLY=1 source ${JSON.stringify(INSTALL_SH)}`,
+      `PI_DASH_INSTALL_DIR=${JSON.stringify(dir)}`,
+      `DOCKER_ENV_PATH=${JSON.stringify(envFile)}`,
+      `OS_NAME=${osName}`,
+      "updateCustomVariables() { :; }",
+      body,
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: dir } });
+    return { status: result.status, out: `${result.stdout}${result.stderr}`, file: readFileSync(envFile, "utf8") };
+  }
+
+  it("reads a value that contains '='", () => {
+    const { out } = runEnv('getEnvValue DATABASE_URL "$DOCKER_ENV_PATH"', { env: `DATABASE_URL=${URL_VALUE}\n` });
+    assert.equal(out, `${URL_VALUE}\n`);
+  });
+
+  for (const osName of ["Linux", "Darwin"]) {
+    it(`writes a value with & \\ / | = unchanged (${osName})`, () => {
+      const { file, out } = runEnv(`updateEnvFile DATABASE_URL '${URL_VALUE}' "$DOCKER_ENV_PATH"`, {
+        env: "A=1\nDATABASE_URL=\nB=2\n",
+        osName,
+      });
+      assert.equal(file, `A=1\nDATABASE_URL=${URL_VALUE}\nB=2\n`, out);
+    });
+  }
+
+  it("carries a connection URL from the backup into the new env file on upgrade", () => {
+    const { file, out } = runEnv("syncEnvFile", {
+      env: "APP_RELEASE=stable\nDATABASE_URL=\nAMQP_URL=\n",
+      backup: `APP_RELEASE=v1\nDATABASE_URL=${URL_VALUE}\nAMQP_URL=amqp://u:p=q@pi-dash-mq:5672/v\n`,
+    });
+    assert.equal(file, `APP_RELEASE=v1\nDATABASE_URL=${URL_VALUE}\nAMQP_URL=amqp://u:p=q@pi-dash-mq:5672/v\n`, out);
   });
 });
 

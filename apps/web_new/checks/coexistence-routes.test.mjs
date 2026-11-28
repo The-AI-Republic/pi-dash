@@ -212,7 +212,7 @@ describe("buildCeLines", () => {
     }
   });
 
-  it("adds no asset route when nothing or everything has migrated", () => {
+  it("adds no CE asset route when nothing or everything has migrated", () => {
     for (const entries of [[], ["/"]]) {
       assert.ok(!buildCeLines(entries).some((line) => line.includes("/assets/")), JSON.stringify(entries));
     }
@@ -282,7 +282,7 @@ describe("buildAioLines", () => {
     assert.ok(header < lines.indexOf("        file_server"), "header must be set before file_server");
   });
 
-  it("adds no asset route when nothing or everything has migrated", () => {
+  it("adds no AIO asset route when nothing or everything has migrated", () => {
     for (const entries of [[], ["/"]]) {
       assert.ok(!buildAioLines(entries).some((line) => line.includes("/assets/")), JSON.stringify(entries));
     }

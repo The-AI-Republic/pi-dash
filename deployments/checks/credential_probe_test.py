@@ -301,6 +301,7 @@ class ProbeTest(unittest.TestCase):
             prefix + 'FATAL:  role "pi-dash" does not exist',
             prefix + 'FATAL:  database "pi-dash" does not exist',
             prefix + 'FATAL:  no pg_hba.conf entry for host "172.18.0.5", user "pi-dash", database "pi-dash", no encryption',
+            prefix + 'FATAL:  permission denied for database "pi-dash"\nDETAIL:  User does not have CONNECT privilege.',
         ):
             self.assertTrue(refusal(text), text)
         for text in (

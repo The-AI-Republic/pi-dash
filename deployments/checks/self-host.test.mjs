@@ -132,7 +132,7 @@ describe("compose images", () => {
     assert.deepEqual(offenders, [], `compose files reference unpullable images:\n${offenders.join("\n")}`);
   });
 
-  it("pins the community MinIO image to a release instead of floating on latest", () => {
+  it("pins the community object storage image to a release instead of floating on latest", () => {
     const text = readFileSync(join(root, "deployments", "cli", "community", "docker-compose.yml"), "utf8");
     const block = /\n {2}pi-dash-minio:\n((?: {4}.*\n|\n)*)/.exec(text);
     assert.ok(block !== null, "pi-dash-minio service not found");
@@ -144,34 +144,68 @@ describe("compose images", () => {
   });
 });
 
-describe("third-party MinIO image", () => {
-  // pgsty/minio replaces the official image, which can no longer be pulled
-  // anonymously. The self-host README records the trust decision and the
-  // exact reference; both must move together on a re-pin.
-  const refs = composeFiles().flatMap((file) =>
-    imagesOf(readFileSync(file, "utf8"))
-      .filter(({ image }) => imageRepository(image) === "pgsty/minio")
-      .map(({ line, image }) => ({ where: `${relative(root, file)}:${line}`, image }))
-  );
+describe("third-party object storage image", () => {
+  // The official MinIO image can no longer be pulled anonymously; the
+  // bundled object store (service pi-dash-minio) runs PGSTY's maintained
+  // fork. The self-host README records the trust decision and the exact
+  // reference; both must move together on a re-pin.
+  const REPOSITORY = "pgsty/silo";
+  // SN-2026-020 (critical): single-pool S3 DeleteObjects could delete
+  // objects in sibling buckets. Fixed in RELEASE.2026-11-12T00-00-00Z.
+  const FIRST_PATCHED_RELEASE = "RELEASE.2026-11-12T00-00-00Z";
 
-  it("is pinned to one reference, by tag and digest, everywhere it is used", () => {
-    assert.ok(refs.length > 0, "no compose file uses pgsty/minio");
-    for (const { where, image } of refs) {
-      assert.match(image, /^pgsty\/minio:RELEASE\.[^@]+@sha256:[0-9a-f]{64}$/, `${where}: ${image}`);
+  const services = composeFiles().flatMap((file) => {
+    const text = readFileSync(file, "utf8");
+    const block = /\n {2}pi-dash-minio:\n((?: {4}.*\n|\n)*)/.exec(text);
+    if (block === null) return [];
+    const offset = text.slice(0, block.index).split("\n").length;
+    return imagesOf(block[1]).map(({ line, image }) => ({
+      where: `${relative(root, file)}:${offset + line}`,
+      image,
+      block: block[1],
+    }));
+  });
+
+  it("is the same pinned reference, by tag and digest, in every compose file", () => {
+    assert.ok(services.length >= 3, services.map((s) => s.where).join("\n"));
+    for (const { where, image } of services) {
+      assert.match(image, /^pgsty\/silo:RELEASE\.[^@]+@sha256:[0-9a-f]{64}$/, `${where}: ${image}`);
     }
-    assert.deepEqual(
-      new Set(refs.map(({ image }) => image)).size,
+    assert.equal(
+      new Set(services.map(({ image }) => image)).size,
       1,
-      refs.map((r) => `${r.where}: ${r.image}`).join("\n")
+      services.map((s) => `${s.where}: ${s.image}`).join("\n")
     );
+  });
+
+  it("is a release with the SN-2026-020 fix", () => {
+    for (const { where, image } of services) {
+      const tag = imageTag(image) ?? "";
+      assert.ok(tag >= FIRST_PATCHED_RELEASE, `${where}: ${tag} predates ${FIRST_PATCHED_RELEASE}`);
+    }
+  });
+
+  it("never calls a `minio` binary, which the image does not ship", () => {
+    // The image's entrypoint maps `server ...` and `minio ...` to `silo`,
+    // but a shell entrypoint override runs binaries by name: `silo`, and
+    // `mc` (a link to `mcli`).
+    for (const { where, block } of services) {
+      assert.doesNotMatch(block, /(^|[\s;&|(])minio server/m, `${where}: calls \`minio server\``);
+    }
   });
 
   it("is recorded, with the same digest, in the self-host README", () => {
     const readme = readFileSync(join(root, "deployments", "cli", "community", "README.md"), "utf8");
-    assert.ok(readme.includes(`\`${refs[0].image}\``), `README does not record ${refs[0].image}`);
-    for (const user of new Set(refs.map(({ where }) => where.split(":")[0]))) {
+    assert.ok(readme.includes(`\`${services[0].image}\``), `README does not record ${services[0].image}`);
+    for (const user of new Set(services.map(({ where }) => where.split(":")[0]))) {
       assert.ok(readme.includes(`\`${user}\``), `README's "Used by" row does not list ${user}`);
     }
+    assert.ok(readme.includes("SN-2026-020"), "README does not record why this release is the minimum");
+  });
+
+  it("is what the CI registry check resolves", () => {
+    const workflow = readFileSync(join(root, ".github", "workflows", "self-host-checks.yml"), "utf8");
+    assert.ok(workflow.includes(REPOSITORY), `self-host-checks.yml does not resolve ${REPOSITORY}`);
   });
 });
 
