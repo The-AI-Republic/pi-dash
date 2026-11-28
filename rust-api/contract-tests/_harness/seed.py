@@ -951,6 +951,8 @@ def create_project(
 ) -> dict:
     pid = new_id()
     now = now_iso()
+    # default_work_type: Project.save() writes "general" for a project
+    # with no repo_url (and "software" with one); this seed has none.
     conn.execute(
         """INSERT INTO projects (id, name, description, network, identifier,
             workspace_id, cycle_view, module_view, issue_views_view, page_view,
@@ -966,7 +968,7 @@ def create_project(
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
-            60,'local_runner','fail_to_backlog',60,%s,%s,%s)""",
+            60,'local_runner','fail_to_backlog',60,%s,%s,%s,'general')""",
         (pid, name, identifier, workspace_id, now, now, created_by_id),
     )
     return {"id": pid, "identifier": identifier}

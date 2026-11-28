@@ -1443,12 +1443,14 @@ async fn run_accept_inner(
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let (pool, _runner, run_id, key) = (
-        pool,
-        preamble.runner.clone(),
-        preamble.run_id,
-        preamble.key.clone(),
-    );
+    // `_resolve` (`run_endpoints.py:81-90`): 404 unknown run, 403 a run
+    // this runner does not own, before any write.
+    let run = match resolve_run(&pool, preamble.run_id, preamble.runner.as_ref()).await {
+        Ok(run) => run,
+        Err(response) => return response,
+    };
+    let (pool, _runner, run_id, key) =
+        (pool, preamble.runner.clone(), run.id, preamble.key.clone());
     let data = preamble.data.clone();
     // Fencing will be checked inside transaction after locking.
     let mut tx = match pool.begin().await {
