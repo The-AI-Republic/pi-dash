@@ -28,7 +28,18 @@ pub struct Args {
 pub use pidash_ipc::dto::{Check, Report};
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    let report = execute(paths, args.runner.as_deref()).await?;
+    // Agent auth depends on the environment the agent is spawned from, which
+    // is the daemon's, not this terminal's. Ask the running daemon to run
+    // the suite; only check in-process when no daemon answers.
+    let report = match report_from_daemon(&paths.ipc_socket_path(), args.runner.as_deref()).await {
+        DaemonReport::Report(report) => report,
+        DaemonReport::Error(message) => anyhow::bail!("{message}"),
+        DaemonReport::Unavailable => {
+            let mut report = execute(paths, args.runner.as_deref()).await?;
+            mark_local_checks(&mut report);
+            report
+        }
+    };
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -277,12 +288,14 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            let probe = gather_claude_auth_probe(claude_binary).await;
-            checks.push(
-                classify_claude_auth(&probe)
-                    .with_fix(claude_binary)
-                    .into_check(tag("claude-auth")),
-            );
+            let binary_runs = checks.last().is_some_and(|c| c.ok);
+            let auth = if binary_runs {
+                let probe = gather_claude_auth_probe(claude_binary).await;
+                classify_claude_auth(&probe).with_fix(claude_binary)
+            } else {
+                AuthStatus::Unknown("skipped: the claude CLI is not runnable".to_string())
+            };
+            checks.push(auth.into_check(tag("claude-auth")));
         }
         crate::config::schema::AgentKind::CursorAgent => {
             match check_version(cursor_binary).await {
@@ -574,15 +587,17 @@ struct ClaudeAuthProbe {
     status: Option<ClaudeStatus>,
     /// First credential env var that is set and non-empty.
     env_var: Option<&'static str>,
-    /// First third-party-provider switch that is set.
+    /// First third-party-provider switch that is enabled (truthy).
     third_party_provider: Option<&'static str>,
     credentials: CredentialsFile,
     /// `apiKeyHelper` in user or managed Claude settings.
     api_key_helper: ConfigKey,
-    /// An auth or third-party-provider variable in the `env` block of user
-    /// or managed Claude settings, which Claude Code applies to every
-    /// session.
+    /// An auth variable in the `env` block of user or managed Claude
+    /// settings, which Claude Code applies to every session.
     settings_env_var: ConfigKey,
+    /// An enabled cloud-provider switch in the `env` block of user or
+    /// managed Claude settings.
+    settings_provider: ConfigKey,
     /// `primaryApiKey` in Claude's global config (`~/.claude.json`), where
     /// a Console API-key login is stored.
     stored_api_key: ConfigKey,
@@ -593,37 +608,44 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
     // Claude Code's own status command reads every credential source it
     // supports (env, credentials file, macOS Keychain, apiKeyHelper), so its
     // answer wins when we have one.
+    //
+    // A cloud-provider switch (Bedrock/Vertex/Foundry) routes runs to that
+    // provider, whose credentials neither doctor nor `claude auth status`
+    // checks (it answers `loggedIn: true, authMethod: "third_party"` with
+    // none configured), so provider routing is always "could not verify".
+    let provider = provider_routing(p);
     if let Some(status) = &p.status {
+        if let Some(why) = provider {
+            return AuthStatus::Unknown(why);
+        }
         if status.logged_in {
             let method = status.auth_method.as_deref().unwrap_or("unknown method");
             return AuthStatus::LoggedIn(format!("logged in ({method})"));
         }
-        if let Some(var) = p.third_party_provider {
-            return AuthStatus::Unknown(format!(
-                "{var} is set; cloud-provider credentials are not checked"
-            ));
+        // Claude counts an apiKeyHelper only when it runs it; doctor does
+        // not, so a helper-only setup is not called logged out.
+        if let ConfigKey::Found(path) = &p.api_key_helper {
+            return AuthStatus::Unknown(api_key_helper_detail(path));
         }
         return AuthStatus::NotLoggedIn("`claude auth status` reports no login".to_string());
+    }
+    if let Some(why) = provider {
+        return AuthStatus::Unknown(why);
     }
     if let Some(var) = p.env_var {
         return AuthStatus::LoggedIn(format!("{var} is set"));
     }
-    if let Some(var) = p.third_party_provider {
-        return AuthStatus::Unknown(format!(
-            "{var} is set; cloud-provider credentials are not checked"
-        ));
-    }
     if let CredentialsFile::Found(path) = &p.credentials {
         return AuthStatus::LoggedIn(format!("credentials found ({})", path.display()));
-    }
-    if let ConfigKey::Found(path) = &p.api_key_helper {
-        return AuthStatus::LoggedIn(format!("apiKeyHelper is set ({})", path.display()));
     }
     if let ConfigKey::Found(path) = &p.stored_api_key {
         return AuthStatus::LoggedIn(format!("API key stored in {}", path.display()));
     }
     if let ConfigKey::Found(path) = &p.settings_env_var {
         return AuthStatus::LoggedIn(format!("auth env var set in {}", path.display()));
+    }
+    if let ConfigKey::Found(path) = &p.api_key_helper {
+        return AuthStatus::Unknown(api_key_helper_detail(path));
     }
     // From here on nothing positive was found. Only report "not logged in"
     // when every source we know of was actually ruled out.
@@ -633,7 +655,12 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
             path.display()
         ));
     }
-    for key in [&p.api_key_helper, &p.settings_env_var, &p.stored_api_key] {
+    for key in [
+        &p.api_key_helper,
+        &p.settings_env_var,
+        &p.settings_provider,
+        &p.stored_api_key,
+    ] {
         if let ConfigKey::Unreadable(path) = key {
             return AuthStatus::Unknown(format!("could not read {}", path.display()));
         }
@@ -650,21 +677,65 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
     )
 }
 
+/// Why the login cannot be verified when an enabled provider switch routes
+/// Claude to a cloud provider (agent env or settings `env`), else `None`.
+fn provider_routing(p: &ClaudeAuthProbe) -> Option<String> {
+    if let Some(var) = p.third_party_provider {
+        return Some(format!(
+            "{var} is enabled; cloud-provider credentials are not checked"
+        ));
+    }
+    if let ConfigKey::Found(path) = &p.settings_provider {
+        return Some(format!(
+            "a cloud-provider switch is enabled in {}; its credentials are not checked",
+            path.display()
+        ));
+    }
+    if p.status
+        .as_ref()
+        .is_some_and(|s| s.logged_in && s.auth_method.as_deref() == Some("third_party"))
+    {
+        return Some(
+            "`claude auth status` reports a third-party provider; its credentials are not checked"
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn api_key_helper_detail(path: &Path) -> String {
+    format!(
+        "apiKeyHelper is set ({}) but doctor does not run it",
+        path.display()
+    )
+}
+
+/// Claude Code's boolean env semantics (`isEnvTruthy`): only these values,
+/// case-insensitive and trimmed, switch a feature on. `0`/`false` are off.
+fn claude_env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Parse `claude auth status` JSON. Tolerates login-shell noise around the
 /// object. Returns `None` for anything without a boolean `loggedIn`.
 fn parse_claude_status(stdout: &str) -> Option<ClaudeStatus> {
-    let start = stdout.find('{')?;
-    let end = stdout.rfind('}')?;
-    if end < start {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(&stdout[start..=end]).ok()?;
-    Some(ClaudeStatus {
-        logged_in: v.get("loggedIn")?.as_bool()?,
-        auth_method: v
-            .get("authMethod")
-            .and_then(|m| m.as_str())
-            .map(str::to_string),
+    // Try each `{` as the start of a complete object, so shell banners with
+    // braces before or after the response don't hide it.
+    stdout.match_indices('{').find_map(|(start, _)| {
+        let v = serde_json::Deserializer::from_str(&stdout[start..])
+            .into_iter::<serde_json::Value>()
+            .next()?
+            .ok()?;
+        Some(ClaudeStatus {
+            logged_in: v.get("loggedIn")?.as_bool()?,
+            auth_method: v
+                .get("authMethod")
+                .and_then(|m| m.as_str())
+                .map(str::to_string),
+        })
     })
 }
 
@@ -727,8 +798,8 @@ fn read_config_key(path: &Path, key: &str) -> ConfigKey {
     read_config_with(path, |v| non_empty_str(v.get(key)))
 }
 
-/// Whether the settings file at `path` sets a Claude auth or third-party
-/// provider variable in its `env` block. Values are never returned.
+/// Whether the settings file at `path` sets a Claude auth variable in its
+/// `env` block. Values are never returned.
 fn read_settings_env_auth(path: &Path) -> ConfigKey {
     read_config_with(path, |v| {
         let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
@@ -736,8 +807,25 @@ fn read_settings_env_auth(path: &Path) -> ConfigKey {
         };
         CLAUDE_AUTH_ENV_VARS
             .iter()
-            .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
             .any(|var| non_empty_str(env.get(*var)))
+    })
+}
+
+/// Whether the settings file at `path` enables a cloud-provider switch in
+/// its `env` block (Claude's boolean semantics: `"0"`/`"false"` are off).
+fn read_settings_env_provider(path: &Path) -> ConfigKey {
+    read_config_with(path, |v| {
+        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+            return false;
+        };
+        CLAUDE_THIRD_PARTY_ENV_VARS
+            .iter()
+            .any(|var| match env.get(*var) {
+                Some(serde_json::Value::String(s)) => claude_env_truthy(s),
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(serde_json::Value::Number(n)) => claude_env_truthy(&n.to_string()),
+                _ => false,
+            })
     })
 }
 
@@ -840,31 +928,34 @@ async fn claude_auth_status(binary: &str) -> Option<ClaudeStatus> {
 /// variables are never read back, only whether they are set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AgentEnvSnapshot {
-    /// Names from [`CLAUDE_AUTH_ENV_VARS`] / [`CLAUDE_THIRD_PARTY_ENV_VARS`]
-    /// that are set and non-blank.
+    /// Names from [`CLAUDE_AUTH_ENV_VARS`] that are set and non-blank.
     set_vars: Vec<String>,
+    /// Names from [`CLAUDE_THIRD_PARTY_ENV_VARS`] that are enabled under
+    /// Claude's boolean semantics ([`claude_env_truthy`]).
+    providers: Vec<String>,
     config_dir: Option<String>,
     home: Option<String>,
 }
 
 const ENV_SET_MARK: &str = "__pidash_doctor_set ";
+const ENV_PROV_MARK: &str = "__pidash_doctor_prov ";
 const ENV_CFG_MARK: &str = "__pidash_doctor_cfg ";
 const ENV_HOME_MARK: &str = "__pidash_doctor_home ";
 
 /// POSIX sh script printing [`AgentEnvSnapshot`] as marked lines. Marker
-/// prefixes let us ignore whatever the user's rc files print.
+/// prefixes let us ignore whatever the user's rc files print. Credential
+/// variables report only their names; provider switches (not secrets)
+/// report their value so truthiness is decided in Rust.
 fn agent_env_script() -> String {
-    let vars: Vec<&str> = CLAUDE_AUTH_ENV_VARS
-        .iter()
-        .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
-        .copied()
-        .collect();
     format!(
-        "for v in {vars}; do eval \"x=\\${{$v-}}\"; case \"$x\" in *[![:space:]]*) \
+        "for v in {creds}; do eval \"x=\\${{$v-}}\"; case \"$x\" in *[![:space:]]*) \
          printf '{ENV_SET_MARK}%s\\n' \"$v\";; esac; done; \
+         for v in {provs}; do eval \"x=\\${{$v-}}\"; [ -n \"$x\" ] && \
+         printf '{ENV_PROV_MARK}%s=%s\\n' \"$v\" \"$x\"; done; \
          printf '{ENV_CFG_MARK}%s\\n' \"${{CLAUDE_CONFIG_DIR-}}\"; \
          printf '{ENV_HOME_MARK}%s\\n' \"${{HOME-}}\"",
-        vars = vars.join(" ")
+        creds = CLAUDE_AUTH_ENV_VARS.join(" "),
+        provs = CLAUDE_THIRD_PARTY_ENV_VARS.join(" "),
     )
 }
 
@@ -878,6 +969,13 @@ fn parse_agent_env(stdout: &str) -> Option<AgentEnvSnapshot> {
     for line in stdout.lines() {
         if let Some(v) = line.strip_prefix(ENV_SET_MARK) {
             snap.set_vars.push(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix(ENV_PROV_MARK) {
+            if let Some((name, value)) = v.split_once('=')
+                && CLAUDE_THIRD_PARTY_ENV_VARS.contains(&name)
+                && claude_env_truthy(value)
+            {
+                snap.providers.push(name.to_string());
+            }
         } else if let Some(v) = line.strip_prefix(ENV_CFG_MARK) {
             snap.config_dir = non_empty(v);
         } else if let Some(v) = line.strip_prefix(ENV_HOME_MARK) {
@@ -895,8 +993,12 @@ fn process_env_snapshot() -> AgentEnvSnapshot {
     AgentEnvSnapshot {
         set_vars: CLAUDE_AUTH_ENV_VARS
             .iter()
-            .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
             .filter(|v| set(v))
+            .map(|v| v.to_string())
+            .collect(),
+        providers: CLAUDE_THIRD_PARTY_ENV_VARS
+            .iter()
+            .filter(|v| std::env::var(v).is_ok_and(|x| claude_env_truthy(&x)))
             .map(|v| v.to_string())
             .collect(),
         config_dir: std::env::var("CLAUDE_CONFIG_DIR")
@@ -925,10 +1027,8 @@ fn build_claude_probe(
     managed_settings: &[PathBuf],
     is_macos: bool,
 ) -> ClaudeAuthProbe {
-    let find = |list: &[&'static str]| {
-        list.iter()
-            .copied()
-            .find(|v| env.set_vars.iter().any(|s| s == v))
+    let find = |list: &[&'static str], set: &[String]| {
+        list.iter().copied().find(|v| set.iter().any(|s| s == v))
     };
     let credentials = claude_credentials_path(
         env.config_dir.clone().map(Into::into),
@@ -943,11 +1043,12 @@ fn build_claude_probe(
     );
     ClaudeAuthProbe {
         status,
-        env_var: find(CLAUDE_AUTH_ENV_VARS),
-        third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS),
+        env_var: find(CLAUDE_AUTH_ENV_VARS, &env.set_vars),
+        third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS, &env.providers),
         credentials,
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
         settings_env_var: scan_configs(&settings, read_settings_env_auth),
+        settings_provider: scan_configs(&settings, read_settings_env_provider),
         stored_api_key: scan_config_key(&Vec::from_iter(global), "primaryApiKey"),
         is_macos,
     }
@@ -962,6 +1063,46 @@ async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
         &claude_managed_settings_paths(),
         cfg!(target_os = "macos"),
     )
+}
+
+/// Appended to agent-auth checks run in this process because no daemon
+/// answered: they reflect this terminal's environment, not the daemon's.
+const LOCAL_CHECK_NOTE: &str =
+    "[checked in this terminal; the daemon is not running, so its environment may differ]";
+
+fn mark_local_checks(report: &mut Report) {
+    for c in &mut report.checks {
+        if c.name == "claude-auth" || c.name.starts_with("claude-auth@") {
+            c.detail = format!("{} {LOCAL_CHECK_NOTE}", c.detail);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DaemonReport {
+    /// The running daemon ran the suite in its own environment.
+    Report(Report),
+    /// The daemon answered with an error (e.g. an unknown `--runner`).
+    Error(String),
+    /// No daemon answered; check in this process instead.
+    Unavailable,
+}
+
+/// Ask the running daemon to run doctor (`DoctorRun` over IPC).
+async fn report_from_daemon(socket: &Path, runner: Option<&str>) -> DaemonReport {
+    use crate::ipc::protocol::{Request, Response};
+    let Ok(mut client) = crate::ipc::client::Client::connect(socket).await else {
+        return DaemonReport::Unavailable;
+    };
+    let call = client.call(Request::DoctorRun {
+        runner: runner.map(str::to_string),
+    });
+    // Each agent probe is bounded at 15s; leave room for several runners.
+    match tokio::time::timeout(std::time::Duration::from_secs(180), call).await {
+        Ok(Ok(Response::Doctor(report))) => DaemonReport::Report(report),
+        Ok(Ok(Response::Error(e))) => DaemonReport::Error(e.message),
+        _ => DaemonReport::Unavailable,
+    }
 }
 
 async fn check_git() -> Result<String> {
@@ -1317,6 +1458,7 @@ mod tests {
             credentials: CredentialsFile::Missing,
             api_key_helper: ConfigKey::Absent,
             settings_env_var: ConfigKey::Absent,
+            settings_provider: ConfigKey::Absent,
             stored_api_key: ConfigKey::Absent,
             is_macos: false,
         }
@@ -1502,6 +1644,7 @@ mod tests {
             parse_agent_env(out),
             Some(AgentEnvSnapshot {
                 set_vars: vec!["ANTHROPIC_API_KEY".into()],
+                providers: vec![],
                 config_dir: Some("/cfg".into()),
                 home: Some("/home/u".into()),
             })
@@ -1523,6 +1666,8 @@ mod tests {
             .env("ANTHROPIC_AUTH_TOKEN", "secret-value")
             .env("ANTHROPIC_API_KEY", "   ")
             .env("CLAUDE_CONFIG_DIR", "/cfg dir")
+            .env("CLAUDE_CODE_USE_BEDROCK", " TRUE ")
+            .env("CLAUDE_CODE_USE_VERTEX", "0")
             .output()
             .unwrap();
         let text = String::from_utf8(out.stdout).unwrap();
@@ -1531,6 +1676,7 @@ mod tests {
             parse_agent_env(&text),
             Some(AgentEnvSnapshot {
                 set_vars: vec!["ANTHROPIC_AUTH_TOKEN".into()],
+                providers: vec!["CLAUDE_CODE_USE_BEDROCK".into()],
                 config_dir: Some("/cfg dir".into()),
                 home: Some("/home/u".into()),
             })
@@ -1541,13 +1687,21 @@ mod tests {
     fn build_claude_probe_uses_agent_env_for_fallback() {
         // Old CLI (no status): a key exported only by the login shell counts.
         let env = AgentEnvSnapshot {
-            set_vars: vec!["CLAUDE_CODE_USE_VERTEX".into(), "ANTHROPIC_API_KEY".into()],
+            set_vars: vec!["ANTHROPIC_API_KEY".into()],
+            providers: vec!["CLAUDE_CODE_USE_VERTEX".into()],
             config_dir: None,
             home: None,
         };
         let p = build_claude_probe(None, &env, &[], false);
         assert_eq!(p.env_var, Some("ANTHROPIC_API_KEY"));
         assert_eq!(p.third_party_provider, Some("CLAUDE_CODE_USE_VERTEX"));
+        // Vertex routing means the Anthropic key is not what runs use.
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+        let env = AgentEnvSnapshot {
+            set_vars: vec!["ANTHROPIC_API_KEY".into()],
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, &[], false);
         assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
 
         // CLAUDE_CONFIG_DIR from the agent env locates the credentials file.
@@ -1566,14 +1720,18 @@ mod tests {
     }
 
     #[test]
-    fn claude_auth_api_key_helper_is_logged_in() {
+    fn claude_auth_api_key_helper_is_unverified_and_stored_key_is_logged_in() {
+        // Doctor never runs the helper, so its presence alone is not a
+        // verified login: neutral, with the limitation in the detail.
         let p = ClaudeAuthProbe {
             api_key_helper: ConfigKey::Found(PathBuf::from("/h/.claude/settings.json")),
             ..probe()
         };
         match classify_claude_auth(&p) {
-            AuthStatus::LoggedIn(d) => assert!(d.contains("apiKeyHelper"), "{d}"),
-            other => panic!("expected LoggedIn, got {other:?}"),
+            AuthStatus::Unknown(d) => {
+                assert!(d.contains("apiKeyHelper") && d.contains("not run"), "{d}")
+            }
+            other => panic!("expected Unknown, got {other:?}"),
         }
         let p = ClaudeAuthProbe {
             stored_api_key: ConfigKey::Found(PathBuf::from("/h/.claude.json")),
@@ -1636,7 +1794,7 @@ mod tests {
         };
         let p = build_claude_probe(None, &env, &[], false);
         assert!(matches!(p.api_key_helper, ConfigKey::Found(_)));
-        assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
 
         // Managed settings count too, and CLAUDE_CONFIG_DIR moves the user
         // settings and global config.
@@ -1681,17 +1839,12 @@ mod tests {
             home: Some(home.path().display().to_string()),
             ..AgentEnvSnapshot::default()
         };
-        for body in [
-            r#"{"env":{"ANTHROPIC_API_KEY":"sk-x"}}"#,
-            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#,
-        ] {
-            std::fs::write(&settings, body).unwrap();
-            let p = build_claude_probe(None, &env, &[], false);
-            assert_eq!(p.settings_env_var, ConfigKey::Found(settings.clone()));
-            match classify_claude_auth(&p) {
-                AuthStatus::LoggedIn(d) => assert!(!d.contains("sk-x"), "{d}"),
-                other => panic!("expected LoggedIn, got {other:?}"),
-            }
+        std::fs::write(&settings, r#"{"env":{"ANTHROPIC_API_KEY":"sk-x"}}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.settings_env_var, ConfigKey::Found(settings.clone()));
+        match classify_claude_auth(&p) {
+            AuthStatus::LoggedIn(d) => assert!(!d.contains("sk-x"), "{d}"),
+            other => panic!("expected LoggedIn, got {other:?}"),
         }
         // An unrelated or empty env entry does not count.
         std::fs::write(&settings, r#"{"env":{"ANTHROPIC_API_KEY":"","FOO":"1"}}"#).unwrap();
@@ -1701,5 +1854,235 @@ mod tests {
             classify_claude_auth(&p),
             AuthStatus::NotLoggedIn(_)
         ));
+    }
+
+    // ---- Review follow-ups: provider routing, daemon env, parsing ----
+
+    #[test]
+    fn claude_auth_status_third_party_login_is_unverified() {
+        // Claude reports `loggedIn: true, authMethod: "third_party"` for
+        // Bedrock/Vertex/Foundry without checking the cloud credentials.
+        let p = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: true,
+                auth_method: Some("third_party".into()),
+            }),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+        // Same when the switch is on in the agent env and status says yes.
+        let p = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: true,
+                auth_method: Some("api_key".into()),
+            }),
+            third_party_provider: Some("CLAUDE_CODE_USE_BEDROCK"),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+    }
+
+    #[test]
+    fn claude_settings_provider_switch_is_unverified_not_logged_in() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude").join("settings.json");
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        std::fs::write(&settings, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.settings_env_var, ConfigKey::Absent);
+        assert_eq!(p.settings_provider, ConfigKey::Found(settings.clone()));
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+        // A disabled switch in settings is not provider routing.
+        std::fs::write(&settings, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"false"}}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.settings_provider, ConfigKey::Absent);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+    }
+
+    #[test]
+    fn disabled_provider_switch_does_not_hide_logged_out() {
+        assert!(claude_env_truthy("1"));
+        assert!(claude_env_truthy(" Yes "));
+        assert!(claude_env_truthy("ON"));
+        assert!(!claude_env_truthy("0"));
+        assert!(!claude_env_truthy("false"));
+        assert!(!claude_env_truthy(""));
+        let out = "__pidash_doctor_prov CLAUDE_CODE_USE_BEDROCK=0\n\
+                   __pidash_doctor_prov CLAUDE_CODE_USE_VERTEX=false\n\
+                   __pidash_doctor_home /home/u\n";
+        let env = parse_agent_env(out).unwrap();
+        assert!(env.providers.is_empty(), "{env:?}");
+        let p = build_claude_probe(
+            Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            }),
+            &env,
+            &[],
+            false,
+        );
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+    }
+
+    #[test]
+    fn status_logged_out_with_api_key_helper_is_unverified() {
+        let p = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            }),
+            api_key_helper: ConfigKey::Found(PathBuf::from("/h/.claude/settings.json")),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_claude_status_skips_brace_banners() {
+        let out = "{ welcome to box } motd {x}\n{\"loggedIn\": false, \"authMethod\": \"none\"}\nbye {}\n";
+        assert_eq!(
+            parse_claude_status(out),
+            Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn local_report_labels_claude_auth_as_local() {
+        let mut report = Report {
+            checks: vec![
+                AuthStatus::LoggedIn("logged in (api_key)".into())
+                    .into_check("claude-auth@a".into()),
+                Check {
+                    name: "git".into(),
+                    ok: true,
+                    detail: "git 2".into(),
+                    blocker: true,
+                },
+            ],
+        };
+        mark_local_checks(&mut report);
+        assert!(report.checks[0].detail.contains(LOCAL_CHECK_NOTE));
+        assert_eq!(report.checks[1].detail, "git 2");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_uses_running_daemon_report() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pidash.sock");
+        // No daemon: caller falls back to a local check.
+        assert!(matches!(
+            report_from_daemon(&sock, None).await,
+            DaemonReport::Unavailable
+        ));
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let req: crate::ipc::protocol::Request = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(
+                req,
+                crate::ipc::protocol::Request::DoctorRun { runner: Some(ref r) } if r == "alpha"
+            ));
+            let resp = crate::ipc::protocol::Response::Doctor(Report {
+                checks: vec![
+                    AuthStatus::LoggedIn("daemon env".into()).into_check("claude-auth".into()),
+                ],
+            });
+            let mut out = serde_json::to_vec(&resp).unwrap();
+            out.push(b'\n');
+            stream.get_mut().write_all(&out).await.unwrap();
+        });
+        match report_from_daemon(&sock, Some("alpha")).await {
+            DaemonReport::Report(r) => assert_eq!(r.checks[0].detail, "daemon env"),
+            other => panic!("expected daemon report, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_claude_binary_skips_auth_probe() {
+        let mut checks: Vec<Check> = Vec::new();
+        run_agent_checks(
+            &mut checks,
+            None,
+            AgentKind::ClaudeCode,
+            "codex-missing",
+            "/nonexistent/claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
+            "agy-missing",
+            "muse-missing",
+            false,
+        )
+        .await;
+        let auth = checks.iter().find(|c| c.name == "claude-auth").unwrap();
+        assert!(auth.ok && !auth.blocker, "{auth:?}");
+        assert!(auth.detail.contains("skipped"), "{auth:?}");
+    }
+
+    /// A fake `claude` that records its argv, to prove an old CLI never gets
+    /// `auth status` (which it would read as a prompt).
+    #[cfg(unix)]
+    fn fake_claude(dir: &Path, help: &str, status: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("argv.log");
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{log}'\n\
+             if [ \"$*\" = \"auth status --help\" ]; then printf '%s\\n' '{help}'; exit 0; fi\n\
+             if [ \"$*\" = \"auth status\" ]; then printf '%s\\n' '{status}'; exit 1; fi\n\
+             echo 'prompt mode'\n",
+            log = log.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_auth_status_calls_only_safe_subcommands() {
+        let old = tempfile::tempdir().unwrap();
+        let (bin, log) = fake_claude(old.path(), "Usage: claude [options] [prompt]", "");
+        assert_eq!(claude_auth_status(&bin.display().to_string()).await, None);
+        let argv = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(argv.trim(), "auth status --help", "{argv}");
+
+        let new = tempfile::tempdir().unwrap();
+        let (bin, log) = fake_claude(
+            new.path(),
+            "Usage: claude auth status [options]",
+            r#"{"loggedIn": false, "authMethod": "none"}"#,
+        );
+        assert_eq!(
+            claude_auth_status(&bin.display().to_string()).await,
+            Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            })
+        );
+        let argv = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            vec!["auth status --help", "auth status"]
+        );
     }
 }
