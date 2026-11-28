@@ -2668,7 +2668,7 @@ async fn finish_chat_unit(mut unit: ChatUnit, state: &StateHandle) {
     tracing::warn!(
         "chat runtime's processes are not confirmed gone; runner stays reserved until they are"
     );
-    state.set_cleanup_reserved(true);
+    state.set_cleanup_reserved(true).await;
     let shutdown = state.shutdown_notified();
     let notified = shutdown.notified();
     tokio::pin!(notified);
@@ -2682,7 +2682,7 @@ async fn finish_chat_unit(mut unit: ChatUnit, state: &StateHandle) {
             _ = tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK) => {}
         }
         if unit.finish().await == CleanupOutcome::Clean {
-            state.set_cleanup_reserved(false);
+            state.set_cleanup_reserved(false).await;
             tracing::info!("chat runtime's processes are gone; runner released");
             return;
         }

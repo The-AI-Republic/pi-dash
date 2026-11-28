@@ -2720,7 +2720,7 @@ mod tests {
     #[tokio::test]
     async fn warm_is_refused_while_an_issue_run_holds_the_working_copy() {
         let inst = offline_instance();
-        inst.state.set_cleanup_reserved(true);
+        inst.state.set_cleanup_reserved(true).await;
         let host = ChatHost::runner(&inst);
         let id = Uuid::new_v4();
         let mut sink = VecSink::default();
