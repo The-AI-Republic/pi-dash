@@ -29,6 +29,24 @@ pub fn scan_text_assets(dir: &std::path::Path, expected: &str, saw_expected: &mu
     }
 }
 
+/// Resolve the web origin the SPA was baked with, preferring
+/// `VITE_WEB_BASE_URL` over `PI_DASH_URL`.
+///
+/// Empty and whitespace-only values count as unset — matching
+/// `dev-prep.sh` (`${VAR:-...}`) and `main.rs`'s trim-filter for
+/// `VITE_WEB_BASE_URL` — and the winner is returned trimmed, so the
+/// subsequent [`scan_text_assets`] check compares the same origin
+/// `main.rs` parses. Returns `""` when neither has a usable value;
+/// the caller panics in release with "neither is set".
+pub fn resolve_web_base(vite: Option<String>, pi: Option<String>) -> String {
+    fn non_empty_trimmed(value: Option<String>) -> Option<String> {
+        value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
+    }
+    non_empty_trimmed(vite)
+        .or_else(|| non_empty_trimmed(pi))
+        .unwrap_or_default()
+}
+
 // Same extensions dev-prep.sh and the release pipeline grep. `txt` is
 // deliberately absent: dist/bake-info.txt is written by the build itself and
 // carries the expected URLs verbatim, so counting it would let the guard pass
@@ -357,5 +375,74 @@ mod tests {
         );
 
         assert!(check_login_handoff(dist.path()).is_err());
+    }
+
+    #[test]
+    fn web_base_prefers_present_vite_over_pi() {
+        assert_eq!(
+            resolve_web_base(
+                Some("https://vite.example".to_owned()),
+                Some("https://pi.example".to_owned())
+            ),
+            "https://vite.example"
+        );
+    }
+
+    #[test]
+    fn web_base_falls_back_to_pi_when_vite_is_empty() {
+        // Scanner case: VITE_WEB_BASE_URL="" with a valid PI_DASH_URL.
+        // Expected is the PI value (dev-prep.sh bakes it), not "".
+        assert_eq!(
+            resolve_web_base(
+                Some(String::new()),
+                Some("https://pidash.example.com".to_owned())
+            ),
+            "https://pidash.example.com"
+        );
+    }
+
+    #[test]
+    fn web_base_falls_back_to_pi_when_vite_is_whitespace_only() {
+        assert_eq!(
+            resolve_web_base(
+                Some("   \t  ".to_owned()),
+                Some("https://pidash.example.com".to_owned())
+            ),
+            "https://pidash.example.com"
+        );
+    }
+
+    #[test]
+    fn web_base_falls_back_to_pi_when_vite_is_unset() {
+        assert_eq!(
+            resolve_web_base(None, Some("https://pidash.example.com".to_owned())),
+            "https://pidash.example.com"
+        );
+    }
+
+    #[test]
+    fn web_base_trims_surrounding_whitespace() {
+        assert_eq!(
+            resolve_web_base(
+                Some("  https://vite.example  ".to_owned()),
+                Some("https://pi.example".to_owned())
+            ),
+            "https://vite.example"
+        );
+    }
+
+    #[test]
+    fn web_base_is_empty_when_neither_value_is_non_empty() {
+        assert_eq!(resolve_web_base(None, None), "");
+        assert_eq!(
+            resolve_web_base(Some(String::new()), Some(String::new())),
+            ""
+        );
+        assert_eq!(
+            resolve_web_base(Some("   ".to_owned()), Some(" ".to_owned())),
+            ""
+        );
+        assert_eq!(resolve_web_base(None, Some(String::new())), "");
+        assert_eq!(resolve_web_base(Some(String::new()), None), "");
     }
 }
