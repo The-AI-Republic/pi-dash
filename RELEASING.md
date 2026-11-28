@@ -83,6 +83,8 @@ provides.
    git push origin main platform-v1.4.0
    ```
 4. CI does the rest:
+   - Fails the release unless the tag (`platform-v1.4.0`) matches the root
+     `package.json` version (`.github/scripts/check-release-version.mjs`)
    - Builds 6 Docker images in parallel (multi-arch via QEMU)
    - Pushes them to Docker Hub with three tags each: `:v1.4.0`, `:stable`, `:latest`
    - Builds the AIO image (if the `airepublic/pi-dash-aio-community` repo
