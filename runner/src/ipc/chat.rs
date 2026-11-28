@@ -2420,10 +2420,10 @@ mod tests {
     #[tokio::test]
     async fn local_turn_guard_refuses_while_run_cleanup_is_unresolved() {
         let inst = offline_instance();
-        inst.state.set_cleanup_reserved(true);
+        inst.state.set_cleanup_reserved(true).await;
         assert!(try_begin_local_turn(&inst).is_err());
         assert!(!inst.chat_active.load(Ordering::SeqCst));
-        inst.state.set_cleanup_reserved(false);
+        inst.state.set_cleanup_reserved(false).await;
         let _g = try_begin_local_turn(&inst).expect("claim after cleanup resolves");
     }
 
