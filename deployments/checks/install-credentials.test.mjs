@@ -90,9 +90,11 @@ function runCheck({ probe = OK, extra = {}, fn = "checkBundledCredentials" } = {
 }
 
 describe("install.sh credential preflight", () => {
-  it("passes when the probe accepts both services", () => {
+  it("passes when the probe accepts both services, and says so", () => {
     const { status, out } = runCheck();
     assert.equal(status, 0, out);
+    assert.match(out, /PostgreSQL accepts the app's credentials/);
+    assert.match(out, /RabbitMQ accepts the app's credentials/);
   });
 
   it("runs the probe in a one-off api container with its source on stdin", () => {

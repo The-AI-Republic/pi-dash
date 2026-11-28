@@ -591,6 +591,9 @@ function checkBundledCredentials() {
             NOTREADY)
                 credentialCheckSkipped "$service is not ready yet" "$detail"
                 ;;
+            OK)
+                echo "   $service accepts the app's credentials ✅"
+                ;;
         esac
     done <<< "$out"
     return $failed

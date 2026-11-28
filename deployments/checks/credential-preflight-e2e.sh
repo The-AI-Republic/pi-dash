@@ -21,6 +21,7 @@ echo "api stand-in libraries: $PIP_PINS"
 docker compose -f "$compose_file" --env-file=/dev/null build api || exit 1
 
 # scenario <name> <pass|fail> <output pattern> [env-file lines...]
+# A pass needs both "... accepts the app's credentials" lines.
 # SETUP, when set, runs (with $dc) after the data services start.
 scenario() {
     local name=$1 expect=$2 pattern=$3
@@ -40,8 +41,10 @@ scenario() {
         eval "$SETUP"
     fi
     local out status
-    out=$(COMPOSE_CMD="docker compose" DOCKER_FILE_PATH="$compose_file" DOCKER_ENV_PATH="$env_file" \
-        bash -c 'SETUP_SH_SOURCE_ONLY=1 source "$1" && checkBundledCredentials' _ "$install_sh" 2>&1)
+    # install.sh sets its paths at the top, so override them after sourcing.
+    out=$(bash -c 'SETUP_SH_SOURCE_ONLY=1 source "$1" || exit 99
+        COMPOSE_CMD="docker compose" DOCKER_FILE_PATH=$2 DOCKER_ENV_PATH=$3
+        checkBundledCredentials' _ "$install_sh" "$compose_file" "$env_file" 2>&1)
     status=$?
     echo "$out"
     local ok=1
@@ -51,7 +54,12 @@ scenario() {
     else
         [ $status -ne 0 ] || ok=0
     fi
-    grep -qE -- "$pattern" <<< "$out" || ok=0
+    if [ "$expect" == "pass" ]; then
+        grep -q "PostgreSQL accepts the app's credentials" <<< "$out" || ok=0
+        grep -q "RabbitMQ accepts the app's credentials" <<< "$out" || ok=0
+    else
+        grep -qE -- "$pattern" <<< "$out" || ok=0
+    fi
     if [ $ok -eq 1 ]; then
         echo "PASS $name"
     else
@@ -62,8 +70,11 @@ scenario() {
     echo "::endgroup::"
 }
 
+# A pass must show that the probe ran and both services accepted the login.
+ACCEPTED="accepts the app's credentials"
+
 # What a fresh install creates and connects with.
-scenario fresh pass "^$|.*"
+scenario fresh pass "$ACCEPTED"
 
 # The role and database exist but the volume has another password. The
 # image trusts loopback, so only a network login catches this.
@@ -77,7 +88,7 @@ scenario old-volumes fail "PostgreSQL: .*(password authentication failed|does no
     "VOLUME_MQ_USER=pi dash" "VOLUME_MQ_PASSWORD=pi dash" "VOLUME_MQ_VHOST=pi dash"
 
 # The README's fix for old volumes: URLs that name their credentials.
-scenario old-volumes-fixed pass "^$|.*" \
+scenario old-volumes-fixed pass "$ACCEPTED" \
     "VOLUME_PG_USER=pi dash" "VOLUME_PG_PASSWORD=pi dash" "VOLUME_PG_DB=pi dash" \
     "VOLUME_MQ_USER=pi dash" "VOLUME_MQ_PASSWORD=pi dash" "VOLUME_MQ_VHOST=pi dash" \
     "DATABASE_URL=postgresql://pi%20dash:pi%20dash@pi-dash-db:5432/pi%20dash" \
@@ -85,7 +96,7 @@ scenario old-volumes-fixed pass "^$|.*" \
 
 # A broker password with a literal "+" and a backslash (Kombu keeps both).
 # Surrounding spaces are covered by credential_probe_test.py.
-scenario mq-password-characters pass "^$|.*" \
+scenario mq-password-characters pass "$ACCEPTED" \
     "VOLUME_MQ_PASSWORD='a+b\\c'" \
     "AMQP_URL=amqp://pi-dash:a+b%5Cc@pi-dash-mq:5672/pi-dash"
 
