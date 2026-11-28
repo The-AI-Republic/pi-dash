@@ -5,7 +5,7 @@
 // Runs screen container (NEWFRONT-545). Page navigation replaces history
 // and drops page one's query; selection keeps the page; cancel toasts on
 // failure; the pane state derives from the detail query.
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -217,9 +217,37 @@ describe("list load failure", () => {
     stubQueries({ list: { data: undefined, isPending: false, isError: true, isFetching: true, refetch } });
     renderScreen(1);
     const retry = screen.getByRole("button", { name: "Retrying…" });
+    // The disabled state carries this test: jsdom never fires onClick on
+    // a disabled button, so the click below only shows nothing leaks.
     expect(retry).toBeDisabled();
     retry.click();
     expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the error with a held retry while an uncached page is fetched again", async () => {
+    // A real query: with no data, TanStack resets a failed query to
+    // pending when the next fetch starts, which clears isError.
+    let settle: ((page: unknown) => void) | undefined;
+    let calls = 0;
+    const queryFn = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error("unavailable"));
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    });
+    queryMocks.useRuns.mockImplementation(() =>
+      useQuery({ queryKey: ["runs-retry"], queryFn, retry: false, refetchInterval: false })
+    );
+    renderScreen(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled());
+    screen.getByRole("button", { name: "Try again" }).click();
+    await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load runs.");
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    settle?.({ results: [], count: 0, total_count: 0, total_pages: 1, page: 1, per_page: 30 });
+    await waitFor(() => expect(screen.getByTestId("runs-empty")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("lets a retry finish the current request rather than cancel it", () => {

@@ -21,7 +21,9 @@
 //   serializers_detail.rs `run_replays_bytes_with_diagnostic_and_live_state`.
 // - Django issue run: the keys of the dict `_serialize_agent_run` returns
 //   (apps/api app/serializers/issue.py), valued from the Django capture
-//   first and the Rust replay for keys only the issue run has.
+//   first and the Rust replay for keys only the issue run has; its
+//   `live_state` keys come from `_serialize_agent_live_state`, valued
+//   from the Rust replay.
 // The guard checks keys and value types as captured. Value-level drift
 // between the backends, and a Django type change in a key the capture
 // does not refresh, are out of its reach (contract tests cover values).
@@ -69,7 +71,7 @@ function pythonReturnedKeys(source: string, method: string): string[] {
   if (start < 0) throw new Error(`${method} not found`);
   const body = /\n(\s+)return \{\n(.*?)\n\1\}/s.exec(source.slice(start));
   if (!body?.[2]) throw new Error(`${method} returns no dict literal`);
-  return [...body[2].matchAll(/^\s+"([a-z_]+)":/gm)].map((item) => item[1] ?? "");
+  return keysOrThrow(method, body[2], /^\s+"(\w+)":/gm);
 }
 
 /** The `Meta.fields` list of a DRF serializer class. */
@@ -78,7 +80,15 @@ function pythonMetaFields(source: string, className: string): string[] {
   if (start < 0) throw new Error(`${className} not found`);
   const fields = /\n\s+class Meta:\n[^]*?\n\s+fields = \[\n([^]*?)\n\s+\]/.exec(source.slice(start));
   if (!fields?.[1]) throw new Error(`${className} has no Meta.fields list`);
-  return [...fields[1].matchAll(/^\s+"([a-z_]+)",/gm)].map((item) => item[1] ?? "");
+  return keysOrThrow(className, fields[1], /^\s+"(\w+)",/gm);
+}
+
+/** The keys `pattern` finds in `body`; any other non-blank line is a parse miss. */
+function keysOrThrow(owner: string, body: string, pattern: RegExp): string[] {
+  const keys = [...body.matchAll(pattern)].map((item) => item[1] ?? "");
+  const lines = body.split("\n").filter((line) => /^\s+"[^"]+"[:,]/.test(line));
+  if (keys.length === 0 || keys.length !== lines.length) throw new Error(`${owner}: could not read every key`);
+  return keys;
 }
 
 /** A Django runs-list row: the serializer's current fields, valued from a capture. */
@@ -128,8 +138,17 @@ const rustIssueRun: Payload = {
   live_state: { ...(replayedIssueRun.live_state as Payload), observed_run_id: djangoListRow.id },
 };
 
+/** A Django issue-detail run, keyed by the serializer's returned dicts. */
+function djangoIssueRunFrom(serializerSource: string): Payload {
+  const run = assemble(pythonReturnedKeys(serializerSource, "_serialize_agent_run"), djangoListRow, rustIssueRun);
+  // live_state is its own Django dict: take its keys from that method and
+  // only its values from the Rust replay.
+  const liveStateKeys = pythonReturnedKeys(serializerSource, "_serialize_agent_live_state");
+  return { ...run, live_state: assemble(liveStateKeys, rustIssueRun.live_state as Payload) };
+}
+
 const djangoIssueKeys = pythonReturnedKeys(djangoIssueSerializer, "_serialize_agent_run");
-const djangoIssueRun = assemble(djangoIssueKeys, djangoListRow, rustIssueRun);
+const djangoIssueRun = djangoIssueRunFrom(djangoIssueSerializer);
 
 describe("run payloads as the serializers produce them", () => {
   it("drops a field from the Django runs-list row when AgentRunSerializer drops it", () => {
@@ -140,12 +159,26 @@ describe("run payloads as the serializers produce them", () => {
     expect(AgentRun.safeParse(row).success).toBe(false);
   });
 
+  it("drops a live-state key from the Django issue run when its serializer drops it", () => {
+    const withoutSummary = djangoIssueSerializer.replace(
+      /(def _serialize_agent_live_state\b[\s\S]*?)\n\s+"last_event_summary": [^\n]*/,
+      "$1"
+    );
+    expect(withoutSummary).not.toBe(djangoIssueSerializer);
+    const run = djangoIssueRunFrom(withoutSummary);
+    expect(run.live_state).not.toHaveProperty("last_event_summary");
+    expect(AgentRunSummary.safeParse(run).success).toBe(false);
+  });
+
   it("reads every serializer source", () => {
     // The capture is current: it has exactly the serializer's fields.
     // Field order is not part of the wire, so compare sorted keys.
     for (const row of capturedRows) expect(Object.keys(row).sort()).toEqual([...djangoRunFields].sort());
     expect(Object.keys(rustIssueRun)).toEqual(rustIssueKeys);
     expect(djangoIssueKeys).toContain("live_state");
+    expect(Object.keys(djangoIssueRun.live_state as Payload).sort()).toEqual(
+      Object.keys(rustIssueRun.live_state as Payload).sort()
+    );
     expect(djangoIssueKeys).not.toContain("queue_position");
     for (const row of djangoListRows) expect(row).not.toHaveProperty("queue_position");
     expect(rustListKeys).not.toContain("queue_position");

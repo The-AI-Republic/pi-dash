@@ -70,7 +70,10 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
         loading={list.isPending}
         // A failed read or refetch: RunsList shows it only when it has no
         // rows to keep, so a cached empty page does not read as "No runs yet".
-        failed={list.isError}
+        // A page that has never loaded goes back to pending (isError false)
+        // when a retry or poll starts; its last error still stands until a
+        // read succeeds.
+        failed={list.isError || (list.data === undefined && list.errorUpdatedAt > 0)}
         page={page}
         onPage={goToPage}
         onSelect={selectRun}
