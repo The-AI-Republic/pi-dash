@@ -2064,6 +2064,7 @@ dependencies = [
  "futures-util",
  "http",
  "keyring",
+ "libc",
  "local-ip-address",
  "minijinja",
  "nix 0.29.0",
