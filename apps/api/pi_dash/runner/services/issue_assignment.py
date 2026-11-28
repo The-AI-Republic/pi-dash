@@ -71,12 +71,18 @@ def is_busy(runner) -> bool:
 
 
 def runner_is_offline(runner, *, now=None) -> bool:
-    """Offline per design §11.1 (status or heartbeat freshness)."""
+    """Offline per design §11.1 (status or heartbeat freshness).
+
+    A ``busy`` runner with a fresh heartbeat is online and working, not
+    offline: "Busy is not unavailable" (§11.1). Treating it as offline made
+    ``dispatch_wait`` say ``runner_offline`` for a working runner and
+    refused a person's run on a busy dedicated runner (PDASHOSS01-419).
+    """
     from pi_dash.runner.models import RunnerStatus
     from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
 
     now = now or timezone.now()
-    if runner.status != RunnerStatus.ONLINE:
+    if runner.status not in (RunnerStatus.ONLINE, RunnerStatus.BUSY):
         return True
     if runner.last_heartbeat_at is None:
         return True
@@ -358,12 +364,13 @@ def AgentRunCountAhead(run) -> int:
                 .exclude(pk=run.pk)
                 .count()
             )
-            # One shared run is served before the next dedicated (§10.2).
-            if AgentRun.objects.filter(
-                pod=run.pod,
-                status=AgentRunStatus.QUEUED,
-                pinned_runner__isnull=True,
-            ).exists():
+            # One shared run is served before the next dedicated (§10.2):
+            # unpinned pod work, or another busy runner's locality pin that
+            # this runner would borrow (PDASHOSS01-419).
+            from pi_dash.runner.services.matcher import borrowable_pin_q
+
+            queued = AgentRun.objects.filter(pod=run.pod, status=AgentRunStatus.QUEUED)
+            if queued.filter(pinned_runner__isnull=True).exists() or queued.filter(borrowable_pin_q(runner)).exists():
                 ahead += 1
     return ahead
 

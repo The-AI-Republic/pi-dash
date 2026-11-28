@@ -320,3 +320,74 @@ async fn shutdown_returns_promptly_after_the_process_exits() {
         "shutdown should return promptly after the process already exited"
     );
 }
+
+#[tokio::test]
+async fn an_old_turns_late_exit_does_not_mark_the_current_turn_exited() {
+    // Turn 1 emits its result, then its leader lingers. Turn 2
+    // starts at once and keeps running; replacing turn 1's process stops it,
+    // and its exit lands after turn 2 started. That exit must not reach the
+    // bridge's exit channel, which now belongs to turn 2.
+    let turn1 = r#"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"cur_late_001"}'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"t1","session_id":"cur_late_001"}'
+        exec sleep 1
+    "#;
+    let turn2 = r#"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"cur_late_001"}'
+        exec sleep 30
+    "#;
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
+        .await
+        .expect("bridge setup");
+    let mut cursor = bridge
+        .run_with_command(fake_cmd(turn1), Uuid::new_v4())
+        .await
+        .expect("turn 1 setup");
+    let _ = drain_until_completed(&mut bridge, &mut cursor).await;
+    let old_pid = bridge.process_handle().pid.expect("turn 1 pid");
+    assert!(
+        proc_alive(old_pid),
+        "turn 1's leader should still be running"
+    );
+
+    let _cursor2 = bridge
+        .run_with_command(fake_cmd(turn2), Uuid::new_v4())
+        .await
+        .expect("turn 2 setup");
+    let handle = bridge.process_handle();
+    assert!(
+        wait_until(|| !proc_alive(old_pid), Duration::from_secs(5)).await,
+        "turn 1's leader should be gone"
+    );
+    // Give a stray exit time to publish.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        handle.exit_rx.borrow().is_none(),
+        "turn 1's exit must not mark the running turn 2 as exited"
+    );
+    bridge
+        .shutdown(Duration::from_secs(1))
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test]
+async fn the_current_turns_exit_is_still_published() {
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
+        .await
+        .expect("bridge setup");
+    for turn in 1..=2 {
+        let mut cursor = bridge
+            .run_with_command(fake_cmd(fake_cursor_script()), Uuid::new_v4())
+            .await
+            .unwrap_or_else(|e| panic!("turn {turn} setup: {e:#}"));
+        let _ = drain_until_completed(&mut bridge, &mut cursor).await;
+    }
+    let mut rx = bridge.process_handle().exit_rx;
+    let exited = tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|v| v.is_some()))
+        .await
+        .is_ok();
+    assert!(exited, "the current turn's exit must still be published");
+}
