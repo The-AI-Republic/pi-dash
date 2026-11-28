@@ -294,9 +294,11 @@ pub fn effective_work_type(
 }
 
 /// The default work type a newly created project gets when none was given
-/// (`Project.save`): `software` when a repo is bound, `general` otherwise.
-pub fn default_for_new_project(repo_url: Option<&str>) -> &'static str {
-    if repo_url.is_some_and(|url| !url.is_empty()) {
+/// (`Project.save`, NEWPIDASH-409): `software` when the create request
+/// carries any repo (a `repo_url` or a non-empty `settings.repos`),
+/// `general` otherwise.
+pub fn default_for_new_project(has_repo: bool) -> &'static str {
+    if has_repo {
         WORK_TYPE_SOFTWARE
     } else {
         WORK_TYPE_GENERAL
@@ -407,8 +409,7 @@ mod tests {
 
     #[test]
     fn new_project_default() {
-        assert_eq!(default_for_new_project(Some("https://x/y.git")), "software");
-        assert_eq!(default_for_new_project(Some("")), "general");
-        assert_eq!(default_for_new_project(None), "general");
+        assert_eq!(default_for_new_project(true), "software");
+        assert_eq!(default_for_new_project(false), "general");
     }
 }

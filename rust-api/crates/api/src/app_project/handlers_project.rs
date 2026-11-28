@@ -2001,6 +2001,30 @@ async fn executor_options(
 /// from its `get_queryset` row: members prefetch, next sequence, executor
 /// options and cover URL resolve per row exactly as the serializer method
 /// fields do.
+/// Merged `repos` for one project row (NEWPIDASH-409):
+/// `settings.repos` merged with the legacy columns, triggering the
+/// temporary copy when the legacy repo is otherwise unlisted. Any
+/// reader triggers it, so this runs on every full project render.
+async fn merged_row_repos(
+    pool: &sqlx::PgPool,
+    row: &ProjectRow,
+    actor_id: &uuid::Uuid,
+) -> Result<Vec<pidash_services::domain::project_repos::RenderedRepo>, Denial> {
+    use pidash_services::domain::project_repos as repos;
+    let stored = repos::repos_from_stored(&row.settings);
+    let merged = repos::merged_project_repos(
+        pool,
+        row.id,
+        &stored,
+        &row.repo_url,
+        *actor_id,
+        utc_now_micros(),
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(repos::render_repos(&merged))
+}
+
 async fn render_list_row(
     pool: &sqlx::PgPool,
     state: &AppState,
@@ -2080,6 +2104,7 @@ async fn render_list_row(
         external_id: row.external_id.clone(),
         repo_url: row.repo_url.clone(),
         base_branch: row.base_branch.clone(),
+        repos: merged_row_repos(pool, row, &actor.id).await?,
         agent_default_interval_seconds: i64::from(row.agent_default_interval_seconds),
         agent_default_max_ticks: i64::from(row.agent_default_max_ticks),
         agent_review_default_interval_seconds: i64::from(row.agent_review_default_interval_seconds),
@@ -2201,6 +2226,7 @@ async fn render_current_instance(
         external_id: row.external_id.clone(),
         repo_url: row.repo_url.clone(),
         base_branch: row.base_branch.clone(),
+        repos: merged_row_repos(pool, &row, &actor.id).await?,
         agent_default_interval_seconds: i64::from(row.agent_default_interval_seconds),
         agent_default_max_ticks: i64::from(row.agent_default_max_ticks),
         agent_review_default_interval_seconds: i64::from(row.agent_review_default_interval_seconds),
@@ -4668,6 +4694,7 @@ async fn insert_project(
     workspace_tz: &str,
     actor_id: &uuid::Uuid,
     now: DateTime<Utc>,
+    create_settings: Option<&Value>,
 ) -> Result<uuid::Uuid, Denial> {
     use pidash_db::app_project::models::project as m;
     let has_default = proj_entity::Entity::find()
@@ -4723,12 +4750,17 @@ async fn insert_project(
     // default *before* the insert — the partial unique index forbids two
     // live defaults even momentarily.
     // `Project.save()` on create: a blank `default_work_type` resolves from
-    // the repo binding (PDASHOSS01-234).
+    // the repo binding (PDASHOSS01-234); NEWPIDASH-409 counts a
+    // non-empty `settings.repos` the same as a `repo_url`.
     let default_work_type = match validated.default_work_type.as_deref() {
         Some(work_type) if !work_type.is_empty() => work_type,
-        _ => pidash_services::prompting::work_types::default_for_new_project(
-            validated.repo_url.as_deref(),
-        ),
+        _ => {
+            let has_repo = pidash_services::domain::project_repos::create_request_has_repo(
+                validated.repo_url.as_deref(),
+                create_settings,
+            );
+            pidash_services::prompting::work_types::default_for_new_project(has_repo)
+        }
     };
     let logo_props = validated
         .logo_props
@@ -4808,6 +4840,19 @@ async fn insert_project(
     )
     .await
     .map_err(db_denial)?;
+    // NEWPIDASH-409: a validated create-time settings bag is stored
+    // right after the row (the creator owns the initial settings).
+    if let Some(settings) = create_settings {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &sea_conn(pool),
+            settings,
+            now,
+            *actor_id,
+            id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     Ok(id)
 }
 
@@ -6166,6 +6211,23 @@ async fn project_create(
         Err(Ok((status, body))) => return Err(Denial::Raw(status, body)),
         Err(Err(denial)) => return Err(denial),
     }
+    // NEWPIDASH-409: create accepts a settings bag (Django stores it;
+    // Rust type-checks it with the PATCH rules but no role gate — the
+    // creator owns the initial settings), so the create dialog's repo
+    // list lands in one round trip.
+    let create_settings = match data.get("settings") {
+        None => None,
+        Some(fragment) => {
+            match pidash_services::domain::project_settings::validate_update(fragment) {
+                Ok(merge) => Some(merge),
+                Err(error) => {
+                    let status =
+                        StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST);
+                    return Err(Denial::Raw(status, error.body()));
+                }
+            }
+        }
+    };
     let now = utc_now_micros();
     let project_id = insert_project(
         &pool,
@@ -6175,6 +6237,7 @@ async fn project_create(
         &workspace_tz,
         &actor.id,
         now,
+        create_settings.as_ref(),
     )
     .await?;
     let identifier = pidash_db::app_project::models::project::normalize_identifier(
@@ -6239,7 +6302,7 @@ async fn project_put(
             OBJECT_LIST_NOT_FOUND_BODY.to_owned(),
         ))?;
     let data = parse_body(&body)?;
-    let validated = match validate_project_input(
+    let mut validated = match validate_project_input(
         &pool,
         &data,
         ValidateMode::Full,
@@ -6258,8 +6321,38 @@ async fn project_put(
         Err(Ok(errors)) => return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors)),
         Err(Err(denial)) => return Err(denial),
     }
+    // NEWPIDASH-409: a full update carrying `repo_url`/`base_branch`
+    // updates the matching `settings.repos` entry (or removes it when
+    // the URL is emptied), so the next merged read cannot duplicate
+    // or resurrect it. PUT ignores the `settings` key itself.
+    let repo_plan = plan_repo_sync_for_update(
+        &instance.settings,
+        &instance.repo_url,
+        &instance.base_branch,
+        None,
+        validated.repo_url.as_deref(),
+        validated.base_branch.as_deref(),
+    )?;
+    if let Some(url) = repo_plan.repo_url {
+        validated.repo_url = Some(url);
+    }
+    if let Some(branch) = repo_plan.base_branch {
+        validated.base_branch = Some(branch);
+    }
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
+    if let Some(fragment) = repo_plan.repos_fragment {
+        let merge = serde_json::json!({"repos": fragment});
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &sea_conn(&pool),
+            &merge,
+            now,
+            actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     let project = fetch_project_row_opts(&pool, &project_id, &actor.id, &slug, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -6311,6 +6404,40 @@ fn resolve_patch_intake(data: &Map<String, Value>, stored: bool) -> Value {
 /// (`intake_view` preferred, `inbox_view` fallback — NEWPIDASH-263,
 /// DIFF-30), partial validation, the default-intake ensure, and the
 /// re-fetch + `model_activity` 200.
+/// NEWPIDASH-409 column/list sync for a project write: the settings
+/// fragment's `repos` list is authoritative for membership while a
+/// legacy `repo_url`/`base_branch` change updates the matching entry,
+/// refusing the write when it would duplicate another entry. The
+/// duplicate refusal answers the `repo_url` field body.
+fn plan_repo_sync_for_update(
+    instance_settings: &Value,
+    instance_repo_url: &str,
+    instance_base_branch: &str,
+    fragment_repos: Option<&Value>,
+    new_repo_url: Option<&str>,
+    new_base_branch: Option<&str>,
+) -> Result<pidash_services::domain::project_repos::RepoSyncPlan, Denial> {
+    use pidash_services::domain::project_repos as repos;
+    match repos::plan_repo_sync(
+        instance_settings,
+        instance_repo_url,
+        instance_base_branch,
+        fragment_repos,
+        new_repo_url,
+        new_base_branch,
+    ) {
+        Ok(plan) => Ok(plan),
+        Err(repos::RepoSyncError::DuplicateLegacyUrl) => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            pidash_services::app_project::ser_project::field_error_body(
+                "repo_url",
+                "This repository is already in the project's repository list.",
+            ),
+        )),
+        Err(repos::RepoSyncError::InvalidFragment) => Err(Denial::ServerError),
+    }
+}
+
 async fn project_patch(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
@@ -6382,7 +6509,7 @@ async fn project_patch(
     // ignores it and it is handled here: per-key permission (403),
     // strict validation (400), then the atomic merge after the
     // column writes below.
-    let settings_merge = match data.get("settings") {
+    let mut settings_merge = match data.get("settings") {
         None => None,
         Some(fragment) => {
             let project_role = i32::from(membership.project_role.unwrap_or(ROLE_GUEST as i16));
@@ -6401,6 +6528,31 @@ async fn project_patch(
             }
         }
     };
+    // NEWPIDASH-409: the `repos` fragment is authoritative for list
+    // membership while a legacy `repo_url`/`base_branch` change updates
+    // the matching entry; the columns follow a rename or clear on
+    // remove (double delete).
+    let repo_plan = plan_repo_sync_for_update(
+        &instance.settings,
+        &instance.repo_url,
+        &instance.base_branch,
+        settings_merge.as_ref().and_then(|merge| merge.get("repos")),
+        validated.repo_url.as_deref(),
+        validated.base_branch.as_deref(),
+    )?;
+    if let Some(url) = repo_plan.repo_url {
+        validated.repo_url = Some(url);
+    }
+    if let Some(branch) = repo_plan.base_branch {
+        validated.base_branch = Some(branch);
+    }
+    if let Some(fragment) = repo_plan.repos_fragment {
+        settings_merge
+            .get_or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .expect("settings merge is an object")
+            .insert("repos".to_owned(), fragment);
+    }
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
     if let Some(merge) = &settings_merge {

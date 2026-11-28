@@ -43,6 +43,20 @@ export interface IPartialProject {
   intake_count?: number;
 }
 
+/**
+ * One entry of a project's repository list (NEWPIDASH-409). `id` is
+ * the stable entry id used to edit and remove it; `provider` is
+ * inferred from the URL host when the caller leaves it out
+ * (`github` | `gitlab` | `other`); `base_branch` null (or absent)
+ * means the repo's own default branch.
+ */
+export interface IProjectRepo {
+  id: string;
+  url: string;
+  provider?: string;
+  base_branch?: string | null;
+}
+
 export interface IProject extends IPartialProject {
   default_agent_executor?: "local_runner" | "cloud_agent" | "managed_runner";
   agent_executor_options?: {
@@ -70,6 +84,8 @@ export interface IProject extends IPartialProject {
   next_work_item_sequence?: number;
   repo_url?: string;
   base_branch?: string;
+  /** Merged repository list (NEWPIDASH-409); absent reads as `[]`. */
+  repos?: IProjectRepo[];
   // Default work type for this project's issues (PDASHOSS01-234): which
   // per-work-type prompt guidance agent runs compose with. Resolved at
   // creation ("software" when a repo is bound, "general" otherwise).

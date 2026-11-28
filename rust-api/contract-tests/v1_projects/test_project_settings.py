@@ -29,7 +29,11 @@ def test_detail_read_includes_settings_with_defaults(seed):
     assert r.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -39,7 +43,11 @@ def test_patch_empty_settings_is_noop(seed):
     assert r.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -83,7 +91,11 @@ def test_issue_run_policy_admin_can_change(seed):
     assert r.json()["settings"] == expect(
         "DIFF-51",
         django={},
-        rust={"issue_run_policy": "project_members"},
+        rust={
+            "issue_run_policy": "project_members",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 

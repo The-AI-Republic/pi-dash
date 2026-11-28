@@ -47,6 +47,8 @@ use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_db::entity::{issue_assignees, issues, project_members, projects};
 use pidash_db::orm_tx::into_sqlx;
 
+use super::project_repos::{check_repos_value, REPOS_KEY};
+
 /// The role that may change a settings key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRole {
@@ -89,6 +91,10 @@ pub const KNOWN_KEYS: &[SettingsKey] = &[
     },
     SettingsKey {
         name: "agent_stages",
+        role: SettingsRole::ProjectAdmin,
+    },
+    SettingsKey {
+        name: REPOS_KEY,
         role: SettingsRole::ProjectAdmin,
     },
 ];
@@ -234,6 +240,10 @@ pub struct ProjectSettings {
     /// Which optional stages run an agent (lean agent workflow).
     /// Missing reads as Auto with both stages on.
     pub agent_stages: AgentStages,
+    /// The project's repository list (NEWPIDASH-409). Missing reads
+    /// as `[]`; see [`super::project_repos`] for validation, the
+    /// merged read with the legacy columns, and write sync.
+    pub repos: Vec<super::project_repos::ProjectRepo>,
 }
 
 /// The validated read of one stored blob: the typed settings plus
@@ -366,6 +376,7 @@ fn check_key_value(key: &str, value: &Value) -> Result<(), SettingsError> {
             }),
         },
         "agent_stages" => check_agent_stages(value),
+        REPOS_KEY => check_repos_value(value),
         _ => Err(SettingsError::UnknownKey {
             key: key.to_owned(),
         }),
@@ -682,7 +693,8 @@ mod tests {
             render(&parsed.settings),
             json!({
                 "issue_run_policy": "creator_and_assignees",
-                "agent_stages": {"mode": "auto", "review": true, "test": true}
+                "agent_stages": {"mode": "auto", "review": true, "test": true},
+                "repos": []
             })
         );
     }
@@ -775,7 +787,8 @@ mod tests {
             render(&parsed.settings),
             json!({
                 "issue_run_policy": "project_members",
-                "agent_stages": {"mode": "auto", "review": true, "test": true}
+                "agent_stages": {"mode": "auto", "review": true, "test": true},
+                "repos": []
             })
         );
     }

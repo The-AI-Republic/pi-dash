@@ -127,6 +127,37 @@ pub fn settings_patch_denial(
     }
 }
 
+/// NEWPIDASH-409 column/list sync for a v1 project write: the settings
+/// fragment's `repos` list is authoritative for membership while a
+/// legacy `repo_url`/`base_branch` change updates the matching entry,
+/// refusing the write when it would duplicate another entry. The
+/// duplicate refusal answers the `repo_url` field body.
+fn plan_repo_sync_v1(
+    instance_settings: &Value,
+    instance_repo_url: &str,
+    instance_base_branch: &str,
+    fragment_repos: Option<&Value>,
+    new_repo_url: Option<&str>,
+    new_base_branch: Option<&str>,
+) -> Result<pidash_services::domain::project_repos::RepoSyncPlan, Denial> {
+    use pidash_services::domain::project_repos as repos;
+    match repos::plan_repo_sync(
+        instance_settings,
+        instance_repo_url,
+        instance_base_branch,
+        fragment_repos,
+        new_repo_url,
+        new_base_branch,
+    ) {
+        Ok(plan) => Ok(plan),
+        Err(repos::RepoSyncError::DuplicateLegacyUrl) => Err(Denial::FieldErrors(
+            r#"{"repo_url":["This repository is already in the project's repository list."]}"#
+                .to_owned(),
+        )),
+        Err(repos::RepoSyncError::InvalidFragment) => Err(Denial::ServerError),
+    }
+}
+
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 pub enum Denial {
@@ -827,6 +858,9 @@ const READ_FIELD_ORDER: &[&str] = &[
     "external_id",
     "repo_url",
     "base_branch",
+    // NEWPIDASH-409: merged `settings.repos` + legacy columns. Django
+    // renders no `repos` key (differences ledger).
+    "repos",
     "agent_default_interval_seconds",
     "agent_default_max_ticks",
     "agent_review_default_interval_seconds",
@@ -983,6 +1017,7 @@ pub async fn render_project(
     tz: &Tz,
     fields: Option<&[String]>,
     expand: Option<&[String]>,
+    actor: &uuid::Uuid,
 ) -> Result<String, Denial> {
     let keep = |key: &str| fields.map(|f| f.iter().any(|v| v == key)).unwrap_or(true);
     let mut map = serde_json::Map::with_capacity(READ_FIELD_ORDER.len());
@@ -1149,6 +1184,32 @@ pub async fn render_project(
         "base_branch",
         Value::String(row_string_opt(row, "base_branch")?.unwrap_or("main".to_owned())),
     );
+    // NEWPIDASH-409: merged `settings.repos` + legacy columns. Any
+    // reader triggers the temporary copy when the legacy repo is
+    // otherwise unlisted; every other case writes nothing.
+    let settings_raw: Value = row
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
+    let repo_url_value: String = row_string_opt(row, "repo_url")?.unwrap_or_default();
+    let stored_repos = pidash_services::domain::project_repos::repos_from_stored(&settings_raw);
+    let merged_repos = pidash_services::domain::project_repos::merged_project_repos(
+        pool,
+        id,
+        &stored_repos,
+        &repo_url_value,
+        *actor,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    put(
+        &mut map,
+        "repos",
+        serde_json::to_value(pidash_services::domain::project_repos::render_repos(
+            &merged_repos,
+        ))
+        .map_err(|_| Denial::ServerError)?,
+    );
     for key in [
         "agent_default_interval_seconds",
         "agent_default_max_ticks",
@@ -1182,9 +1243,6 @@ pub async fn render_project(
         Value::String(row_string(row, "default_work_type")?),
     );
     // NEWPIDASH-278: validated settings with defaults filled in.
-    let settings_raw: Value = row
-        .try_get("", "settings")
-        .map_err(|_| Denial::ServerError)?;
     let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
         .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
         .map_err(|_| Denial::ServerError)?;
@@ -2796,6 +2854,7 @@ pub async fn list_projects_inner(
             &timezone,
             fields.as_deref(),
             expand.as_deref(),
+            &pre.actor.id,
         )
         .await?;
         rendered.push(serde_json::from_str(&text).map_err(|_| Denial::ServerError)?);
@@ -3050,13 +3109,31 @@ pub async fn create_project_inner(
                 .to_owned(),
         }
     };
+    // NEWPIDASH-409: create accepts a validated settings bag (Django
+    // stores it; Rust type-checks it with the PATCH rules but no role
+    // gate — the creator owns the initial settings).
+    let create_settings = match input.get("settings") {
+        None => None,
+        Some(fragment) => {
+            match pidash_services::domain::project_settings::validate_update(fragment) {
+                Ok(merge) => Some(merge),
+                Err(error) => return Err(settings_patch_denial(error)),
+            }
+        }
+    };
     // `Project.save()` on create: a blank `default_work_type` resolves from
-    // the repo binding (`db/models/project.py`, PDASHOSS01-234).
+    // the repo binding (`db/models/project.py`, PDASHOSS01-234);
+    // NEWPIDASH-409 counts a non-empty `settings.repos` like a `repo_url`.
     let repo_url = field_str(&data, "repo_url").unwrap_or_default();
     let default_work_type = match work_type.as_deref() {
         Some(wt) if !wt.is_empty() => wt.to_owned(),
-        _ => pidash_services::prompting::work_types::default_for_new_project(Some(&repo_url))
-            .to_owned(),
+        _ => pidash_services::prompting::work_types::default_for_new_project(
+            pidash_services::domain::project_repos::create_request_has_repo(
+                Some(repo_url.as_str()),
+                create_settings.as_ref(),
+            ),
+        )
+        .to_owned(),
     };
     // `save()` auto-default (`db/models/project.py:261-270`): the first
     // project of a workspace becomes default.
@@ -3212,6 +3289,19 @@ pub async fn create_project_inner(
         )
         .await?;
     }
+    // NEWPIDASH-409: store a validated create-time settings bag right
+    // after the row (the creator owns the initial settings).
+    if let Some(settings) = &create_settings {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &orm(&pre.pool),
+            settings,
+            chrono::Utc::now(),
+            pre.actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     let row = fetch_detail_row(&pre.pool, slug, &pre.actor.id, &project_id)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -3232,7 +3322,17 @@ pub async fn create_project_inner(
         kwargs,
     )
     .await;
-    let text = render_project(&pre.pool, &row, Some(&ann), false, &render_tz, None, None).await?;
+    let text = render_project(
+        &pre.pool,
+        &row,
+        Some(&ann),
+        false,
+        &render_tz,
+        None,
+        None,
+        &pre.actor.id,
+    )
+    .await?;
     Ok(json_created(text))
 }
 
@@ -3343,6 +3443,7 @@ pub async fn retrieve_project_inner(
         &timezone,
         fields.as_deref(),
         expand.as_deref(),
+        &pre.actor.id,
     )
     .await?;
     Ok(json_ok(text))
@@ -3457,7 +3558,17 @@ pub async fn patch_project_inner(
     }
     // Before-image for the activity call (`views/project.py:412`): a plain
     // instance, so the annotation keys are absent (`SkipField`).
-    let snapshot = render_project(&pre.pool, &plain, None, false, &timezone, None, None).await?;
+    let snapshot = render_project(
+        &pre.pool,
+        &plain,
+        None,
+        false,
+        &timezone,
+        None,
+        None,
+        &pre.actor.id,
+    )
+    .await?;
     let project_name: String = plain.try_get("", "name").map_err(|_| Denial::ServerError)?;
     let was_default: bool = plain
         .try_get("", "is_default")
@@ -3507,7 +3618,7 @@ pub async fn patch_project_inner(
     // serializer field — `coerce_write` ignores the key — so it is
     // handled here: per-key permission (403), strict validation
     // (400), then the atomic merge after the update write below.
-    let settings_merge = match merged.get("settings") {
+    let mut settings_merge = match merged.get("settings") {
         None => None,
         Some(fragment) => {
             let facts =
@@ -3533,7 +3644,7 @@ pub async fn patch_project_inner(
             }
         }
     };
-    let data = coerce_write(&pre.pool, &merged, true, true).await?;
+    let mut data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
     let name = field_str(&data, "name");
     let identifier_raw = field_str(&data, "identifier");
@@ -3590,6 +3701,42 @@ pub async fn patch_project_inner(
         return Err(Denial::Conflict(
             pidash_services::v1_projects::ser_project::IDENTIFIER_TAKEN_BODY.to_owned(),
         ));
+    }
+    // NEWPIDASH-409: the `repos` fragment is authoritative for list
+    // membership while a legacy `repo_url`/`base_branch` change updates
+    // the matching entry; the columns follow a rename or clear on
+    // remove (double delete).
+    let instance_settings: Value = plain
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
+    let instance_repo_url: String = plain
+        .try_get("", "repo_url")
+        .map_err(|_| Denial::ServerError)?;
+    let instance_base_branch: String = plain
+        .try_get("", "base_branch")
+        .map_err(|_| Denial::ServerError)?;
+    let repo_plan = plan_repo_sync_v1(
+        &instance_settings,
+        &instance_repo_url,
+        &instance_base_branch,
+        settings_merge.as_ref().and_then(|merge| merge.get("repos")),
+        field_str(&data, "repo_url").as_deref(),
+        field_str(&data, "base_branch").as_deref(),
+    )?;
+    if let Some(url) = repo_plan.repo_url {
+        data.fields
+            .insert("repo_url".to_owned(), FieldValue::Str(url));
+    }
+    if let Some(branch) = repo_plan.base_branch {
+        data.fields
+            .insert("base_branch".to_owned(), FieldValue::Str(branch));
+    }
+    if let Some(fragment) = repo_plan.repos_fragment {
+        settings_merge
+            .get_or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .expect("settings merge is an object")
+            .insert("repos".to_owned(), fragment);
     }
     apply_project_update(
         &pre.pool,
@@ -3683,7 +3830,17 @@ pub async fn patch_project_inner(
         kwargs,
     )
     .await;
-    let text = render_project(&pre.pool, &row, Some(&ann), false, &timezone, None, None).await?;
+    let text = render_project(
+        &pre.pool,
+        &row,
+        Some(&ann),
+        false,
+        &timezone,
+        None,
+        None,
+        &pre.actor.id,
+    )
+    .await?;
     Ok(json_ok(text))
 }
 
@@ -4626,9 +4783,18 @@ mod live_tests {
         let tz: Tz = chrono_tz::UTC;
 
         // List combination: all 8 annotation keys, in wire order.
-        let text = render_project(&pool, &row, Some(&ann), true, &tz, None, None)
-            .await
-            .expect("renders");
+        let text = render_project(
+            &pool,
+            &row,
+            Some(&ann),
+            true,
+            &tz,
+            None,
+            None,
+            &uuid::Uuid::nil(),
+        )
+        .await
+        .expect("renders");
         let body: serde_json::Value = serde_json::from_str(&text).expect("json");
         let obj = body.as_object().expect("object");
         let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
@@ -4659,9 +4825,18 @@ mod live_tests {
 
         // Detail combination (`get_project`): `sort_order` omitted, the
         // other 7 annotation keys kept.
-        let text = render_project(&pool, &row, Some(&ann), false, &tz, None, None)
-            .await
-            .expect("renders");
+        let text = render_project(
+            &pool,
+            &row,
+            Some(&ann),
+            false,
+            &tz,
+            None,
+            None,
+            &uuid::Uuid::nil(),
+        )
+        .await
+        .expect("renders");
         let body: serde_json::Value = serde_json::from_str(&text).expect("json");
         let obj = body.as_object().expect("object");
         assert!(!obj.contains_key("sort_order"));
