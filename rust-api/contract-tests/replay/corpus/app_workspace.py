@@ -804,9 +804,23 @@ SESSIONS = (
                 "GET", _WS + "/home-preferences/",
                 route="/api/workspaces/{slug}/home-preferences/",
                 auth="admin", expect_status=200,
+                # DIFF-39 (NEWPIDASH-301): Rust autocreates quick_links and
+                # recents disabled; Django uses the column default (true).
+                known_body_diffs=[
+                    ("1/is_enabled", "NEWPIDASH-301", True, False),
+                    ("2/is_enabled", "NEWPIDASH-301", True, False),
+                ],
+                known_cell_diffs=[
+                    ("workspace_home_preferences", "NEWPIDASH-301",
+                     {"key": key}, "is_enabled", True, False)
+                    for key in ("quick_links", "recents")
+                ],
             ),
+            # Patches my_stickies, the one widget both backends autocreate
+            # enabled: flipping it observes the write on both sides, and the
+            # DIFF-39 pins above stay exact for the whole session.
             Request(
-                "PATCH", _WS + "/home-preferences/recents/",
+                "PATCH", _WS + "/home-preferences/my_stickies/",
                 route="/api/workspaces/{slug}/home-preferences/{key}/",
                 json={"is_enabled": False},
                 auth="admin", expect_status=200,
@@ -827,6 +841,10 @@ SESSIONS = (
                 "GET", _WS + "/home-preferences/",
                 route="/api/workspaces/{slug}/home-preferences/",
                 auth="admin", expect_status=200,
+                known_body_diffs=[
+                    ("1/is_enabled", "NEWPIDASH-301", True, False),
+                    ("2/is_enabled", "NEWPIDASH-301", True, False),
+                ],
             ),
             # Sidebar prefs: read -> patch -> verify.
             Request(
