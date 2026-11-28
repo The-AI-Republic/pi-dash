@@ -1,4 +1,7 @@
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the macOS process inspector (util::procinfo) calls
+// `sysctl` through libc. That module carries its own `#[allow(unsafe_code)]`
+// and a SAFETY note per call; everything else stays unsafe-free.
+#![deny(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
 pub mod acp;

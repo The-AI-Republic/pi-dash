@@ -89,6 +89,9 @@ zbus = { version = "4", default-features = false, features = ["blocking", "async
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 # Agent keychain presence probe (agent::keychain, NEWPIDASH-397) is a
 # `security find-generic-password` subprocess: no extra dependencies.
+# Process inspection for ownership-proven group signalling
+# (util::procinfo, `sysctl(KERN_PROC_*)`).
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
