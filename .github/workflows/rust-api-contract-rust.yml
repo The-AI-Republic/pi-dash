@@ -31,6 +31,11 @@
 name: rust-api contract tests — Rust matrix
 
 on:
+  # Nightly on main (PDASHOSS01-423): the push trigger is path-filtered, so a
+  # red main stayed hidden until a push touched these paths.
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
