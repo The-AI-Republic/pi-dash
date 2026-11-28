@@ -188,8 +188,9 @@ class IssueSerializer(BaseSerializer):
     #: the external-id lookup). Those payloads then carry ``active_run``: the
     #: run occupying the issue's one-active-run slot, with its working branch
     #: and its runner's last heartbeat (PDASHOSS01-407), so ``pidash issue
-    #: busy`` can tell an outside agent the branch is owned. Absent when no
-    #: run is active. Same keys and formats as the Rust API.
+    #: busy`` can tell an outside agent the branch is owned. ``null`` when no
+    #: run is active. Same keys and formats as the Rust API. The value is the
+    #: viewer whose runner access decides whether runner metadata is shown.
     ACTIVE_RUN_CONTEXT = "include_active_run"
 
     def __init__(self, *args, **kwargs):
@@ -623,9 +624,9 @@ class IssueSerializer(BaseSerializer):
             and not isinstance(self.parent, serializers.ListSerializer)
             and (not self._requested_fields or "active_run" in self._requested_fields)
         ):
-            summary = active_run_summary(instance)
-            if summary is not None:
-                data["active_run"] = summary
+            # ``null`` (not absent) when idle, so a client can tell an idle
+            # issue from a server without the block.
+            data["active_run"] = active_run_summary(instance, viewer=self.context.get(self.ACTIVE_RUN_CONTEXT))
 
         return data
 
@@ -634,37 +635,55 @@ def _utc_isoformat(moment):
     return None if moment is None else moment.astimezone(dt_timezone.utc).isoformat()
 
 
-def _active_run_branch(issue_branch, run_config):
-    """The issue's ``git_work_branch`` when set (a run records the branch it
-    cuts there), else the branch pinned in the run's ``run_config`` at
-    dispatch, else ``None``. Blank values fall through."""
-    branch = (issue_branch or "").strip()
-    if branch:
-        return branch
+#: Statuses before the runner reports the run started: the runner will check
+#: out the branch pinned in ``run_config`` at dispatch.
+_PRE_START_STATUSES = ("queued", "assigned", "waiting_for_worktree")
+
+
+def _active_run_branch(run_status, issue_branch, run_config):
+    """The active run's working branch, or ``None``. Before the run starts,
+    the branch pinned in its ``run_config`` at dispatch wins (that is what the
+    assignment sends the runner); once it runs, the issue's
+    ``git_work_branch`` wins (a run records the branch it cuts there). Each
+    falls back to the other; blank values fall through."""
+    branch = (issue_branch or "").strip() or None
     pinned = (run_config or {}).get("git_work_branch") if isinstance(run_config, dict) else None
-    if isinstance(pinned, str) and pinned.strip():
-        return pinned.strip()
-    return None
+    pinned = pinned.strip() or None if isinstance(pinned, str) else None
+    if run_status in _PRE_START_STATUSES:
+        return pinned or branch
+    return branch or pinned
 
 
-def active_run_summary(issue):
-    """The ``active_run`` block for one issue, or ``None`` when idle."""
+def active_run_summary(issue, viewer=None):
+    """The ``active_run`` block for one issue, or ``None`` when idle.
+
+    Read from the primary database (``default``) even when the request is
+    routed to the read replica: a lagging replica would report a branch as
+    free while a run already holds the slot. ``runner_id`` and
+    ``runner_last_heartbeat_at`` are ``None`` unless ``viewer`` may view the
+    runner (``can_view_runner``)."""
     from pi_dash.orchestration.service import _active_run_for
+    from pi_dash.runner.models import Runner
+    from pi_dash.runner.services.permissions import can_view_runner
 
-    run = _active_run_for(issue)
+    run = _active_run_for(issue, using="default")
     if run is None:
         return None
-    runner = run.runner if run.runner_id else None
+    runner = Runner.objects.using("default").filter(pk=run.runner_id).first() if run.runner_id else None
+    visible = runner is not None and viewer is not None and can_view_runner(viewer, runner)
+    issue_branch = (
+        Issue.all_objects.using("default").filter(pk=issue.pk).values_list("git_work_branch", flat=True).first()
+    )
     return {
         "id": str(run.id),
         "status": run.status,
-        "runner_id": str(run.runner_id) if run.runner_id else None,
+        "runner_id": str(run.runner_id) if visible else None,
         "created_at": _utc_isoformat(run.created_at),
         "assigned_at": _utc_isoformat(run.assigned_at),
         "started_at": _utc_isoformat(run.started_at),
         "age_seconds": max(0, int((timezone.now() - run.created_at).total_seconds())),
-        "runner_last_heartbeat_at": _utc_isoformat(runner.last_heartbeat_at if runner else None),
-        "branch": _active_run_branch(issue.git_work_branch, run.run_config),
+        "runner_last_heartbeat_at": _utc_isoformat(runner.last_heartbeat_at) if visible else None,
+        "branch": _active_run_branch(run.status, issue_branch, run.run_config),
     }
 
 

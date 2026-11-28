@@ -7,7 +7,9 @@
 ``pidash issue busy`` reads it to tell an outside agent that a run owns
 the issue's branch, so it comments instead of pushing. The block matches
 the Rust API (NEWPIDASH-251 + PDASHOSS01-407) key for key; it is absent
-when no run occupies the issue's one-active-run slot.
+``null`` when no run occupies the issue's one-active-run slot. Runner
+metadata (``runner_id``, ``runner_last_heartbeat_at``) is shown only to
+readers who may view the runner.
 """
 
 from __future__ import annotations
@@ -16,9 +18,10 @@ from datetime import datetime, timezone as dt_timezone
 from unittest import mock
 
 import pytest
+from django.test import override_settings
 from rest_framework import status
 
-from pi_dash.db.models import ProjectMember
+from pi_dash.db.models import ProjectMember, User, WorkspaceMember
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
@@ -95,6 +98,13 @@ def _detail(workspace, issue):
     return f"/api/v1/workspaces/{workspace.slug}/projects/{issue.project_id}/work-items/{issue.id}/"
 
 
+def _external(workspace, issue):
+    return (
+        f"/api/v1/workspaces/{workspace.slug}/projects/{issue.project_id}/work-items/"
+        f"?external_id={issue.external_id}&external_source={issue.external_source}"
+    )
+
+
 def _by_identifier(workspace, issue):
     return f"/api/v1/workspaces/{workspace.slug}/work-items/{issue.project.identifier}-{issue.sequence_id}/"
 
@@ -137,12 +147,57 @@ class TestIssueActiveRun:
 
         assert api_key_client.get(_detail(workspace, issue)).json()["active_run"]["branch"] is None
 
-    def test_idle_issue_omits_the_block(self, api_key_client, workspace, issue, pod, create_user):
+    def test_idle_issue_reports_null(self, api_key_client, workspace, issue, pod, create_user):
+        """Idle reads as ``"active_run": null`` (key present), so a client can
+        tell an idle issue from a server that has no ``active_run`` at all."""
         issue.git_work_branch = "pi-dash/def-1"
-        issue.save(update_fields=["git_work_branch"])
+        issue.external_id = "ext-1"
+        issue.external_source = "github"
+        issue.save(update_fields=["git_work_branch", "external_id", "external_source"])
         _run(issue, pod, create_user, AgentRunStatus.COMPLETED)
 
-        assert "active_run" not in api_key_client.get(_detail(workspace, issue)).json()
+        for url in (_detail(workspace, issue), _by_identifier(workspace, issue), _external(workspace, issue)):
+            body = api_key_client.get(url).json()
+            assert "active_run" in body, url
+            assert body["active_run"] is None
+
+    def test_unstarted_run_reports_its_dispatch_pin(self, api_key_client, workspace, issue, pod, create_user):
+        """Before the run starts, the branch pinned at dispatch is the one the
+        runner will check out, even if the issue's branch changed since."""
+        issue.git_work_branch = "pi-dash/edited-later"
+        issue.save(update_fields=["git_work_branch"])
+        for run_status in (AgentRunStatus.QUEUED, AgentRunStatus.ASSIGNED, AgentRunStatus.WAITING_FOR_WORKTREE):
+            run = _run(issue, pod, create_user, run_status, run_config={"git_work_branch": "feat/a"})
+            block = api_key_client.get(_detail(workspace, issue)).json()["active_run"]
+            assert block["id"] == str(run.id)
+            assert block["branch"] == "feat/a", run_status
+            run.delete()
+        # Once running, the issue field (where the run records the branch it
+        # cuts) wins again.
+        _run(issue, pod, create_user, AgentRunStatus.RUNNING, run_config={"git_work_branch": "feat/a"})
+        assert api_key_client.get(_detail(workspace, issue)).json()["active_run"]["branch"] == "pi-dash/edited-later"
+
+    def test_runner_metadata_hidden_from_non_owners(self, api_key_client, workspace, issue, pod, create_user):
+        """Only the runner's owner (``can_view_runner``) sees which runner holds
+        the run and its heartbeat; everyone else still sees the run itself."""
+        other = User.objects.create(email="other-owner@example.com", username="other-owner")
+        WorkspaceMember.objects.create(workspace=workspace, member=other, role=20)
+        foreign = Runner.objects.create(
+            owner=other,
+            workspace=workspace,
+            pod=pod,
+            name="their-laptop",
+            status=RunnerStatus.ONLINE,
+            last_heartbeat_at=datetime(2026, 11, 27, 16, 59, 30, tzinfo=dt_timezone.utc),
+        )
+        run = _run(issue, pod, create_user, AgentRunStatus.RUNNING, runner=foreign)
+
+        block = api_key_client.get(_detail(workspace, issue)).json()["active_run"]
+        assert list(block) == ACTIVE_RUN_KEYS
+        assert block["id"] == str(run.id)
+        assert block["status"] == "running"
+        assert block["runner_id"] is None
+        assert block["runner_last_heartbeat_at"] is None
 
     def test_fields_gate_and_list_rows(self, api_key_client, workspace, issue, pod, runner, create_user):
         _run(issue, pod, create_user, AgentRunStatus.RUNNING, runner=runner)
@@ -154,3 +209,21 @@ class TestIssueActiveRun:
             f"/api/v1/workspaces/{workspace.slug}/projects/{issue.project_id}/work-items/"
         ).json()["results"]
         assert rows and all("active_run" not in row for row in rows)
+
+
+@pytest.mark.django_db
+def test_active_run_reads_the_primary_under_replica_routing(issue, pod, runner, create_user):
+    """The ownership check must not lag behind the primary: with replica
+    routing on, the run, its runner and the branch inputs still come from
+    ``default``."""
+    from pi_dash.api.serializers.issue import active_run_summary
+
+    issue.git_work_branch = "pi-dash/def-1"
+    issue.save(update_fields=["git_work_branch"])
+    run = _run(issue, pod, create_user, AgentRunStatus.RUNNING, runner=runner)
+    with mock.patch("pi_dash.utils.core.dbrouters.should_use_read_replica", return_value=True):
+        with override_settings(DATABASE_ROUTERS=["pi_dash.utils.core.dbrouters.ReadReplicaRouter"]):
+            summary = active_run_summary(issue, viewer=create_user)
+    assert summary["id"] == str(run.id)
+    assert summary["branch"] == "pi-dash/def-1"
+    assert summary["runner_last_heartbeat_at"] == "2026-11-27T16:59:30+00:00"

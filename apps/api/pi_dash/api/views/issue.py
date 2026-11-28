@@ -264,7 +264,7 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
                     expand=self.expand,
                     context={
                         IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user,
-                        IssueSerializer.ACTIVE_RUN_CONTEXT: True,
+                        IssueSerializer.ACTIVE_RUN_CONTEXT: request.user,
                     },
                 ).data,
                 status=status.HTTP_200_OK,
@@ -360,7 +360,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     issue,
                     fields=self.fields,
                     expand=self.expand,
-                    context={IssueSerializer.ACTIVE_RUN_CONTEXT: True},
+                    context={IssueSerializer.ACTIVE_RUN_CONTEXT: request.user},
                 ).data,
                 status=status.HTTP_200_OK,
             )
@@ -617,7 +617,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 expand=self.expand,
                 context={
                     IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user,
-                    IssueSerializer.ACTIVE_RUN_CONTEXT: True,
+                    IssueSerializer.ACTIVE_RUN_CONTEXT: request.user,
                 },
             ).data,
             status=status.HTTP_200_OK,
