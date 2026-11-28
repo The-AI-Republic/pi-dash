@@ -22,12 +22,14 @@ password="e2e-secret-$tag"
 message="written by $old"
 local_project="pidash-object-storage-local-$tag"
 created_env=""
+created_api_env=""
 
 cleanup() {
     docker rm -f "old-$tag" "new-$tag" > /dev/null 2>&1 || true
     docker volume rm -f "$volume" > /dev/null 2>&1 || true
     docker compose -p "$local_project" -f "$root/docker-compose-local.yml" down -v > /dev/null 2>&1 || true
     if [ -n "$created_env" ]; then rm -f "$root/.env"; fi
+    if [ -n "$created_api_env" ]; then rm -f "$root/apps/api/.env"; fi
 }
 trap cleanup EXIT
 
@@ -69,11 +71,16 @@ echo "::endgroup::"
 
 echo "::group::docker-compose-local.yml bucket bootstrap"
 bucket="uploads-$tag"
-# The service reads .env; an empty one is enough for this service. Only a
-# file this script created is removed again.
+# Compose loads every service's env_file, even for one service: the
+# storage service reads .env and others read apps/api/.env. Empty files are
+# enough here. Only files this script created are removed again.
 if [ ! -f "$root/.env" ]; then
     : > "$root/.env"
     created_env=1
+fi
+if [ ! -f "$root/apps/api/.env" ]; then
+    : > "$root/apps/api/.env"
+    created_api_env=1
 fi
 AWS_ACCESS_KEY_ID="$user" AWS_SECRET_ACCESS_KEY="$password" AWS_S3_BUCKET_NAME="$bucket" \
     docker compose -p "$local_project" -f "$root/docker-compose-local.yml" up -d pi-dash-minio

@@ -192,6 +192,17 @@ describe("install.sh credential preflight", () => {
     assert.match(out, /GRANT CONNECT/);
   });
 
+  it("says how to fix a RabbitMQ user without permissions on its vhost", () => {
+    // Login and vhost are right; only the user's permissions are missing.
+    const probe =
+      "credential-check\\tOK\\tPostgreSQL\\t\\ncredential-check\\tMISMATCH\\tRabbitMQ\\tConnection.open: (530) NOT_ALLOWED - access to vhost 'pi-dash' refused for user 'nopriv'\\n";
+    const { status, out } = runCheck({ probe });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /NOT_ALLOWED - access to vhost/);
+    assert.match(out, /rabbitmqctl set_permissions/);
+    assert.doesNotMatch(out, /created with other values/);
+  });
+
   it("ignores other output from the container", () => {
     const probe = `Creating pi-dash-api-run ... done\nWARNING: something\n${OK}`;
     const { status, out } = runCheck({ probe });

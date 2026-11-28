@@ -669,6 +669,13 @@ function checkBundledCredentials() {
                     echo "   $service: $detail ❌" >&2
                     echo "   Run GRANT CONNECT ON DATABASE <name> TO <role> as the database owner," >&2
                     echo "   or set DATABASE_URL in $DOCKER_ENV_PATH to a role that may connect." >&2
+                elif [[ $service == "RabbitMQ" && $detail == *"NOT_ALLOWED - access to vhost"* ]]; then
+                    # The login works; the user has no permissions on the vhost.
+                    echo "" >&2
+                    echo "   $service: $detail ❌" >&2
+                    echo "   Grant the user access to the vhost, for example:" >&2
+                    echo "   $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH exec -u rabbitmq pi-dash-mq rabbitmqctl set_permissions -p <vhost> <user> '.*' '.*' '.*'" >&2
+                    echo "   or set AMQP_URL in $DOCKER_ENV_PATH to a vhost the user may use." >&2
                 elif [ "$service" == "PostgreSQL" ]; then
                     credentialMismatch "$service" "$detail" "DATABASE_URL"
                 else
