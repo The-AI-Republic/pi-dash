@@ -97,7 +97,12 @@ def test_assignee_moves_state(api, world, seeder, settings):
             issue_url(world, issue["id"]), json={"assignees": [member["id"]]}
         )
         assert resp.status_code == 200, resp.text[:500]
-        target = _other_state(_states(api, world), issue["state"])
+        # The assignee write gives the stateless issue a state, so pick the
+        # target from the persisted state: moving to the same state is a
+        # no-op that skips the run-policy gate and would prove nothing.
+        before = _get_issue(api, world, issue["id"])["state"]
+        target = _other_state(_states(api, world), before)
+        assert target != before
         resp = client.patch(issue_url(world, issue["id"]), json={"state": target})
         assert resp.status_code == 200, resp.text[:500]
         assert _get_issue(client, world, issue["id"])["state"] == target
