@@ -4989,6 +4989,14 @@ impl AssignWorker {
         // here, before admission and any workspace preparation.
         if !self.wait_while_reserved().await {
             tracing::info!(%run_id, "run stopped while the runner was reserved; not started");
+            // An explicit cancel (not a shutdown, which leaves a restored
+            // entry queued for the next start): the loop's cancel handler
+            // only dropped the queue entry, so acknowledge it here and stop
+            // reporting the run in flight.
+            if self.state.shutdown_reason().is_none() && self.cancel.is_cancelled() {
+                acknowledge_cancel_without_active_process(&self.out, run_id).await;
+                self.state.set_current_run(None).await;
+            }
             return Ok(());
         }
         if let Some(coord) = self.coordinator.as_ref() {
@@ -9171,6 +9179,49 @@ mod tests {
         );
         assert!(ended.is_ok(), "the waiting run ignored its cancellation");
         assert!(coord.holds_run(run_id) && !coord.is_admitted(run_id));
+    }
+
+    /// Review of #3501 at 591a610 (MUST 5): the cloud cancels a restored
+    /// run while it waits on the reservation. The loop's cancel handler
+    /// only drops the queue entry and cancels the worker, so the worker must
+    /// acknowledge the cancellation and stop reporting the run in flight.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_run_cancelled_while_reserved_is_acknowledged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let state = worker.state.clone();
+        let cancel = worker.cancel.clone();
+        let run_id = uuid::Uuid::new_v4();
+        state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "preparing".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        state.set_cleanup_reserved(true).await;
+        let task = tokio::spawn(async move {
+            worker
+                .run(run_id, "p".into(), None, None, AssignContext::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the waiting run ignored its cancellation")
+            .unwrap()
+            .unwrap();
+        let acked = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|e| matches!(e.body, ClientMsg::RunCancelled { run_id: r, .. } if r == run_id));
+        assert!(acked, "the cancellation was never acknowledged");
+        assert!(
+            state.rx_in_flight.borrow().is_none(),
+            "the cancelled run is still reported in flight"
+        );
     }
 
     /// Review of #3502 at 968b972 (MUST 2): a released run whose report
