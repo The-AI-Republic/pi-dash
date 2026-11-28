@@ -966,7 +966,7 @@ def create_project(
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
-            60,'local_runner','fail_to_backlog',60,%s,%s,%s)""",
+            60,'local_runner','fail_to_backlog',60,%s,%s,%s,'general')""",
         (pid, name, identifier, workspace_id, now, now, created_by_id),
     )
     return {"id": pid, "identifier": identifier}
