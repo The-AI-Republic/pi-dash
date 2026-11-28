@@ -54,7 +54,6 @@ from pi_dash.db.models import (
     Issue,
     IssueAssignee,
     GitIssueSync,
-    GithubIssueSync,
     IssueLabel,
     IssueLink,
     IssueReaction,
@@ -724,7 +723,7 @@ class IssueViewSet(BaseViewSet):
 
         # Block delete on actively-synced Git provider issues. After unbind,
         # cascades delete sync rows and the issue becomes user-managed again.
-        if GitIssueSync.objects.filter(issue=issue).exists() or GithubIssueSync.objects.filter(issue=issue).exists():
+        if GitIssueSync.objects.filter(issue=issue).exists():
             return Response(
                 {"error": "This issue is synced from a Git provider. Unbind the project's repository to delete."},
                 status=status.HTTP_409_CONFLICT,
