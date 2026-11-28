@@ -379,6 +379,40 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(results["PostgreSQL"][0], "SKIP", out)
         self.assertIn("no host", results["PostgreSQL"][1])
 
+    def test_postgres_hostless_url_falls_back_to_pghost(self):
+        # The community Compose file sets PGHOST=pi-dash-db; libpq uses it
+        # (and PGPORT) when DATABASE_URL names no host.
+        pg = FakePostgres({"pi-dash": "custom"}, {"pi-dash"})
+        env = {"DATABASE_URL": "postgresql://pi-dash:pi-dash@/pi-dash", "PGHOST": "pi-dash-db", "PGPORT": str(pg.port)}
+        results, out = self.run_probe(env, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "MISMATCH", out)
+        self.assertIn("password authentication failed", results["PostgreSQL"][1])
+
+    def test_postgres_hostless_url_with_matching_credentials_via_pghost(self):
+        pg = FakePostgres({"pi-dash": "pi-dash"}, {"pi-dash"})
+        env = {"DATABASE_URL": "postgresql://pi-dash:pi-dash@/pi-dash", "PGHOST": "pi-dash-db", "PGPORT": str(pg.port)}
+        results, out = self.run_probe(env, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "OK", out)
+
+    def test_postgres_blank_postgres_host_falls_back_to_pghost(self):
+        pg = FakePostgres({"pi-dash": "pi-dash"}, {"pi-dash"})
+        env = {
+            "DATABASE_URL": "",
+            "POSTGRES_DB": "pi-dash",
+            "POSTGRES_USER": "pi-dash",
+            "POSTGRES_PASSWORD": "wrong",
+            "POSTGRES_PORT": str(pg.port),
+            "PGHOST": "pi-dash-db",
+        }
+        results, out = self.run_probe(env, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "MISMATCH", out)
+
+    def test_postgres_hostless_url_with_an_external_pghost_is_skipped(self):
+        env = {"DATABASE_URL": "postgresql://app:secret@/app", "PGHOST": "external-db"}
+        results, out = self.run_probe(env, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "SKIP", out)
+        self.assertIn("external host external-db", results["PostgreSQL"][1])
+
     def test_the_hard_deadline_is_not_swallowed_by_a_broad_except(self):
         # The RabbitMQ attempt catches Exception to classify errors; the
         # deadline must still end the check.

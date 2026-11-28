@@ -522,7 +522,9 @@ def check_postgres():
             "PORT": os.environ.get("POSTGRES_PORT", "5432"),
         }
     params = django_connection_params(cfg)
-    host = str(params.get("host") or "")
+    # With no host in the URL or POSTGRES_HOST, libpq connects to PGHOST,
+    # which the community Compose file sets to pi-dash-db.
+    host = str(params.get("host") or os.environ.get("PGHOST") or "")
     if not host:
         say("SKIP", "PostgreSQL", "no host set")
         return
