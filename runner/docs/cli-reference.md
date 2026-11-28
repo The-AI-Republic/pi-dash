@@ -44,6 +44,31 @@ state, state_group}`) plus `has_open_blockers` (true while any
   Single-item reads also carry `relations`: every relation grouped by
   type, each `{id, identifier, name, state, state_group}` (see
   `pidash issue relations <identifier>`.
+  Single-item reads also carry `active_run`, the run occupying the
+  issue's run slot (`null` when none does): `{id, status, runner_id,
+  created_at, assigned_at, started_at, age_seconds,
+  runner_last_heartbeat_at, branch}`. `branch` is the run's working
+  branch, `null` until one is known: the branch pinned at dispatch until
+  the run starts, then the issue's `git_work_branch`. `runner_id` and
+  `runner_last_heartbeat_at` are `null` unless you may view that runner.
+- `pidash issue busy <identifier>` — check whether an agent run owns the
+  issue's branch **before you push to it**. Prints `{issue, busy,
+  owned_by_caller, branch, active_run, advice}`. `busy` is `true` while
+  another agent run is active on the issue (from `queued` on);
+  `owned_by_caller` is `true` when that run is your own (`PIDASH_RUN_ID`),
+  and then `busy` is `false`. Any non-null `active_run` counts as busy,
+  even one without an `id`. `branch` is `active_run.branch` (an explicit
+  `null` stays `null`); only a block without a `branch` key, or an idle
+  issue, falls back to the issue's `git_work_branch`. Read-only: it takes no lock, and
+  exits 0 whenever the read succeeds — check `busy`. It fails (exit 5)
+  when the server's issue read has no `active_run` key (a server that
+  predates it), because an active run would not show; treat that as
+  busy. **Convention:** an
+  agent working outside the issue's run (a coordinator, a reviewer, a
+  person's script) that finds `busy: true` must not push to `branch`;
+  it comments on the issue with the finding or fix instead, and the
+  owning run picks it up. Check again just before the push, not only at
+  the start of the work.
 - `pidash issue list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--order-by <field>]` — list work items in a project.
   `--project` accepts either the workspace-scoped slug (e.g. `ENG`) or a
   project UUID. Returns the server's paginated envelope `{count,

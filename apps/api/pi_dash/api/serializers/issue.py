@@ -4,6 +4,7 @@
 
 # Python imports
 import uuid
+from datetime import timezone as dt_timezone
 
 # Django imports
 from django.http import QueryDict
@@ -190,6 +191,15 @@ class IssueSerializer(BaseSerializer):
     #: can see. Without a viewer the block is omitted rather than leaking
     #: titles from projects the caller may not belong to.
     RELATIONS_VIEWER_CONTEXT = "relations_viewer"
+
+    #: Context flag set by the single-issue GETs (detail, by-identifier and
+    #: the external-id lookup). Those payloads then carry ``active_run``: the
+    #: run occupying the issue's one-active-run slot, with its working branch
+    #: and its runner's last heartbeat (PDASHOSS01-407), so ``pidash issue
+    #: busy`` can tell an outside agent the branch is owned. ``null`` when no
+    #: run is active. Same keys and formats as the Rust API. The value is the
+    #: viewer whose runner access decides whether runner metadata is shown.
+    ACTIVE_RUN_CONTEXT = "include_active_run"
 
     def __init__(self, *args, **kwargs):
         # ``BaseSerializer`` consumes ``fields``; remember which plain names
@@ -623,7 +633,72 @@ class IssueSerializer(BaseSerializer):
 
             data["relations"] = grouped_relations(instance, member_project_issues(viewer, instance.workspace.slug))
 
+        if (
+            self.context.get(self.ACTIVE_RUN_CONTEXT)
+            and not isinstance(self.parent, serializers.ListSerializer)
+            and (not self._requested_fields or "active_run" in self._requested_fields)
+        ):
+            # ``null`` (not absent) when idle, so a client can tell an idle
+            # issue from a server without the block.
+            data["active_run"] = active_run_summary(instance, viewer=self.context.get(self.ACTIVE_RUN_CONTEXT))
+
         return data
+
+
+def _utc_isoformat(moment):
+    return None if moment is None else moment.astimezone(dt_timezone.utc).isoformat()
+
+
+#: Statuses before the runner reports the run started: the runner will check
+#: out the branch pinned in ``run_config`` at dispatch.
+_PRE_START_STATUSES = ("queued", "assigned", "waiting_for_worktree")
+
+
+def _active_run_branch(run_status, issue_branch, run_config):
+    """The active run's working branch, or ``None``. Before the run starts,
+    the branch pinned in its ``run_config`` at dispatch wins (that is what the
+    assignment sends the runner); once it runs, the issue's
+    ``git_work_branch`` wins (a run records the branch it cuts there). Each
+    falls back to the other; blank values fall through."""
+    branch = (issue_branch or "").strip() or None
+    pinned = (run_config or {}).get("git_work_branch") if isinstance(run_config, dict) else None
+    pinned = pinned.strip() or None if isinstance(pinned, str) else None
+    if run_status in _PRE_START_STATUSES:
+        return pinned or branch
+    return branch or pinned
+
+
+def active_run_summary(issue, viewer=None):
+    """The ``active_run`` block for one issue, or ``None`` when idle.
+
+    Read from the primary database (``default``) even when the request is
+    routed to the read replica: a lagging replica would report a branch as
+    free while a run already holds the slot. ``runner_id`` and
+    ``runner_last_heartbeat_at`` are ``None`` unless ``viewer`` may view the
+    runner (``can_view_runner``)."""
+    from pi_dash.orchestration.service import _active_run_for
+    from pi_dash.runner.models import Runner
+    from pi_dash.runner.services.permissions import can_view_runner
+
+    run = _active_run_for(issue, using="default")
+    if run is None:
+        return None
+    runner = Runner.objects.using("default").filter(pk=run.runner_id).first() if run.runner_id else None
+    visible = runner is not None and viewer is not None and can_view_runner(viewer, runner)
+    issue_branch = (
+        Issue.all_objects.using("default").filter(pk=issue.pk).values_list("git_work_branch", flat=True).first()
+    )
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "runner_id": str(run.runner_id) if visible else None,
+        "created_at": _utc_isoformat(run.created_at),
+        "assigned_at": _utc_isoformat(run.assigned_at),
+        "started_at": _utc_isoformat(run.started_at),
+        "age_seconds": max(0, int((timezone.now() - run.created_at).total_seconds())),
+        "runner_last_heartbeat_at": _utc_isoformat(runner.last_heartbeat_at) if visible else None,
+        "branch": _active_run_branch(run.status, issue_branch, run.run_config),
+    }
 
 
 class IssueLiteSerializer(BaseSerializer):

@@ -80,9 +80,10 @@ class ContinuationOutcome:
     reason: str = ""
 
 
-def _active_run_for(issue: Issue) -> Optional[AgentRun]:
+def _active_run_for(issue: Issue, using: Optional[str] = None) -> Optional[AgentRun]:
+    manager = AgentRun.objects.using(using) if using else AgentRun.objects
     return (
-        AgentRun.objects.filter(work_item=issue)
+        manager.filter(work_item=issue)
         .filter(
             status__in=[
                 AgentRunStatus.QUEUED,
