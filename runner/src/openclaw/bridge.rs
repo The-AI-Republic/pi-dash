@@ -138,12 +138,15 @@ impl Bridge {
         // A fresh exit channel for this turn's process, relayed into the
         // bridge's channel only while it is current: a previous turn's process
         // exiting after this one started must not make this turn look exited.
-        // `next` also clears a prior turn's snapshot, without notifying when
-        // it is already `None` (the supervisor subscribes before `run`).
-        let proc_exit_tx = self.exit.next();
+        // It becomes current only once the process has spawned: a failed
+        // spawn leaves the previous process's exit visible. Activation also
+        // clears a prior turn's snapshot, without notifying when it is
+        // already `None` (the supervisor subscribes before `run`).
+        let (proc_exit_tx, pending_exit) = self.exit.prepare();
         self.pending.clear();
         let proc =
             OpenClawProcess::spawn_command(cmd, proc_exit_tx, self.stderr_ring.clone()).await?;
+        pending_exit.activate();
         self.proc = Some(proc);
         let thread_id = self.wait_for_session(run_id).await?;
         Ok(BridgeCursor {

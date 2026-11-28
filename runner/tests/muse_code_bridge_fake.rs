@@ -373,20 +373,20 @@ async fn shutdown_returns_promptly_after_the_process_exits() {
 
 #[tokio::test]
 async fn an_old_turns_late_exit_does_not_mark_the_current_turn_exited() {
-    // PDASHOSS01-417: turn 1 replays a completed run, then its leader
+    // Turn 1 replays a completed run, then its leader
     // lingers. Turn 2 starts at once and blocks; replacing turn 1's process
     // stops it, and its exit lands after turn 2 started. That exit must not
     // reach the bridge's exit channel, which now belongs to turn 2.
     let mut turn1 = Command::new("sh");
     turn1
         .arg("-c")
-        .arg(r#"cat "$1"; sleep 1"#)
+        .arg(r#"cat "$1"; exec sleep 1"#)
         .arg("sh")
         .arg(fixture("echo_completed_run.jsonl"));
     let mut turn2 = Command::new("sh");
     turn2
         .arg("-c")
-        .arg(r#"sed '/run.lifecycle.started/q' "$1"; sleep 30"#)
+        .arg(r#"sed '/run.lifecycle.started/q' "$1"; exec sleep 30"#)
         .arg("sh")
         .arg(fixture("echo_resumed_run.jsonl"));
 

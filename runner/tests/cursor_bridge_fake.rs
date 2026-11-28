@@ -323,18 +323,18 @@ async fn shutdown_returns_promptly_after_the_process_exits() {
 
 #[tokio::test]
 async fn an_old_turns_late_exit_does_not_mark_the_current_turn_exited() {
-    // PDASHOSS01-417: turn 1 emits its result, then its leader lingers. Turn 2
+    // Turn 1 emits its result, then its leader lingers. Turn 2
     // starts at once and keeps running; replacing turn 1's process stops it,
     // and its exit lands after turn 2 started. That exit must not reach the
     // bridge's exit channel, which now belongs to turn 2.
     let turn1 = r#"
         printf '%s\n' '{"type":"system","subtype":"init","session_id":"cur_late_001"}'
         printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"t1","session_id":"cur_late_001"}'
-        sleep 1
+        exec sleep 1
     "#;
     let turn2 = r#"
         printf '%s\n' '{"type":"system","subtype":"init","session_id":"cur_late_001"}'
-        sleep 30
+        exec sleep 30
     "#;
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
