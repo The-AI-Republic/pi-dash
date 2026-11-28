@@ -79,6 +79,28 @@ def test_run_ai_refuses_offline_dedicated(admin_client, world, dedicated_issue, 
     assert resp.json()["options"] == ["pod_once", "change_runner"]
 
 
+def test_run_ai_queues_behind_busy_dedicated(admin_client, seeder, world, online_runner):
+    # PDASHOSS01-419: a busy runner with a fresh heartbeat is online
+    # (design §11.1 "Busy is not unavailable"): the person's run is
+    # queued for it, not refused as assigned_runner_offline.
+    assign = admin_client.patch(
+        _issue_url(world, world["issue1"]["id"]),
+        json={"assigned_runner_id": online_runner["id"], "assigned_pod_id": world["pod"]["id"]},
+    )
+    assert assign.status_code in (200, 204), assign.text[:500]
+    seeder.db.execute(
+        "UPDATE runner SET status='busy', last_heartbeat_at=now() WHERE id=%s",
+        (online_runner["id"],),
+    )
+    resp = admin_client.post(
+        "/api/runners/runs/",
+        json={"triggered_by": "run_ai", "work_item": world["issue1"]["id"]},
+    )
+    assert resp.status_code in (200, 201), resp.text[:500]
+    body = resp.json()
+    assert body.get("reason") != "assigned_runner_offline"
+
+
 def test_release_pin_refused_for_dedicated(admin_client, world, dedicated_run, online_runner):
     resp = admin_client.post(f"/api/runners/runs/{dedicated_run['id']}/release-pin/")
     assert resp.status_code == 409, resp.text[:500]

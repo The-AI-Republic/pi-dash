@@ -330,6 +330,21 @@ async fn write_assignment(
     Ok(())
 }
 
+/// Drop the pin of a run taken from another runner's locality pin
+/// (PDASHOSS01-419, [`drain_kernel::release_borrowed_pin_stmts`]). Call
+/// right after the assignment write, in the same transaction; a no-op for
+/// a run that is unpinned or pinned to `runner_id`.
+pub async fn release_borrowed_pin<C: ConnectionTrait>(
+    db: &C,
+    run_id: Uuid,
+    runner_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    for stmt in drain_kernel::release_borrowed_pin_stmts(run_id, runner_id) {
+        db.execute(DbBackend::Postgres.build(&stmt)).await?;
+    }
+    Ok(())
+}
+
 /// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
 /// flip a `busy` runner with no busy-status run back to `online`.
 /// Returns whether a row changed (the Python `bool(...)`). Runs on the
@@ -428,6 +443,7 @@ async fn drain_for_runner(
         assignment_protocol,
     )
     .await?;
+    release_borrowed_pin(&txn, run_id, runner_id).await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
         runner_id,
@@ -532,6 +548,7 @@ async fn drain_pod(
             assignment_protocol,
         )
         .await?;
+        release_borrowed_pin(&txn, run_id, runner_id).await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,

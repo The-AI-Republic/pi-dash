@@ -345,6 +345,11 @@ pub(crate) async fn drain_pod_by_id(
             .exec(&txn)
             .await
             .map_err(map)?;
+        pidash_services::runner_sessions::live_drains::release_borrowed_pin(
+            &txn, run_id, runner_id,
+        )
+        .await
+        .map_err(map)?;
         effects.push(plan.after_commit);
     }
     txn.commit().await.map_err(map)?;
