@@ -28,6 +28,7 @@ KEY = "projects"
 
 DTSTART = "2026-10-01T00:00:00+00:00"
 NEXT_RUN_AT = "2026-10-20T00:00:00+00:00"
+FAR_NEXT_RUN_AT = "2099-01-01T00:00:00+00:00"
 PROMPT = "Scan the project for stalled issues."
 
 
@@ -160,12 +161,27 @@ def test_run_now_on_archived_project_is_project_archived(seed, conn):
     # Django has no archived check and the binding is still enabled, so
     # run-now marks it due again (DIFF-47).
     archived_status = expect("DIFF-47", django=200, rust=409)
+    # Push the binding's next run far out, so a 200 has to prove it
+    # marked the archived binding due again (the sanity call above
+    # already made it due once).
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scheduler_bindings SET next_run_at = %s WHERE project_id = %s",
+            (FAR_NEXT_RUN_AT, project["id"]),
+        )
+    conn.commit()
     with http.client(key) as c:
         r = c.post(_run_now_url(seed, project, sched))
     assert r.status_code == archived_status, r.text[:400]
     body = r.json()
     if archived_status == 200:
         assert body["enabled"] is True
+        row = db.fetch_one(
+            conn,
+            "SELECT next_run_at <= now() AS due FROM scheduler_bindings WHERE project_id = %s",
+            (project["id"],),
+        )
+        assert row["due"] is True, "Django run-now must mark the archived binding due"
     else:
         assert body["code"] == "project_archived"
         assert body["project"] == project["identifier"]
