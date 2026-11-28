@@ -71,12 +71,18 @@ def is_busy(runner) -> bool:
 
 
 def runner_is_offline(runner, *, now=None) -> bool:
-    """Offline per design §11.1 (status or heartbeat freshness)."""
+    """Offline per design §11.1 (status or heartbeat freshness).
+
+    A ``busy`` runner with a fresh heartbeat is online and working, not
+    offline: "Busy is not unavailable" (§11.1). Treating it as offline made
+    ``dispatch_wait`` say ``runner_offline`` for a working runner and
+    refused a person's run on a busy dedicated runner (PDASHOSS01-419).
+    """
     from pi_dash.runner.models import RunnerStatus
     from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
 
     now = now or timezone.now()
-    if runner.status != RunnerStatus.ONLINE:
+    if runner.status not in (RunnerStatus.ONLINE, RunnerStatus.BUSY):
         return True
     if runner.last_heartbeat_at is None:
         return True
