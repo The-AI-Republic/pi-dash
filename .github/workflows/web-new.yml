@@ -26,6 +26,7 @@ on:
       - "apps/api/pi_dash/runner/serializers.py"
       - "rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json"
       - "rust-api/crates/services/src/app_issues/serializers_detail.rs"
+      - "rust-api/crates/services/src/runner_enroll/serializers/shapes.rs"
       - "rust-api/crates/services/src/runner_runs/shape.rs"
 
 # A new push to a PR replaces its running CI. Pushes to main never
@@ -58,7 +59,7 @@ jobs:
         run: |
           frontend=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            pattern='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml$|pnpm-lock\.yaml$|desktop/scripts/dev-prep\.sh$|desktop/tests/|apps/api/pi_dash/app/serializers/issue\.py$|apps/api/pi_dash/runner/serializers\.py$|rust-api/fixtures/runner_runs/fx-run-08-handlers-web\.golden\.json$|rust-api/crates/services/src/app_issues/serializers_detail\.rs$|rust-api/crates/services/src/runner_runs/shape\.rs$)'
+            pattern='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml$|pnpm-lock\.yaml$|desktop/scripts/dev-prep\.sh$|desktop/tests/|apps/api/pi_dash/app/serializers/issue\.py$|apps/api/pi_dash/runner/serializers\.py$|rust-api/fixtures/runner_runs/fx-run-08-handlers-web\.golden\.json$|rust-api/crates/services/src/app_issues/serializers_detail\.rs$|rust-api/crates/services/src/runner_enroll/serializers/shapes\.rs$|rust-api/crates/services/src/runner_runs/shape\.rs$)'
             git diff --name-only HEAD^1 HEAD | grep -Eq "$pattern" || frontend=false
           fi
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"

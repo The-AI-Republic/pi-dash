@@ -5,10 +5,12 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.github/workflows/web-new.yml",
         "$TURBO_ROOT$/apps/api/pi_dash/app/serializers/issue.py",
         "$TURBO_ROOT$/apps/api/pi_dash/runner/serializers.py",
         "$TURBO_ROOT$/rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json",
         "$TURBO_ROOT$/rust-api/crates/services/src/app_issues/serializers_detail.rs",
+        "$TURBO_ROOT$/rust-api/crates/services/src/runner_enroll/serializers/shapes.rs",
         "$TURBO_ROOT$/rust-api/crates/services/src/runner_runs/shape.rs"
       ]
     }

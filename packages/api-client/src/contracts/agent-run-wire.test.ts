@@ -13,10 +13,16 @@
 // - Django runs list: `AgentRunSerializer.Meta.fields` (apps/api
 //   pi_dash/runner/serializers.py), valued from the DRF rows captured in
 //   fixture FX-RUN-08. A field the serializer drops leaves the row; a
-//   field it adds without a refreshed capture fails the suite.
+//   field it adds without a refreshed capture fails the suite. The nested
+//   `pod_detail` is keyed by `PodMiniSerializer.Meta.fields`.
 // - Rust runs list: the keys of `RUN_WIRE_FIELDS` (runner_runs/shape.rs),
-//   which the Rust tests pin to the handler's output. Its values are the
-//   Django capture's plus `capacity_wait: null`, not Rust handler output.
+//   which the Rust tests pin to the handler's output, with `pod_detail`
+//   keyed by `POD_MINI_WIRE_FIELDS` (runner_enroll/serializers/shapes.rs).
+//   Its values are the Django capture's plus `capacity_wait: null`, not
+//   Rust handler output.
+// The parsers read the source formatting black and rustfmt produce today;
+// a reformat that hides a key throws "could not read every key/field"
+// instead of passing silently.
 // - Rust issue run: the bytes `agent_run_to_representation` must emit in
 //   serializers_detail.rs `run_replays_bytes_with_diagnostic_and_live_state`.
 // - Django issue run: the keys of the dict `_serialize_agent_run` returns
@@ -31,10 +37,12 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod/mini";
 
+import webNewWorkflow from "../../../../.github/workflows/web-new.yml?raw";
 import djangoIssueSerializer from "../../../../apps/api/pi_dash/app/serializers/issue.py?raw";
 import djangoRunSerializer from "../../../../apps/api/pi_dash/runner/serializers.py?raw";
 import runsCapture from "../../../../rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json";
 import rustIssueSerializer from "../../../../rust-api/crates/services/src/app_issues/serializers_detail.rs?raw";
+import rustPodShape from "../../../../rust-api/crates/services/src/runner_enroll/serializers/shapes.rs?raw";
 import rustRunShape from "../../../../rust-api/crates/services/src/runner_runs/shape.rs?raw";
 import apiClientTurbo from "../../turbo.json";
 // `?raw` yields this file's text; the rule reads the module's exports instead.
@@ -48,7 +56,7 @@ type Schema = { shape: Record<string, z.ZodMiniType> };
 
 /** The string items of `pub const <name>: [&str; N] = [...]`, checked against N. */
 function rustConstKeys(source: string, name: string): string[] {
-  const match = new RegExp(`pub const ${name}: \\[&str; (\\d+)\\] = \\[([^\\]]*)\\];`).exec(source);
+  const match = new RegExp(`pub const ${name}: \\[&str; (\\d+)\\] =\\s*\\[([^\\]]*)\\];`).exec(source);
   if (!match?.[1] || match[2] === undefined) throw new Error(`${name} not found`);
   const keys = [...match[2].matchAll(/"([a-z_]+)"/g)].map((item) => item[1] ?? "");
   expect(keys).toHaveLength(Number(match[1]));
@@ -74,13 +82,20 @@ function pythonReturnedKeys(source: string, method: string): string[] {
   return keysOrThrow(method, body[2], /^\s+"(\w+)":/gm);
 }
 
-/** The `Meta.fields` list of a DRF serializer class. */
+/** The `Meta.fields` list of a DRF serializer class, on one line or many. */
 function pythonMetaFields(source: string, className: string): string[] {
   const start = source.indexOf(`class ${className}(`);
   if (start < 0) throw new Error(`${className} not found`);
-  const fields = /\n\s+class Meta:\n[^]*?\n\s+fields = \[\n([^]*?)\n\s+\]/.exec(source.slice(start));
+  const fields = /\n\s+class Meta:\n[^]*?\n\s+fields = \[([^\]]*)\]/.exec(source.slice(start));
   if (!fields?.[1]) throw new Error(`${className} has no Meta.fields list`);
-  return keysOrThrow(className, fields[1], /^\s+"(\w+)",/gm);
+  const items = fields[1]
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const keys = items.map((item) => /^"(\w+)"$/.exec(item)?.[1]);
+  if (keys.length === 0 || keys.some((key) => key === undefined))
+    throw new Error(`${className}: could not read every field`);
+  return keys as string[];
 }
 
 /** The keys `pattern` finds in `body`; any other non-blank line is a parse miss. */
@@ -91,9 +106,13 @@ function keysOrThrow(owner: string, body: string, pattern: RegExp): string[] {
   return keys;
 }
 
-/** A Django runs-list row: the serializer's current fields, valued from a capture. */
+/** A Django runs-list row: the serializers' current fields, valued from a capture. */
 function djangoRunRow(serializerSource: string, capture: Payload): Payload {
-  return assemble(pythonMetaFields(serializerSource, "AgentRunSerializer"), capture);
+  const row = assemble(pythonMetaFields(serializerSource, "AgentRunSerializer"), capture);
+  // pod_detail is PodMiniSerializer's own row: its keys come from that
+  // class, only its values from the capture.
+  const podFields = pythonMetaFields(serializerSource, "PodMiniSerializer");
+  return { ...row, pod_detail: assemble(podFields, capture.pod_detail as Payload) };
 }
 
 /** A payload with exactly `keys`, each value taken from the first source that has it. */
@@ -125,7 +144,15 @@ const djangoListRows = capturedRows.map((row) => djangoRunRow(djangoRunSerialize
 const [djangoListRow] = djangoListRows as [Payload];
 
 const rustListKeys = rustConstKeys(rustRunShape, "RUN_WIRE_FIELDS");
-const rustListRow = assemble(rustListKeys, capturedRows[0] as Payload, { capacity_wait: null });
+
+/** A Rust runs-list row: `RUN_WIRE_FIELDS`, with `pod_detail` keyed by `POD_MINI_WIRE_FIELDS`. */
+function rustRunRow(podShapeSource: string): Payload {
+  const row = assemble(rustListKeys, capturedRows[0] as Payload, { capacity_wait: null });
+  const podFields = rustConstKeys(podShapeSource, "POD_MINI_WIRE_FIELDS");
+  return { ...row, pod_detail: assemble(podFields, row.pod_detail as Payload) };
+}
+
+const rustListRow = rustRunRow(rustPodShape);
 
 const rustIssueKeys = rustConstKeys(rustIssueSerializer, "AGENT_RUN_FIELDS");
 // The Rust test uses synthetic ids (5555…) that are not RFC 4122 UUIDs;
@@ -156,6 +183,28 @@ describe("run payloads as the serializers produce them", () => {
     expect(withoutPrompt).not.toBe(djangoRunSerializer);
     const row = djangoRunRow(withoutPrompt, djangoListRow);
     expect(row).not.toHaveProperty("prompt");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
+  it("drops a pod_detail field from the Django runs-list row when PodMiniSerializer drops it", () => {
+    const withoutIdentifier = djangoRunSerializer.replace(
+      /(class PodMiniSerializer\b[\s\S]*?fields = \[[^\]]*?), "project_identifier"/,
+      "$1"
+    );
+    expect(withoutIdentifier).not.toBe(djangoRunSerializer);
+    const row = djangoRunRow(withoutIdentifier, djangoListRow);
+    expect(row.pod_detail).not.toHaveProperty("project_identifier");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
+  it("drops a pod_detail field from the Rust runs-list row when POD_MINI_WIRE_FIELDS drops it", () => {
+    const withoutIdentifier = rustPodShape.replace(
+      /(pub const POD_MINI_WIRE_FIELDS: \[&str; )5(\] =\s*\[[^\]]*?), "project_identifier"/,
+      (_, head: string, list: string) => `${head}4${list}`
+    );
+    expect(withoutIdentifier).not.toBe(rustPodShape);
+    const row = rustRunRow(withoutIdentifier);
+    expect(row.pod_detail).not.toHaveProperty("project_identifier");
     expect(AgentRun.safeParse(row).success).toBe(false);
   });
 
@@ -216,14 +265,31 @@ describe("run payloads as the serializers produce them", () => {
     for (const row of [...djangoListRows, rustListRow]) expect(unmodelledKeys(AgentRun, row)).toEqual(ignored);
   });
 
-  it("makes Turbo re-run the test when a backend source it reads changes", () => {
-    // The files above live outside this package, so Turbo's default
-    // inputs would replay a cached pass after a backend-only edit.
-    const outside = [...guardSource.matchAll(/from "\.\.\/\.\.\/\.\.\/\.\.\/([^"?]+)(?:\?raw)?";/g)].map(
-      (item) => `$TURBO_ROOT$/${item[1] ?? ""}`
+  // The files this guard imports from outside the package, repo-relative.
+  const outside = [...guardSource.matchAll(/from "\.\.\/\.\.\/\.\.\/\.\.\/([^"?]+)(?:\?raw)?";/g)].map(
+    (item) => item[1] ?? ""
+  );
+
+  it("makes Turbo re-run the test when a source it reads changes", () => {
+    // These files live outside this package, so Turbo's default inputs
+    // would replay a cached pass after a backend-only edit.
+    expect(outside).toHaveLength(7);
+    expect(apiClientTurbo.tasks.test.inputs).toEqual(
+      expect.arrayContaining(["$TURBO_DEFAULT$", ...outside.map((path) => `$TURBO_ROOT$/${path}`)])
     );
-    expect(outside).toHaveLength(5);
-    expect(apiClientTurbo.tasks.test.inputs).toEqual(expect.arrayContaining(["$TURBO_DEFAULT$", ...outside]));
+  });
+
+  it("makes web-new CI run the guard when a source it reads changes", () => {
+    const pushPaths = [...webNewWorkflow.matchAll(/^ {6}- "([^"]+)"$/gm)].map((item) => item[1]);
+    const prPattern = /pattern='([^']+)'/.exec(webNewWorkflow)?.[1];
+    if (!prPattern) throw new Error("web-new.yml has no pull_request path pattern");
+    const prFilter = new RegExp(prPattern);
+    // The workflow file itself is matched by its own web-new*.yml entry.
+    for (const path of outside.filter((item) => !item.startsWith(".github/"))) {
+      expect(pushPaths).toContain(path);
+      expect(prFilter.test(path), path).toBe(true);
+    }
+    expect(prFilter.test(".github/workflows/web-new.yml")).toBe(true);
   });
 
   it("does not require queue_position but still accepts it from older servers", () => {
