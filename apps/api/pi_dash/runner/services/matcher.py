@@ -164,15 +164,29 @@ def _last_served_dedicated(runner: Runner) -> bool:
 def borrowable_pin_q(runner: Runner) -> Q:
     """Runs pinned for locality to another runner that is working now.
 
+    "Working now" means the pinned runner is online (``online``/``busy``
+    with a fresh heartbeat, as in ``runner_is_offline``) and holds a
+    BUSY_STATUSES run. A silent runner's pins are left to the offline
+    pin-release sweep and its grace period.
+
     ``runner`` may take such a run (PDASHOSS01-419) when it takes pod work;
     the caller adds that gate. Also used by the read-side ``runs_ahead``.
+    The runner check is a subquery, not a join, so the matcher's
+    ``select_for_update`` does not lock the pinned runner's row.
     """
-    from pi_dash.runner.models import PinKind
+    from pi_dash.runner.models import PinKind, RunnerStatus
 
     return (
         Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
         & Q(pin_kind=PinKind.LOCALITY, pinned_runner__isnull=False)
         & ~Q(pinned_runner=runner)
+        & models.Exists(
+            Runner.objects.filter(
+                pk=models.OuterRef("pinned_runner_id"),
+                status__in=(RunnerStatus.ONLINE, RunnerStatus.BUSY),
+                last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            )
+        )
         & models.Exists(
             AgentRun.objects.filter(runner_id=models.OuterRef("pinned_runner_id"), status__in=BUSY_STATUSES)
         )

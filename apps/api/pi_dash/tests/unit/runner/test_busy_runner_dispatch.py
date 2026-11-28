@@ -12,6 +12,7 @@ for a pinned runner that is online and working.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -297,6 +298,30 @@ def test_locality_pin_on_idle_runner_is_not_borrowed(db, workspace, project, cre
     queued = _queue_locality(_make_issue(workspace, project, state, create_user), create_user, pod, first)
     second = _make_runner(create_user, workspace, pod, "second")
     # ``first`` is idle (no busy-status run): its own drain will serve it.
+    assert drain_for_runner_by_id(second.pk) is False
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.QUEUED
+    assert queued.pinned_runner_id == first.pk
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "silent_for"),
+    [(RunnerStatus.BUSY, timedelta(minutes=10)), (RunnerStatus.OFFLINE, timedelta(0))],
+)
+def test_locality_pin_on_silent_runner_is_not_borrowed(
+    db, workspace, project, create_user, pod, state, status, silent_for
+):
+    """A silent runner's stale RUNNING row is no proof it is working.
+
+    Its locality pins wait for the offline pin-release sweep and its grace
+    period rather than being borrowed at once.
+    """
+    first = _make_runner(create_user, workspace, pod, "first")
+    _occupy(first, _make_issue(workspace, project, state, create_user, name="busy"), create_user, pod)
+    Runner.objects.filter(pk=first.pk).update(status=status, last_heartbeat_at=timezone.now() - silent_for)
+    queued = _queue_locality(_make_issue(workspace, project, state, create_user), create_user, pod, first)
+    second = _make_runner(create_user, workspace, pod, "second")
     assert drain_for_runner_by_id(second.pk) is False
     queued.refresh_from_db()
     assert queued.status == AgentRunStatus.QUEUED
