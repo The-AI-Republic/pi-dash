@@ -666,7 +666,7 @@ impl RunnerSpawnCtx {
                 None => self.add_runner_locked(runner).await?,
                 Some(running) if same_block(&running.config, &runner) => {}
                 Some(running) => {
-                    ensure_idle(&running)?;
+                    ensure_idle_settled(&running).await?;
                     self.stop_runner_locked(running.runner_id).await;
                     self.add_runner_locked(runner).await?;
                 }
@@ -719,7 +719,7 @@ impl RunnerSpawnCtx {
             .collect();
         let mut restarted = 0;
         for inst in stale {
-            if let Err(e) = ensure_idle(&inst) {
+            if let Err(e) = ensure_idle_settled(&inst).await {
                 tracing::info!(
                     runner = %inst.name,
                     "credentials changed; restarting once the runner is idle: {e:#}"
@@ -768,7 +768,7 @@ impl RunnerSpawnCtx {
                     if desired == inst.machine_token {
                         break;
                     }
-                    if ensure_idle(&inst).is_ok() {
+                    if ensure_idle_settled(&inst).await.is_ok() {
                         ctx.pending_idle_restarts
                             .lock()
                             .expect("idle-restart set poisoned")
@@ -848,7 +848,7 @@ impl RunnerSpawnCtx {
         changes: RunnerChanges,
     ) -> Result<RunnerConfig> {
         let name = inst.name.clone();
-        ensure_idle(&inst)?;
+        ensure_idle_settled(&inst).await?;
         let runner_id = inst.runner_id;
 
         // Validate against the current file before stopping anything, so
@@ -1343,6 +1343,19 @@ fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// [`ensure_idle`] after re-checking the units of local chat runtimes that
+/// ended unresolved (review of #3502 at 7ba3185): otherwise only an Assign
+/// or a desktop warm/send re-checks them, and an idle runner whose
+/// leftover chat processes have exited would refuse every restart (a
+/// re-login, a reconfigure) indefinitely. The re-check proves ownership
+/// before any signal, like every other cleanup.
+async fn ensure_idle_settled(inst: &RunnerInstance) -> Result<()> {
+    if inst.chat_sessions.cleanup_pending() {
+        inst.chat_sessions.settle_ended().await;
+    }
+    ensure_idle(inst)
 }
 
 /// Apply `changes` to runner `runner_id`'s block in `cfg`.
@@ -10236,6 +10249,30 @@ mod tests {
         );
         drop(ending);
         assert!(ensure_idle(&inst).is_ok());
+    }
+
+    /// Review of #3502 at 7ba3185 (MUST 4): a local chat unit left
+    /// unresolved used to be re-checked only by an Assign or a desktop
+    /// warm/send, so once its processes exited an otherwise idle runner
+    /// still refused every restart. The restart path re-checks it first.
+    #[tokio::test]
+    async fn a_resolved_lingering_chat_unit_does_not_block_a_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(
+            runner_config("lingering", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        inst.chat_sessions
+            .push_lingering_for_test(crate::util::chat_unit::ChatUnit::new(uuid::Uuid::new_v4()))
+            .await;
+        assert!(ensure_idle(&inst).is_err());
+        assert!(
+            ensure_idle_settled(&inst).await.is_ok(),
+            "a lingering unit whose processes are gone blocks the restart"
+        );
     }
 
     /// Review item 4 on #3499 at cc5a1a7: an internal error (here the

@@ -256,6 +256,12 @@ impl ChatRegistry {
             .map_or(true, |lingering| !lingering.is_empty())
     }
 
+    /// Keep `unit` as if its runtime had ended unresolved (tests only).
+    #[cfg(test)]
+    pub(crate) async fn push_lingering_for_test(&self, unit: crate::util::chat_unit::ChatUnit) {
+        self.lingering.lock().await.push(unit);
+    }
+
     /// Count one runtime as being ended, as an eviction does, until the
     /// guard drops.
     #[cfg(test)]
