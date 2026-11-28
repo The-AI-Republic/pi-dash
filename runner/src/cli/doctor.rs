@@ -746,9 +746,11 @@ struct ClaudeAuthProbe {
     /// `None` when the CLI has no `auth status` subcommand or its output
     /// could not be parsed.
     status: Option<ClaudeStatus>,
-    /// First credential env var that is set and non-empty.
+    /// First credential env var that is set and non-empty in the agent's
+    /// inherited environment and not overridden by Claude's settings.
     env_var: Option<&'static str>,
-    /// First third-party-provider switch that is enabled (truthy).
+    /// First third-party-provider switch that is enabled (truthy) in the
+    /// inherited environment and not overridden by Claude's settings.
     third_party_provider: Option<&'static str>,
     credentials: CredentialsFile,
     /// `apiKeyHelper` in user or managed Claude settings.
@@ -778,6 +780,16 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
     if let Some(status) = &p.status {
         if let Some(why) = provider {
             return AuthStatus::Unknown(why);
+        }
+        // `api_key_helper` means Claude found a helper configured, not that
+        // the helper produced a key (Claude does not run it for status).
+        if status.logged_in && status.auth_method.as_deref() == Some("api_key_helper") {
+            return AuthStatus::Unknown(match &p.api_key_helper {
+                ConfigKey::Found(path) => api_key_helper_detail(path),
+                _ => "`claude auth status` reports an apiKeyHelper login; doctor does not run \
+                      the helper"
+                    .to_string(),
+            });
         }
         if status.logged_in {
             let method = status.auth_method.as_deref().unwrap_or("unknown method");
@@ -949,14 +961,22 @@ fn claude_config_files(
 
 /// System-wide managed settings, which can also set `apiKeyHelper`.
 fn claude_managed_settings_paths() -> Vec<PathBuf> {
-    let p = if cfg!(target_os = "macos") {
-        "/Library/Application Support/ClaudeCode/managed-settings.json"
-    } else if cfg!(target_os = "windows") {
-        r"C:\ProgramData\ClaudeCode\managed-settings.json"
-    } else {
-        "/etc/claude-code/managed-settings.json"
+    managed_settings_paths_for(std::env::consts::OS)
+}
+
+/// Managed settings locations for `os`, lowest precedence first. On
+/// Windows current Claude Code reads `C:\Program Files\ClaudeCode`; older
+/// releases read `C:\ProgramData\ClaudeCode`, kept as the lower fallback.
+fn managed_settings_paths_for(os: &str) -> Vec<PathBuf> {
+    let paths: &[&str] = match os {
+        "macos" => &["/Library/Application Support/ClaudeCode/managed-settings.json"],
+        "windows" => &[
+            r"C:\ProgramData\ClaudeCode\managed-settings.json",
+            r"C:\Program Files\ClaudeCode\managed-settings.json",
+        ],
+        _ => &["/etc/claude-code/managed-settings.json"],
     };
-    vec![PathBuf::from(p)]
+    paths.iter().map(PathBuf::from).collect()
 }
 
 /// Whether the JSON file at `path` sets `key` to a non-empty string. The
@@ -965,45 +985,63 @@ fn read_config_key(path: &Path, key: &str) -> ConfigKey {
     read_config_with(path, |v| non_empty_str(v.get(key)))
 }
 
-/// Whether the effective Claude settings enable a cloud-provider switch.
+/// Where the effective value of a Claude env variable comes from.
+#[derive(Debug)]
+struct ResolvedEnv {
+    /// An enabled variable whose value comes from the inherited env.
+    inherited: Option<&'static str>,
+    /// An enabled variable set by a settings file (`Found`), or why
+    /// settings could not rule one out (`Unreadable`), else `Absent`.
+    settings: ConfigKey,
+}
+
+/// Whether a cloud-provider switch is effectively enabled.
 ///
 /// `paths` are ordered lowest to highest precedence (user settings, then
 /// managed settings). Claude Code merges the settings `env` blocks key by
-/// key with the higher file winning, so each switch takes its value from
-/// the highest-precedence file that sets it, explicit `"0"`/`false`
-/// included. Returns the file whose enabled value is in force; when an
-/// unreadable file outranks the deciding one, the switch cannot be ruled
-/// out (an enabled lower value stays `Found`, otherwise `Unreadable`).
-fn resolve_settings_provider(paths: &[PathBuf]) -> ConfigKey {
-    resolve_settings_env(paths, CLAUDE_THIRD_PARTY_ENV_VARS, setting_truthy, false)
+/// key with the higher file winning, and applies the result over the
+/// inherited environment, so each switch takes its value from the
+/// highest-precedence file that sets it (explicit `"0"`/`false` included)
+/// and from `inherited` only when no file sets it. When an unreadable file
+/// outranks the deciding value, an enabled switch is still reported.
+fn resolve_provider_env(paths: &[PathBuf], inherited: &[String]) -> ResolvedEnv {
+    resolve_env(
+        paths,
+        CLAUDE_THIRD_PARTY_ENV_VARS,
+        inherited,
+        setting_truthy,
+        false,
+    )
 }
 
-/// Whether the effective Claude settings set an auth variable to a
-/// non-empty value, resolved by the same precedence as
-/// [`resolve_settings_provider`]: an empty value in managed settings
-/// overrides the user's token. A value an unreadable file outranks is not
-/// counted as a login (`Unreadable`). Values are never returned.
-fn resolve_settings_auth(paths: &[PathBuf]) -> ConfigKey {
-    resolve_settings_env(
+/// Whether an auth variable is effectively non-empty, by the same
+/// precedence as [`resolve_provider_env`]: an empty value in settings
+/// overrides an exported token, and an empty managed value overrides the
+/// user's. A value an unreadable file outranks is not counted as a login
+/// (`Unreadable`). Values are never returned.
+fn resolve_auth_env(paths: &[PathBuf], inherited: &[String]) -> ResolvedEnv {
+    resolve_env(
         paths,
         CLAUDE_AUTH_ENV_VARS,
+        inherited,
         |v| non_empty_str(Some(v)),
         true,
     )
 }
 
 /// For each of `vars`, take its value from the highest-precedence settings
-/// file that sets it and test it with `enabled`. The first enabled one is
-/// `Found` with its file. An unreadable file above the deciding one leaves
-/// the answer open: with `unreadable_overrides` the enabled value is then
-/// not counted; otherwise it still is. Else `Unreadable` if any file was
-/// unreadable, or `Absent`.
-fn resolve_settings_env(
+/// file that sets it and test it with `enabled`; when no file sets it, it
+/// is enabled when named in `inherited`. The first enabled one wins. An
+/// unreadable file above the deciding value leaves the answer open: with
+/// `unreadable_overrides` the enabled value is then not counted;
+/// otherwise it still is. Else `Unreadable` if any file was unreadable.
+fn resolve_env(
     paths: &[PathBuf],
-    vars: &[&str],
+    vars: &[&'static str],
+    inherited: &[String],
     enabled: impl Fn(&serde_json::Value) -> bool,
     unreadable_overrides: bool,
-) -> ConfigKey {
+) -> ResolvedEnv {
     // Highest precedence first.
     let envs: Vec<(&PathBuf, SettingsEnv)> = paths
         .iter()
@@ -1013,6 +1051,7 @@ fn resolve_settings_env(
     let mut unreadable: Option<&PathBuf> = None;
     for var in vars {
         let mut outranked = false;
+        let mut decided: Option<(bool, Option<&PathBuf>)> = None;
         for (path, env) in &envs {
             match env {
                 SettingsEnv::Unreadable => {
@@ -1020,16 +1059,30 @@ fn resolve_settings_env(
                     unreadable.get_or_insert(path);
                 }
                 SettingsEnv::Env(map) if map.contains_key(*var) => {
-                    if enabled(&map[*var]) && !(outranked && unreadable_overrides) {
-                        return ConfigKey::Found((*path).clone());
-                    }
+                    decided = Some((enabled(&map[*var]), Some(*path)));
                     break;
                 }
                 _ => {}
             }
         }
+        let (on, source) = decided.unwrap_or_else(|| (inherited.iter().any(|s| s == var), None));
+        if on && !(outranked && unreadable_overrides) {
+            return match source {
+                Some(path) => ResolvedEnv {
+                    inherited: None,
+                    settings: ConfigKey::Found(path.clone()),
+                },
+                None => ResolvedEnv {
+                    inherited: Some(var),
+                    settings: ConfigKey::Absent,
+                },
+            };
+        }
     }
-    unreadable.map_or(ConfigKey::Absent, |p| ConfigKey::Unreadable(p.clone()))
+    ResolvedEnv {
+        inherited: None,
+        settings: unreadable.map_or(ConfigKey::Absent, |p| ConfigKey::Unreadable(p.clone())),
+    }
 }
 
 /// The `env` block of one Claude settings file.
@@ -1288,9 +1341,6 @@ fn build_claude_probe(
     managed_settings: &[PathBuf],
     is_macos: bool,
 ) -> ClaudeAuthProbe {
-    let find = |list: &[&'static str], set: &[String]| {
-        list.iter().copied().find(|v| set.iter().any(|s| s == v))
-    };
     let credentials = claude_credentials_path(
         env.config_dir.clone().map(Into::into),
         env.home.clone().map(PathBuf::from),
@@ -1302,14 +1352,16 @@ fn build_claude_probe(
         env.home.clone().map(PathBuf::from),
         managed_settings,
     );
+    let auth = resolve_auth_env(&settings, &env.set_vars);
+    let provider = resolve_provider_env(&settings, &env.providers);
     ClaudeAuthProbe {
         status,
-        env_var: find(CLAUDE_AUTH_ENV_VARS, &env.set_vars),
-        third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS, &env.providers),
+        env_var: auth.inherited,
+        third_party_provider: provider.inherited,
         credentials,
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
-        settings_env_var: resolve_settings_auth(&settings),
-        settings_provider: resolve_settings_provider(&settings),
+        settings_env_var: auth.settings,
+        settings_provider: provider.settings,
         stored_api_key: scan_config_key(global.as_slice(), "primaryApiKey"),
         is_macos,
     }
@@ -3303,5 +3355,85 @@ mod tests {
             DaemonReport::Outdated(m) => assert!(m.contains("pidash restart"), "{m}"),
             other => panic!("expected outdated daemon, got {other:?}"),
         }
+    }
+    // ---- Review of 305d102 ----
+
+    #[test]
+    fn status_api_key_helper_login_is_unverified() {
+        // Claude answers `loggedIn: true, authMethod: "api_key_helper"`
+        // without running the helper, so a broken helper is not a login.
+        let p = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: true,
+                auth_method: Some("api_key_helper".into()),
+            }),
+            ..probe()
+        };
+        match classify_claude_auth(&p) {
+            AuthStatus::Unknown(d) => assert!(d.contains("apiKeyHelper"), "{d}"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_env_overrides_inherited_variables() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let user = home.path().join(".claude").join("settings.json");
+        let env = AgentEnvSnapshot {
+            set_vars: vec!["ANTHROPIC_API_KEY".into()],
+            providers: vec!["CLAUDE_CODE_USE_BEDROCK".into()],
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        // Settings blank the exported key and switch Bedrock off.
+        std::fs::write(
+            &user,
+            r#"{"env":{"ANTHROPIC_API_KEY":"","CLAUDE_CODE_USE_BEDROCK":"0"}}"#,
+        )
+        .unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.env_var, None);
+        assert_eq!(p.third_party_provider, None);
+        assert_eq!(p.settings_env_var, ConfigKey::Absent);
+        assert_eq!(p.settings_provider, ConfigKey::Absent);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+        let logged_out = Some(ClaudeStatus {
+            logged_in: false,
+            auth_method: Some("none".into()),
+        });
+        let p = build_claude_probe(logged_out, &env, &[], false);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+
+        // Settings that do not mention a variable leave the inherited one.
+        std::fs::write(&user, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":""}}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.env_var, Some("ANTHROPIC_API_KEY"));
+        assert_eq!(p.third_party_provider, Some("CLAUDE_CODE_USE_BEDROCK"));
+    }
+
+    #[test]
+    fn windows_managed_settings_include_the_current_path() {
+        let paths = managed_settings_paths_for("windows");
+        // Highest precedence last: the current location wins.
+        assert_eq!(
+            paths.last(),
+            Some(&PathBuf::from(
+                r"C:\Program Files\ClaudeCode\managed-settings.json"
+            ))
+        );
+        assert!(paths.contains(&PathBuf::from(
+            r"C:\ProgramData\ClaudeCode\managed-settings.json"
+        )));
+        assert_eq!(
+            managed_settings_paths_for("linux"),
+            vec![PathBuf::from("/etc/claude-code/managed-settings.json")]
+        );
     }
 }
