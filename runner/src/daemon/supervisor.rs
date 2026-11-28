@@ -174,8 +174,12 @@ impl Supervisor {
         // processes in a runner's working copy: keep that runner reserved
         // until a re-check resolves it (review of #3501 at 1524d8e).
         #[cfg(unix)]
+        let recovery = RecoveryReservations::new(recovery_hold);
+        #[cfg(not(unix))]
+        let recovery = RecoveryReservations::default();
+        #[cfg(unix)]
         hold_runners_for_recovery(
-            recovery_hold,
+            recovery.clone(),
             instances
                 .iter()
                 .map(|i| (i.runner_id, i.state.clone()))
@@ -294,6 +298,7 @@ impl Supervisor {
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
             instances: ipc_instances.clone(),
+            recovery: recovery.clone(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -598,6 +603,9 @@ pub(crate) struct RunnerSpawnCtx {
     /// (reconfigure, credential change) while the others keep running,
     /// and every runner is aborted on daemon shutdown.
     tasks: Arc<std::sync::Mutex<HashMap<uuid::Uuid, SpawnedInstanceTasks>>>,
+    /// Crash-recovery reservations: a runner added while a crashed
+    /// daemon's group that may be its own is unresolved starts reserved.
+    recovery: RecoveryReservations,
     /// Serialises every add / stop / restart of a runner.
     activation_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serialises turning the engine on for a project (`EngineRunnerAdd`,
@@ -1250,6 +1258,11 @@ impl RunnerSpawnCtx {
             &self.daemon,
         )
         .await?;
+        // Before the runner is published or started: its working copy may
+        // still hold a crashed daemon's unresolved processes.
+        self.recovery
+            .reserve_if_held(inst.runner_id, &inst.state)
+            .await;
         {
             let mut mailboxes = self.mailboxes.write().await;
             mailboxes.insert(inst.runner_id, inst.mailbox_tx.clone());
@@ -2070,53 +2083,106 @@ async fn replay_drain_journal_once(
     delivered
 }
 
-/// Reserve every runner a held recovery group may belong to, and re-check
-/// the held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
-/// releasing each runner once nothing held affects it. While reserved, a
-/// runner refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+/// Crash-recovery reservations, shared by daemon start and the hot-add
+/// path (review of #3501 at 591a610, MUST 6): a runner a held recovery
+/// group may belong to stays reserved, whether it was there at start or
+/// added while the group is still unresolved. While reserved, a runner
+/// refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+#[derive(Clone, Default)]
+pub(crate) struct RecoveryReservations(Arc<std::sync::Mutex<RecoveryReservationState>>);
+
+#[derive(Default)]
+struct RecoveryReservationState {
+    hold: crate::util::group_recovery::RecoveryHold,
+    /// The runners this hold reserved, to release once it stops affecting them.
+    reserved: Vec<(uuid::Uuid, StateHandle)>,
+}
+
+impl RecoveryReservations {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn new(hold: crate::util::group_recovery::RecoveryHold) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(RecoveryReservationState {
+            hold,
+            reserved: Vec::new(),
+        })))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecoveryReservationState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reserve `runner_id` before it starts taking work when a held group
+    /// may belong to it. `true`: reserved.
+    async fn reserve_if_held(&self, runner_id: uuid::Uuid, state: &StateHandle) -> bool {
+        let held = {
+            let mut s = self.lock();
+            let held = s.hold.affects(runner_id);
+            if held {
+                s.reserved.push((runner_id, state.clone()));
+            }
+            held
+        };
+        if held {
+            state.set_cleanup_reserved(true).await;
+        }
+        held
+    }
+
+    /// Install a re-checked hold and release every reserved runner it no
+    /// longer affects. `false` once nothing is held or reserved.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    async fn update(&self, hold: crate::util::group_recovery::RecoveryHold) -> bool {
+        let (release, active) = {
+            let mut s = self.lock();
+            s.hold = hold;
+            let (keep, release): (Vec<_>, Vec<_>) = std::mem::take(&mut s.reserved)
+                .into_iter()
+                .partition(|(id, _)| s.hold.affects(*id));
+            s.reserved = keep;
+            (release, !s.hold.is_empty() || !s.reserved.is_empty())
+        };
+        for (_, state) in release {
+            state.set_cleanup_reserved(false).await;
+        }
+        active
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn hold(&self) -> crate::util::group_recovery::RecoveryHold {
+        self.lock().hold.clone()
+    }
+}
+
+/// Reserve every runner `reservations` holds a group for, and re-check the
+/// held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
+/// releasing each runner once nothing held affects it.
 #[cfg(unix)]
 async fn hold_runners_for_recovery(
-    mut hold: crate::util::group_recovery::RecoveryHold,
+    reservations: RecoveryReservations,
     runners: Vec<(uuid::Uuid, StateHandle)>,
 ) {
-    if hold.is_empty() {
+    if reservations.hold().is_empty() {
         return;
     }
-    let held = apply_recovery_hold(&hold, &runners, Vec::new()).await;
+    let mut held = 0;
+    for (id, state) in &runners {
+        held += usize::from(reservations.reserve_if_held(*id, state).await);
+    }
     tracing::warn!(
-        runners = held.len(),
+        runners = held,
         "process groups of a crashed daemon could not be emptied; their runners stay reserved"
     );
     tokio::spawn(async move {
-        let mut held = held;
-        while !held.is_empty() {
+        loop {
             tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK).await;
+            let mut hold = reservations.hold();
             hold.recheck().await;
-            held = apply_recovery_hold(&hold, &runners, held).await;
+            if !reservations.update(hold).await {
+                break;
+            }
         }
         tracing::info!("crashed daemon's process groups resolved; runners released");
     });
-}
-
-/// Reserve the runners `hold` affects and release the ones in `held` (the
-/// runners it reserved before) it no longer affects. Returns the runners it
-/// now reserves.
-#[cfg(unix)]
-async fn apply_recovery_hold(
-    hold: &crate::util::group_recovery::RecoveryHold,
-    runners: &[(uuid::Uuid, StateHandle)],
-    held: Vec<uuid::Uuid>,
-) -> Vec<uuid::Uuid> {
-    let mut now = Vec::new();
-    for (id, state) in runners {
-        if hold.affects(*id) {
-            state.set_cleanup_reserved(true).await;
-            now.push(*id);
-        } else if held.contains(id) {
-            state.set_cleanup_reserved(false).await;
-        }
-    }
-    now
 }
 
 /// For the shutdown drain: take `run_id`'s held terminal report (or
@@ -6693,6 +6759,7 @@ mod tests {
             tokens,
             paths: paths.clone(),
             daemon,
+            recovery: RecoveryReservations::default(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mailboxes: Arc::new(RwLock::new(
                 insts
@@ -8820,26 +8887,44 @@ mod tests {
             runners: vec![],
             cli: None,
         };
-        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let runners = vec![(a, StateHandle::new(cfg())), (b, StateHandle::new(cfg()))];
-        let hold = crate::util::group_recovery::RecoveryHold::for_tests(vec![Some(a)]);
-        let held = apply_recovery_hold(&hold, &runners, Vec::new()).await;
-        assert_eq!(held, vec![a]);
+        let (a, b, c) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (sa, sb, sc) = (
+            StateHandle::new(cfg()),
+            StateHandle::new(cfg()),
+            StateHandle::new(cfg()),
+        );
+        let reservations =
+            RecoveryReservations::new(crate::util::group_recovery::RecoveryHold::for_tests(vec![
+                Some(a),
+                Some(c),
+            ]));
+        assert!(reservations.reserve_if_held(a, &sa).await);
+        assert!(!reservations.reserve_if_held(b, &sb).await);
         assert!(
-            runners[0].1.cleanup_reserved(),
+            sa.cleanup_reserved(),
             "the affected runner was not reserved"
         );
-        assert!(!runners[1].1.cleanup_reserved());
-        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(!sb.cleanup_reserved());
+        // Review of #3501 at 591a610 (MUST 6): a runner added while its
+        // group is still unresolved starts reserved too.
+        assert!(reservations.reserve_if_held(c, &sc).await);
         assert!(
-            apply_recovery_hold(&resolved, &runners, held)
-                .await
-                .is_empty()
+            sc.cleanup_reserved(),
+            "a runner added during recovery started unreserved"
         );
+        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(!reservations.update(resolved).await);
         assert!(
-            !runners[0].1.cleanup_reserved(),
+            !sa.cleanup_reserved() && !sc.cleanup_reserved(),
             "the reservation outlived recovery"
         );
+        // Once resolved, a runner added later is not reserved.
+        let d = StateHandle::new(cfg());
+        assert!(!reservations.reserve_if_held(a, &d).await);
     }
 
     /// Review of #3501 at 1524d8e (MUST 4): once the shutdown drain has

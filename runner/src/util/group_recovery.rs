@@ -277,7 +277,7 @@ impl Recovery {
 /// Groups whose recovery is unresolved, for runner admission: a runner a
 /// held group affects stays reserved, since the old run's processes may
 /// still use its working copy.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RecoveryHold {
     dir: PathBuf,
     held: Vec<GroupRecord>,
