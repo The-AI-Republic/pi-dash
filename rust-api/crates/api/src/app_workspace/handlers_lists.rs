@@ -531,6 +531,7 @@ fn states_stmt(slug: &str, user_id: uuid::Uuid) -> SelectStatement {
     .and_where(col("projects", projects::Column::ArchivedAt).is_null())
     .and_where(col("states", states::Column::IsTriage).eq(false))
     .and_where(col("states", states::Column::Group).ne("triage"))
+    .and_where(col("states", states::Column::IsHidden).eq(false))
     .and_where(col("states", states::Column::DeletedAt).is_null())
     .order_by((a("states"), states::Column::Sequence), Order::Asc);
     stmt

@@ -30,63 +30,84 @@ DEFAULT_STATES = [
         "sequence": 15000,
         "group": StateGroup.BACKLOG.value,
         "default": True,
+        "is_hidden": False,
     },
     {
         "name": "Todo",
         "color": "#60646C",
         "sequence": 25000,
         "group": StateGroup.UNSTARTED.value,
+        "is_hidden": True,
+    },
+    {
+        "name": "Paused",
+        "color": "#DC2626",
+        "sequence": 30000,
+        "group": StateGroup.UNSTARTED.value,
+        "is_hidden": False,
     },
     {
         "name": "In Progress",
         "color": "#F59E0B",
         "sequence": 35000,
         "group": StateGroup.STARTED.value,
+        "is_hidden": False,
     },
     {
         "name": "In Review",
         "color": "#5B5BD6",
         "sequence": 40000,
         "group": StateGroup.REVIEW.value,
+        "is_hidden": False,
     },
     {
         "name": "In Test",
         "color": "#14B8A6",
         "sequence": 42500,
         "group": StateGroup.TEST.value,
+        "is_hidden": False,
     },
     {
         "name": "AI Completed",
         "color": "#30A46C",
         "sequence": 43750,
         "group": StateGroup.COMPLETED.value,
+        "is_hidden": False,
     },
     {
         "name": "Done",
         "color": "#46A758",
         "sequence": 45000,
         "group": StateGroup.COMPLETED.value,
+        "is_hidden": False,
     },
     {
         "name": "Cancelled",
         "color": "#9AA4BC",
         "sequence": 55000,
         "group": StateGroup.CANCELLED.value,
+        "is_hidden": False,
     },
     {
         "name": "Triage",
         "color": "#4E5355",
         "sequence": 65000,
         "group": StateGroup.TRIAGE.value,
+        "is_hidden": False,
     },
 ]
 
 
 class StateManager(SoftDeletionManager):
-    """Default manager - excludes triage states"""
+    """Default manager - excludes triage and hidden states"""
 
     def get_queryset(self):
-        return super().get_queryset().exclude(group=StateGroup.TRIAGE.value)
+        return (
+            super()
+            .get_queryset()
+            .exclude(group=StateGroup.TRIAGE.value)
+            .exclude(is_hidden=True)
+        )
 
 
 class TriageStateManager(SoftDeletionManager):
@@ -108,6 +129,7 @@ class State(ProjectBaseModel):
         max_length=20,
     )
     is_triage = models.BooleanField(default=False)
+    is_hidden = models.BooleanField(default=False)
     default = models.BooleanField(default=False)
     external_source = models.CharField(max_length=255, null=True, blank=True)
     external_id = models.CharField(max_length=255, blank=True, null=True)

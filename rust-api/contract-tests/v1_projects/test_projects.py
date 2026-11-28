@@ -71,9 +71,10 @@ def test_create_roundtrip(seed, conn):
     assert pod == {"name": "%s_pod_1" % ident,
                    "description": "Auto-created default pod. Add tier pods anytime.",
                    "is_default": True, "created_by_id": None}
-    # bulk_create bypasses State.save(), so the 9 seeded default states
-    # keep the slug field default '' (db/models/state.py:97,132).
-    # NEWPIDASH-305 added "AI Completed" between In Test and Done.
+    # bulk_create bypasses State.save(), so the 10 seeded default states
+    # keep the slug field default '' (db/models/state.py:124,160).
+    # NEWPIDASH-305 added "AI Completed" between In Test and Done;
+    # NEWPIDASH-417 added "Paused" between Todo and In Progress.
     with conn.cursor() as cur:
         cur.execute(
             "SELECT name, slug FROM states WHERE project_id = %s ORDER BY sequence",
@@ -81,14 +82,21 @@ def test_create_roundtrip(seed, conn):
         )
         seeded = cur.fetchall()
     assert [name for name, _ in seeded] == [
-        "Backlog", "Todo", "In Progress", "In Review",
+        "Backlog", "Todo", "Paused", "In Progress", "In Review",
         "In Test", "AI Completed", "Done", "Cancelled", "Triage",
     ]
-    assert [slug for _, slug in seeded] == [""] * 9
+    assert [slug for _, slug in seeded] == [""] * 10
     # Creating default states is part of create: the project must be usable.
     states = http.get(seed["keys"]["states"],
-                      f"{base(seed)}/{body['id']}/states/").json()
+                      f"{base(seed)}/{body['id']}/states/",
+                      params={"per_page": "100"}).json()
     assert states["total_count"] >= 1
+    # NEWPIDASH-417: the states listing hides Todo (like triage) and
+    # shows the new Paused default.
+    listed = [s["name"] for s in states["results"]]
+    assert "Paused" in listed
+    assert "Todo" not in listed
+    assert "Triage" not in listed
 
 
 def test_create_conflicts(seed):

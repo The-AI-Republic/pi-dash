@@ -38,8 +38,12 @@ def test_test_group_is_in_the_canonical_lifecycle_order():
     # NEWPIDASH-305 added "AI Completed" as a second completed-group state
     # between "In Test" and "Done", so the group list repeats "completed"
     # (both are terminal) while canonical order is preserved.
+    # NEWPIDASH-417 added "Paused" as a second unstarted-group state
+    # between "Todo" and "In Progress", so "unstarted" repeats the same
+    # way while canonical order is preserved.
     assert tuple(state["group"] for state in DEFAULT_STATES if state["group"] != StateGroup.TRIAGE) == (
         "backlog",
+        "unstarted",
         "unstarted",
         "started",
         "review",

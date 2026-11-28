@@ -148,8 +148,8 @@ pub const ISSUE_FIELDS: [issues::Column; 35] = [
     issues::Column::AgentExecutor,
 ];
 
-/// All 18 concrete `states` columns (`select_related("state")` order).
-pub const STATE_FIELDS: [states::Column; 18] = [
+/// All 19 concrete `states` columns (`select_related("state")` order).
+pub const STATE_FIELDS: [states::Column; 19] = [
     states::Column::CreatedAt,
     states::Column::UpdatedAt,
     states::Column::CreatedById,
@@ -165,6 +165,7 @@ pub const STATE_FIELDS: [states::Column; 18] = [
     states::Column::Sequence,
     states::Column::Group,
     states::Column::IsTriage,
+    states::Column::IsHidden,
     states::Column::Default,
     states::Column::ExternalSource,
     states::Column::ExternalId,

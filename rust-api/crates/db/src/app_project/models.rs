@@ -12,8 +12,8 @@
 //! L302-311, `ProjectMemberInvite` L314-331, `ProjectMember` L332-385,
 //! `ProjectIdentifier` L386-403, `ProjectDeployBoard` L422-439,
 //! `ProjectPublicMember` L442-461, `ProjectUserProperty` L464-495);
-//! `pi_dash/db/models/state.py:14-140` (`StateGroup` L14-22,
-//! `DEFAULT_STATES` L26-76, managers L79-91, `State` L93-140);
+//! `pi_dash/db/models/state.py:14-168` (`StateGroup` L14-22,
+//! `DEFAULT_STATES` L26-98, managers L101-117, `State` L120-168);
 //! `pi_dash/db/models/estimate.py:13-57` (`EstimateType` L13-15, `Estimate`
 //! L18-40, `EstimatePoint` L43-57); `pi_dash/db/models/deploy_board.py:15-57`
 //! (`get_anchor` L15-16, `DeployBoard` L19-57). Audit columns
@@ -39,8 +39,9 @@
 //!   the Python repr. Kept as a docs note; there is no Rust `Display` that
 //!   panics.
 //! * `State.save` overwrites any explicitly set `sequence` on add whenever
-//!   non-triage siblings exist, and the max excludes triage states (it reads
-//!   through the triage-excluding default manager, `state.py:131-139`).
+//!   non-triage, non-hidden siblings exist, and the max excludes triage and
+//!   hidden states (it reads through the triage- and hidden-excluding
+//!   default manager, `state.py:159-166`).
 //!   [`state::sequence_on_add`] mirrors both behaviors.
 //! * `EstimatePoint.Meta.ordering = ("value",)` sorts by the *string*
 //!   column, so `"10"` orders before `"2"` (`estimate.py:53-57`).
@@ -1228,32 +1229,34 @@ pub mod state {
         "sequence",
         "group",
         "is_triage",
+        "is_hidden",
         "default",
         "external_source",
         "external_id",
     ];
 
-    /// Partial unique index name (`Meta.constraints`, `:119-124`).
+    /// Partial unique index name (`Meta.constraints`, `:148-154`).
     pub const CONSTRAINT: &str = "state_unique_name_project_when_deleted_at_null";
 
-    /// `unique_together = ["name", "project", "deleted_at"]` (`:118`).
+    /// `unique_together = ["name", "project", "deleted_at"]` (`:146`).
     pub const UNIQUE_TOGETHER: &[&str] = &["name", "project_id", "deleted_at"];
 
-    /// Default `sequence` (`:98`).
+    /// Default `sequence` (`:125`).
     pub const DEFAULT_SEQUENCE: f64 = 65535.0;
 
-    /// `State.save` step (`state.py:138`): a new state sorts `15000` above
+    /// `State.save` step (`state.py:166`): a new state sorts `15000` above
     /// the current sibling maximum.
     pub const SEQUENCE_STEP: f64 = 15000.0;
 
-    /// Default `group` (`:99-103`, `StateGroup.BACKLOG`).
+    /// Default `group` (`:126-130`, `StateGroup.BACKLOG`).
     pub const DEFAULT_GROUP: &str = "backlog";
 
-    /// The triage group value the default manager excludes (`:83,90`).
+    /// The triage group value the default manager excludes (`:108`).
     pub const TRIAGE_GROUP: &str = "triage";
 
-    /// Default `is_triage` / `default` (`:104-105`).
+    /// Default `is_triage` / `is_hidden` / `default` (`:131-133`).
     pub const DEFAULT_IS_TRIAGE: bool = false;
+    pub const DEFAULT_IS_HIDDEN: bool = false;
     pub const DEFAULT_IS_DEFAULT: bool = false;
 
     /// `StateGroup` values (`db/models/state.py:14-22`, ported as-is).
@@ -1309,31 +1312,41 @@ pub mod state {
         ("triage", "Triage"),
     ];
 
-    /// Seed rows for `DEFAULT_STATES` (`state.py:26-76`), bulk-created on
+    /// Seed rows for `DEFAULT_STATES` (`state.py:26-98`), bulk-created on
     /// project POST (bypassing `save()`):
-    /// `(name, color, sequence, group, default)`. Only the Backlog row sets
-    /// `default`; every other row omits the key (Django applies `False`).
-    pub const DEFAULT_STATES: &[(&str, &str, f64, &str, bool)] = &[
-        ("Backlog", "#60646C", 15000.0, "backlog", true),
-        ("Todo", "#60646C", 25000.0, "unstarted", false),
-        ("In Progress", "#F59E0B", 35000.0, "started", false),
-        ("In Review", "#5B5BD6", 40000.0, "review", false),
-        ("In Test", "#14B8A6", 42500.0, "test", false),
-        ("AI Completed", "#30A46C", 43750.0, "completed", false),
-        ("Done", "#46A758", 45000.0, "completed", false),
-        ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false),
-        ("Triage", "#4E5355", 65000.0, "triage", false),
+    /// `(name, color, sequence, group, default, is_hidden)`. Only the
+    /// Backlog row sets `default` and only the Todo row sets `is_hidden`
+    /// (every other row omits the key; Django applies `False`).
+    pub const DEFAULT_STATES: &[(&str, &str, f64, &str, bool, bool)] = &[
+        ("Backlog", "#60646C", 15000.0, "backlog", true, false),
+        ("Todo", "#60646C", 25000.0, "unstarted", false, true),
+        ("Paused", "#DC2626", 30000.0, "unstarted", false, false),
+        ("In Progress", "#F59E0B", 35000.0, "started", false, false),
+        ("In Review", "#5B5BD6", 40000.0, "review", false, false),
+        ("In Test", "#14B8A6", 42500.0, "test", false, false),
+        (
+            "AI Completed",
+            "#30A46C",
+            43750.0,
+            "completed",
+            false,
+            false,
+        ),
+        ("Done", "#46A758", 45000.0, "completed", false, false),
+        ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false, false),
+        ("Triage", "#4E5355", 65000.0, "triage", false, false),
     ];
 
-    /// Default-manager scope (`StateManager.get_queryset`, `:82-83`):
-    /// soft-delete filter plus `group != 'triage'`.
+    /// Default-manager scope (`StateManager.get_queryset`, `:104-110`):
+    /// soft-delete filter plus `group != 'triage'` plus `is_hidden = false`.
     pub fn objects_condition() -> Condition {
         Condition::all()
             .add(Expr::col(Alias::new("deleted_at")).is_null())
             .add(Expr::col(Alias::new("group")).ne(TRIAGE_GROUP))
+            .add(Expr::col(Alias::new("is_hidden")).eq(false))
     }
 
-    /// `TriageStateManager` scope (`:89-90`): triage group only (still
+    /// `TriageStateManager` scope (`:116-117`): triage group only (still
     /// soft-delete filtered, via `SoftDeletionManager`).
     pub fn triage_condition() -> Condition {
         Condition::all()
@@ -1341,7 +1354,7 @@ pub mod state {
             .add(Expr::col(Alias::new("group")).eq(TRIAGE_GROUP))
     }
 
-    /// Ports Django's `slugify(name)` (`state.py:132`,
+    /// Ports Django's `slugify(name)` (`state.py:160`,
     /// `django.utils.text.slugify` with `allow_unicode=False`): NFKD, drop
     /// every non-ASCII character, lowercase, drop every character that is not
     /// a word character (`[^\w\s-]` — underscore is kept), collapse each
@@ -1364,10 +1377,11 @@ pub mod state {
         out.trim_matches(|c| c == '-' || c == '_').to_owned()
     }
 
-    /// Ports the `State.save` sequence rule (`state.py:133-138`): on add,
+    /// Ports the `State.save` sequence rule (`state.py:159-166`): on add,
     /// `sequence = max(sibling sequence) + 15000`, where the max runs over
-    /// the triage-excluding default manager. Returns `None` when there are
-    /// no siblings, in which case the field default (`65535`) applies.
+    /// the triage- and hidden-excluding default manager. Returns `None`
+    /// when there are no siblings, in which case the field default
+    /// (`65535`) applies.
     /// An explicitly set sequence on a non-first row is overwritten —
     /// ported as-is (see module quirks).
     pub fn sequence_on_add(max_sibling_sequence: Option<f64>) -> Option<f64> {
@@ -1394,6 +1408,7 @@ pub mod state {
         pub sequence: f64,
         pub group: String,
         pub is_triage: bool,
+        pub is_hidden: bool,
         pub default: bool,
         pub external_source: Option<String>,
         pub external_id: Option<String>,
@@ -1867,6 +1882,7 @@ mod tests {
                 "sequence",
                 "group",
                 "is_triage",
+                "is_hidden",
                 "default",
                 "external_source",
                 "external_id",
@@ -2005,17 +2021,35 @@ mod tests {
         assert_eq!(
             DEFAULT_STATES,
             &[
-                ("Backlog", "#60646C", 15000.0, "backlog", true),
-                ("Todo", "#60646C", 25000.0, "unstarted", false),
-                ("In Progress", "#F59E0B", 35000.0, "started", false),
-                ("In Review", "#5B5BD6", 40000.0, "review", false),
-                ("In Test", "#14B8A6", 42500.0, "test", false),
-                ("AI Completed", "#30A46C", 43750.0, "completed", false),
-                ("Done", "#46A758", 45000.0, "completed", false),
-                ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false),
-                ("Triage", "#4E5355", 65000.0, "triage", false),
+                ("Backlog", "#60646C", 15000.0, "backlog", true, false),
+                ("Todo", "#60646C", 25000.0, "unstarted", false, true),
+                ("Paused", "#DC2626", 30000.0, "unstarted", false, false),
+                ("In Progress", "#F59E0B", 35000.0, "started", false, false),
+                ("In Review", "#5B5BD6", 40000.0, "review", false, false),
+                ("In Test", "#14B8A6", 42500.0, "test", false, false),
+                (
+                    "AI Completed",
+                    "#30A46C",
+                    43750.0,
+                    "completed",
+                    false,
+                    false
+                ),
+                ("Done", "#46A758", 45000.0, "completed", false, false),
+                ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false, false),
+                ("Triage", "#4E5355", 65000.0, "triage", false, false),
             ]
         );
+        // Ten seed rows: Todo is the only hidden default; Paused slots
+        // between Todo and In Progress in the unstarted group.
+        assert_eq!(DEFAULT_STATES.len(), 10);
+        assert_eq!(DEFAULT_STATES[1].0, "Todo");
+        assert!(DEFAULT_STATES[1].5);
+        assert_eq!(
+            DEFAULT_STATES[2],
+            ("Paused", "#DC2626", 30000.0, "unstarted", false, false)
+        );
+        assert!(DEFAULT_STATES.iter().skip(3).all(|row| !row.5));
     }
 
     #[test]
@@ -2194,6 +2228,7 @@ mod tests {
         assert_eq!(state::DEFAULT_GROUP, s("State", "group"));
         assert_eq!(state::TRIAGE_GROUP, "triage");
         assert_eq!(state::DEFAULT_IS_TRIAGE, b("State", "is_triage"));
+        assert_eq!(state::DEFAULT_IS_HIDDEN, b("State", "is_hidden"));
         assert_eq!(state::DEFAULT_IS_DEFAULT, b("State", "default"));
         assert_eq!(estimate::DEFAULT_LAST_USED, b("Estimate", "last_used"));
         assert_eq!(estimate::DEFAULT_TYPE.as_str(), s("Estimate", "type"));
@@ -2444,6 +2479,7 @@ mod tests {
         let objects = select_where("states", objects_condition());
         assert!(objects.contains(r#""deleted_at" IS NULL"#), "{objects}");
         assert!(objects.contains(r#""group" <> 'triage'"#), "{objects}");
+        assert!(objects.contains(r#""is_hidden" = FALSE"#), "{objects}");
         let triage = select_where("states", triage_condition());
         assert!(triage.contains(r#""deleted_at" IS NULL"#), "{triage}");
         assert!(triage.contains(r#""group" = 'triage'"#), "{triage}");

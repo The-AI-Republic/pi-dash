@@ -972,6 +972,7 @@ async fn fetch_state_choices(pool: &PgPool, project_id: Uuid) -> Result<Vec<Stat
         .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence)
         .into_tuple()
         .all(&sea_orm_connection(pool))

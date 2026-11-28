@@ -693,9 +693,14 @@ pub fn filter_where_sql(filters: &IssueFilter) -> String {
 
 /// `State.objects.filter(project_id=...).values_list("id", "name")`
 /// (`utils/issue_filters.py:508`): live, non-triage states in `sequence`
-/// order (`StateManager`, `db/models/state.py:79-84`; `Meta.ordering`,
-/// `:129`). The `exclude(group="triage")` hits a concrete non-null field,
-/// so no `NULL` guard renders (unlike the manager-scope exclusion).
+/// order (`Meta.ordering`, `:129`). The `exclude(group="triage")` hits a
+/// concrete non-null field, so no `NULL` guard renders.
+///
+/// Deliberate divergence (NEWPIDASH-417, DIFF-69): the lookup does NOT
+/// apply the new `StateManager` hidden exclusion. Django 400s on a hidden
+/// name (`"Unknown state name(s): Todo"`); the new system keeps resolving
+/// hidden states so issues already in Todo stay filterable by name. The
+/// triage exclusion stays — filtering by `triage` still 400s on both.
 pub fn states_lookup_sql() -> String {
     "SELECT \"states\".\"id\", \"states\".\"name\" FROM \"states\" WHERE (\"states\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage') AND \"states\".\"project_id\" = :project_id) ORDER BY \"states\".\"sequence\" ASC".to_owned()
 }

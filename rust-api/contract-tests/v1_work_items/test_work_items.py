@@ -8,7 +8,7 @@ must reproduce them byte for byte.
 
 import pytest
 
-from _harness.diffs import expect
+from _harness.diffs import expect, is_rust
 
 from .conftest import ENVELOPE_KEYS, issue_url
 
@@ -333,3 +333,29 @@ def test_advanced_search_datetimes_utc_for_non_utc_user(api, db, world):
     assert "2026-10-02T23:17:12.025108Z" in [
         row["completed_at"] for row in completed
     ]
+
+
+def test_hidden_state_name_filter_diverges(api, world, seeder, db):
+    """NEWPIDASH-417 (DIFF-69): filtering work items by a hidden state's
+    NAME resolves on the new system but Django 400s.
+
+    The name resolver (`states_lookup_sql`) intentionally skips the new
+    `StateManager` hidden exclusion so issues already in Todo stay
+    filterable by name; triage names still 400 on both backends.
+    """
+    ws, project, issue = world["workspace"], world["project"], world["issue"]
+    seeder.create_state(ws["id"], project["id"], name="Loud Backlog")
+    hidden = seeder.create_state(
+        ws["id"], project["id"], name="Sneaky Todo", group="unstarted")
+    db.execute("UPDATE states SET is_hidden = true WHERE id = %s",
+               (hidden["id"],))
+    db.execute("UPDATE issues SET state_id = %s WHERE id = %s",
+               (hidden["id"], issue["id"]))
+    resp = api.get(issue_url(world), params={"state": "Sneaky Todo"})
+    assert resp.status_code == expect("DIFF-69", django=400, rust=200)
+    if is_rust():
+        assert {row["id"] for row in resp.json()["results"]} == {issue["id"]}
+    else:
+        assert resp.json() == {
+            "error": "Unknown state name(s): Sneaky Todo. Valid states: Loud Backlog."
+        }

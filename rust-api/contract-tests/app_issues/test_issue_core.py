@@ -684,3 +684,54 @@ def test_grouped_fanout_deduplicated(clients, seed, db_conn):
             cur.execute("DELETE FROM issue_labels WHERE issue_id = %s", (fanout_id,))
             cur.execute("DELETE FROM issue_subscribers WHERE issue_id = %s", (fanout_id,))
             cur.execute("DELETE FROM issues WHERE id = %s", (fanout_id,))
+
+
+def test_hidden_state_keeps_grouped_bucket(clients, seed, db_conn):
+    """NEWPIDASH-417 (DIFF-70): state-grouped views keep a bucket for a
+    hidden state while it has issues.
+
+    The bucket keys intentionally diverge: Django seeds buckets from the
+    state list only, so Todo issues vanish from its grouped views; the
+    new system unions in hidden states referenced by the filtered set.
+    """
+    import uuid
+
+    from _harness.diffs import expect, is_rust
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    hidden = str(uuid.uuid4())
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO states (created_at, updated_at, id, name, description,"
+            " color, slug, project_id, workspace_id, sequence, \"group\","
+            " \"default\", is_triage, is_hidden)"
+            " VALUES (now(), now(), %s, 'IS Hidden', '', '#000000',"
+            " 'is-hidden', %s, %s, 26000, 'unstarted', false, false, true)",
+            (hidden, pid, seed["ws"]),
+        )
+    db_conn.commit()
+    created = admin.post(
+        f"{_base(ws, pid)}/issues/", json={"name": "Hidden probe"}).json()
+    iid = created["id"]
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET state_id = %s WHERE id = %s", (hidden, iid))
+        db_conn.commit()
+        resp = admin.get(
+            f"{_base(ws, pid)}/issues/", params={"group_by": "state_id"})
+        assert resp.status_code == 200, resp.text
+        buckets = resp.json()["results"]
+        assert (hidden in buckets) == expect(
+            "DIFF-70", django=False, rust=True)
+        if is_rust():
+            assert [row["id"] for row in buckets[hidden]["results"]] == [iid]
+            assert buckets[hidden]["total_results"] == 1
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_sequences WHERE issue_id = %s", (iid,))
+            cur.execute("DELETE FROM issues WHERE id = %s", (iid,))
+            cur.execute("DELETE FROM states WHERE id = %s", (hidden,))
+        db_conn.commit()

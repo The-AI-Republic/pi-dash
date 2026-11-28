@@ -1353,12 +1353,13 @@ impl SeedStore for PgSeedStore {
     }
 
     async fn max_state_sequence(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
-        // `StateManager`: triage excluded.
+        // `StateManager`: triage and hidden states excluded.
         let db = self.db();
         states::Entity::find()
             .filter(states::Column::ProjectId.eq(project_id))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage".to_owned()))
+            .filter(states::Column::IsHidden.eq(false))
             .select_only()
             .column_as(Expr::col(states::Column::Sequence).max(), "max_sequence")
             .into_tuple::<Option<f64>>()
@@ -3182,6 +3183,7 @@ mod tests {
             .filter(states::Column::ProjectId.eq(proj))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage".to_owned()))
+            .filter(states::Column::IsHidden.eq(false))
             .select_only()
             .column_as(Expr::col(states::Column::Sequence).max(), "max_sequence")
             .build(DbBackend::Postgres)
@@ -3190,6 +3192,10 @@ mod tests {
         assert!(
             sql.contains("\"group\" <>"),
             "StateManager excludes triage: {sql}"
+        );
+        assert!(
+            sql.contains("\"is_hidden\" = FALSE"),
+            "StateManager excludes hidden states: {sql}"
         );
     }
 

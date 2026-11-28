@@ -471,9 +471,10 @@ pub fn null_fk_one_to_one_stmt(
 /// retains them).
 ///
 /// `states` children carry the `StateManager` guard
-/// (`db/models/state.py:79-83`): `.exclude(group=TRIAGE)`. `group` is NOT
-/// NULL with no `null=True`, so a plain `<> 'triage'` is exact — there are
-/// no NULL rows to preserve.
+/// (`db/models/state.py:104-110`): `.exclude(group=TRIAGE)` plus
+/// `.exclude(is_hidden=True)`. `group` is NOT NULL with no `null=True`,
+/// so a plain `<> 'triage'` is exact — there are no NULL rows to
+/// preserve; `is_hidden` is NOT NULL with a `False` default.
 pub fn null_fk_bulk_stmt(
     child_table: &str,
     fk_col: &str,
@@ -567,16 +568,24 @@ pub fn null_fk_bulk_stmt(
 }
 
 /// `StateManager.get_queryset()` as one predicate
-/// (`db/models/state.py:79-83`): `.exclude(group=TRIAGE)`. Shared by the
-/// SET_NULL bulk null and the CASCADE to-many fetch — `State.objects`
-/// *is* `StateManager` (unlike `Issue.objects`), so both paths scope
-/// triage out and the two call sites must never drift.
+/// (`db/models/state.py:104-110`): `.exclude(group=TRIAGE)` plus
+/// `.exclude(is_hidden=True)`. Shared by the SET_NULL bulk null and the
+/// CASCADE to-many fetch — `State.objects` *is* `StateManager`
+/// (unlike `Issue.objects`), so both paths scope triage and hidden
+/// states out and the two call sites must never drift.
 fn states_scope_predicate(child_table: &str) -> SimpleExpr {
     Expr::col((
         Alias::new(child_table.to_owned()),
         Alias::new("group".to_owned()),
     ))
     .ne("triage")
+    .and(
+        Expr::col((
+            Alias::new(child_table.to_owned()),
+            Alias::new("is_hidden".to_owned()),
+        ))
+        .eq(false),
+    )
 }
 
 /// Live-schema snapshot for one task run: every base table's columns plus
@@ -2267,12 +2276,12 @@ mod tests {
     fn states_bulk_null_excludes_triage() {
         // D1 (PIDASHCONV-900 review): the reverse related manager
         // inherits the child default manager, and `State`'s is
-        // `StateManager` (excludes `group='triage'`). Soft-deleting a
-        // user must leave triage states' audit FKs alone.
+        // `StateManager` (excludes `group='triage'` and hidden states).
+        // Soft-deleting a user must leave triage states' audit FKs alone.
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
             null_fk_bulk_stmt("states", "created_by_id", &RowPk::Uuid(parent), true).to_string(PostgresQueryBuilder),
-            "UPDATE \"states\" SET \"created_by_id\" = NULL WHERE \"created_by_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
+            "UPDATE \"states\" SET \"created_by_id\" = NULL WHERE \"created_by_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND (\"states\".\"group\" <> 'triage' AND \"states\".\"is_hidden\" = FALSE)"
         );
     }
 
@@ -2290,7 +2299,7 @@ mod tests {
         let parent = uuid("12345678-1234-1234-1234-1234567890ab");
         assert_eq!(
             live_to_many_stmt("states", "id", "project_id", &RowPk::Uuid(parent)).to_string(PostgresQueryBuilder),
-            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"states\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage' ORDER BY \"id\" ASC"
+            "SELECT \"id\" AS \"pk\", \"deleted_at\" FROM \"states\" WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND (\"states\".\"group\" <> 'triage' AND \"states\".\"is_hidden\" = FALSE) ORDER BY \"id\" ASC"
         );
         assert_eq!(
             live_to_many_stmt("issues", "id", "project_id", &RowPk::Uuid(parent)).to_string(PostgresQueryBuilder),

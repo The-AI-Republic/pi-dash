@@ -218,10 +218,10 @@ pub fn project_lite_to_representation<'a>(row: &'a ProjectLiteRow<'a>) -> Projec
 /// The `StateSerializer` `fields = "__all__"` wire keys (`state.py:10-14`),
 /// in live-DRF order (probed `StateSerializer().fields`): `id`, the
 /// concrete columns (`created_at`, `updated_at`, `deleted_at`, then `State`'s
-/// own columns, `db/models/state.py:93-107`), then the forward relations
+/// own columns, `db/models/state.py:120-137`), then the forward relations
 /// trailing (`created_by`, `updated_by`, `project`, `workspace`). FK primary
 /// keys render as strings; null FKs render `null`.
-pub const STATE_ALL_FIELDS: [&str; 18] = [
+pub const STATE_ALL_FIELDS: [&str; 19] = [
     "id",
     "created_at",
     "updated_at",
@@ -233,6 +233,7 @@ pub const STATE_ALL_FIELDS: [&str; 18] = [
     "sequence",
     "group",
     "is_triage",
+    "is_hidden",
     "default",
     "external_source",
     "external_id",
@@ -258,6 +259,7 @@ pub struct StateRow<'a> {
     pub sequence: f64,
     pub group: &'a str,
     pub is_triage: bool,
+    pub is_hidden: bool,
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
@@ -282,6 +284,7 @@ pub struct StateView<'a> {
     pub sequence: f64,
     pub group: &'a str,
     pub is_triage: bool,
+    pub is_hidden: bool,
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
@@ -305,6 +308,7 @@ pub fn state_to_representation<'a>(row: &'a StateRow<'a>) -> StateView<'a> {
         sequence: row.sequence,
         group: row.group,
         is_triage: row.is_triage,
+        is_hidden: row.is_hidden,
         default: row.default,
         external_source: row.external_source,
         external_id: row.external_id,
@@ -630,6 +634,7 @@ mod tests {
                 .expect("sequence"),
             group: req(input, "group"),
             is_triage: boolean(input, "is_triage"),
+            is_hidden: boolean(input, "is_hidden"),
             default: boolean(input, "default"),
             external_source: external_source.as_deref(),
             external_id: external_id.as_deref(),
@@ -669,6 +674,7 @@ mod tests {
                 "sequence",
                 "group",
                 "is_triage",
+                "is_hidden",
                 "default",
                 "external_source",
                 "external_id",

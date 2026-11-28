@@ -1111,6 +1111,7 @@ async fn bundle_project_states(
             .filter(states::Column::ProjectId.eq(project_id))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .order_by_asc(states::Column::Sequence)
             .into_model::<ProjectStateRow>()
             .all(&conn)

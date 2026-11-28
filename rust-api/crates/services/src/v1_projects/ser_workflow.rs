@@ -69,13 +69,14 @@ pub const STATE_READ_ONLY_FIELDS: [&str; 9] = [
 
 /// Writable `StateSerializer` fields: `__all__` minus
 /// [`STATE_READ_ONLY_FIELDS`].
-pub const STATE_WRITABLE_FIELDS: [&str; 9] = [
+pub const STATE_WRITABLE_FIELDS: [&str; 10] = [
     "name",
     "description",
     "color",
     "sequence",
     "group",
     "is_triage",
+    "is_hidden",
     "default",
     "external_source",
     "external_id",
@@ -223,13 +224,14 @@ pub struct StateRow<'a> {
     pub sequence: f64,
     pub group: &'a str,
     pub is_triage: bool,
+    pub is_hidden: bool,
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
 }
 
 /// `StateSerializer.to_representation` output (`state.py:11-41`,
-/// `fields = "__all__"` over `db/models/state.py:93-140`), in DRF wire
+/// `fields = "__all__"` over `db/models/state.py:120-168`), in DRF wire
 /// order: declared `id`, then model definition order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StateView<'a> {
@@ -248,6 +250,7 @@ pub struct StateView<'a> {
     pub sequence: f64,
     pub group: &'a str,
     pub is_triage: bool,
+    pub is_hidden: bool,
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
@@ -275,6 +278,7 @@ pub fn state_to_representation<'a>(row: &'a StateRow<'a>) -> StateView<'a> {
         sequence: row.sequence,
         group: row.group,
         is_triage: row.is_triage,
+        is_hidden: row.is_hidden,
         default: row.default,
         external_source: row.external_source,
         external_id: row.external_id,
@@ -305,6 +309,7 @@ pub const STATE_FIELDS: &[&str] = &[
     "sequence",
     "group",
     "is_triage",
+    "is_hidden",
     "default",
     "external_source",
     "external_id",
@@ -336,6 +341,7 @@ pub fn state_base_map(
     sequence: f64,
     group: &str,
     is_triage: bool,
+    is_hidden: bool,
     default: bool,
     external_source: Option<&str>,
     external_id: Option<&str>,
@@ -367,6 +373,7 @@ pub fn state_base_map(
     );
     map.insert("group".to_owned(), Value::String(group.to_owned()));
     map.insert("is_triage".to_owned(), Value::Bool(is_triage));
+    map.insert("is_hidden".to_owned(), Value::Bool(is_hidden));
     map.insert("default".to_owned(), Value::Bool(default));
     map.insert(
         "external_source".to_owned(),
@@ -564,6 +571,7 @@ mod tests {
                 "sequence",
                 "group",
                 "is_triage",
+                "is_hidden",
                 "default",
                 "external_source",
                 "external_id"
@@ -649,8 +657,8 @@ mod tests {
     #[test]
     fn state_default_flip_sql_carries_manager_scoping() {
         // State.objects = StateManager: soft-delete filter plus the
-        // triage exclusion, so triage and soft-deleted siblings keep
-        // their default.
+        // triage and hidden exclusions, so triage, hidden and
+        // soft-deleted siblings keep their default.
         let project = uuid::Uuid::nil();
         assert_eq!(
             clear_project_defaults_stmt(project)
@@ -658,7 +666,7 @@ mod tests {
                 .to_string(),
             format!(
                 "UPDATE \"states\" SET \"default\" = FALSE WHERE \"states\".\"project_id\" = \
-                 '{project}' AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
+                 '{project}' AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage' AND \"states\".\"is_hidden\" = FALSE"
             )
         );
     }
@@ -737,6 +745,7 @@ mod tests {
             sequence: 1000.0,
             group: "backlog",
             is_triage: false,
+            is_hidden: false,
             default: false,
             external_source: None,
             external_id: None,
@@ -752,8 +761,8 @@ mod tests {
                 r#""project":"22222222-2222-2222-2222-222222222222","#,
                 r#""workspace":"33333333-3333-3333-3333-333333333333","#,
                 r##""name":"CT State","description":"","color":"#00ff00","slug":"ct-state","##,
-                r#""sequence":1000.0,"group":"backlog","is_triage":false,"default":false,"#,
-                r#""external_source":null,"external_id":null}"#
+                r#""sequence":1000.0,"group":"backlog","is_triage":false,"is_hidden":false,"#,
+                r#""default":false,"external_source":null,"external_id":null}"#
             )
         );
         // Float rendering keeps the `.0`: DRF emits 1000.0, not 1000.
@@ -835,7 +844,7 @@ mod tests {
     #[test]
     fn state_base_map_pins_all_key_order() {
         // OVL-10 (PIDASHCONV-1656): the `__all__` wire renderer MCP
-        // `list_states` calls through `pidash_sdk::read` — 18 keys in
+        // `list_states` calls through `pidash_sdk::read` — 19 keys in
         // live-DRF order (`STATE_FIELDS`), null FKs as null.
         let map = state_base_map(
             "11111111-1111-1111-1111-111111111111",
@@ -853,13 +862,14 @@ mod tests {
             15000.0,
             "backlog",
             false,
+            false,
             true,
             Some("github"),
             None,
         );
         let keys: Vec<&str> = map.keys().map(String::as_str).collect();
         assert_eq!(keys, STATE_FIELDS);
-        assert_eq!(map.len(), 18);
+        assert_eq!(map.len(), 19);
         assert_eq!(map["sequence"], serde_json::json!(15000.0));
         assert_eq!(map["default"], serde_json::Value::Bool(true));
         assert_eq!(map["updated_by"], serde_json::Value::Null);

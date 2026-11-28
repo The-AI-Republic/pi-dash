@@ -3187,15 +3187,15 @@ pub async fn create_project_inner(
     // DRF `ValidationError`, so that escapes to `handle_exception` → 400
     // `{"error":"Please provide valid detail"}` — with no `ATOMIC_REQUESTS`,
     // the project row, its pod and the creator membership are already
-    // committed, while the lead membership, the 8 `DEFAULT_STATES` and
+    // committed, while the lead membership, the 10 `DEFAULT_STATES` and
     // `model_activity` never happen. Ported verbatim: any validated
     // `project_lead` (the creator included) ends the request here.
     if lead.is_some() {
         return Err(Denial::BadError("Please provide valid detail".to_owned()));
     }
-    // The 9 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
+    // The 10 `DEFAULT_STATES` (`views/project.py:240-256`): `bulk_create`
     // calls no `save()`, so every row keeps `slug ""`.
-    for (name, color, sequence, group, default) in
+    for (name, color, sequence, group, default, is_hidden) in
         pidash_db::v1_projects::models::state::DEFAULT_STATES.iter()
     {
         insert_default_state(
@@ -3208,6 +3208,7 @@ pub async fn create_project_inner(
             *sequence,
             group,
             *default,
+            *is_hidden,
             &now,
         )
         .await?;
@@ -3957,9 +3958,9 @@ pub async fn delete_project_inner(
     Ok(no_content())
 }
 
-/// One `DEFAULT_STATES` row (`views/project.py:240-254`).
+/// One `DEFAULT_STATES` row (`views/project.py:240-256`).
 /// `bulk_create` calls no `save()`, so `slug` keeps the field default
-/// `""` (`db/models/state.py:97`) — the `save()` slugification (`:132`)
+/// `""` (`db/models/state.py:124`) — the `save()` slugification (`:160`)
 /// never runs on this path (PIDASHCONV-893).
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_default_state(
@@ -3972,6 +3973,7 @@ pub async fn insert_default_state(
     sequence: f64,
     group: &str,
     default: bool,
+    is_hidden: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
     pidash_services::domain::projects::states::add_default(
@@ -3984,6 +3986,7 @@ pub async fn insert_default_state(
             sequence,
             group,
             default,
+            is_hidden,
             created_by: *actor_id,
             now: *now,
         },

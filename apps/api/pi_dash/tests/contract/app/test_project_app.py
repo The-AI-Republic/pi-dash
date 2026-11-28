@@ -97,10 +97,13 @@ class TestProjectAPIPost(TestProjectBase):
         # triage out, so a freshly-created project ends up with seven.
         # NEWPIDASH-305 added "AI Completed" (completed group, between
         # "In Test" and "Done"), so now eight.
+        # NEWPIDASH-417 added "Paused" (unstarted group, between "Todo"
+        # and "In Progress") and hid "Todo" from the default manager, so
+        # the visible count stays eight with "Paused" in place of "Todo".
         states = State.objects.filter(project=project)
         assert states.count() == 8
         expected_states = [
-            "Backlog", "Todo", "In Progress", "In Review", "In Test",
+            "Backlog", "Paused", "In Progress", "In Review", "In Test",
             "AI Completed", "Done", "Cancelled",
         ]
         state_names = list(states.values_list("name", flat=True))

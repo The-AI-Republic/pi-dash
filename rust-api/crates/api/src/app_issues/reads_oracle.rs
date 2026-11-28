@@ -32,12 +32,12 @@ pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.creat
     issue.type_id, issue.git_work_branch, issue.workpad, issue.created_via, \
     issue.assigned_pod_id, issue.assigned_runner_id, issue.agent_executor";
 
-/// All 18 concrete `states` columns (`select_related("state")` order).
+/// All 19 concrete `states` columns (`select_related("state")` order).
 /// `group`/`default` stay quoted: reserved words.
 pub const STATE_COLUMNS: &str = "state.created_at, state.updated_at, state.created_by_id, \
     state.updated_by_id, state.deleted_at, state.id, state.project_id, state.workspace_id, \
     state.name, state.description, state.color, state.slug, state.sequence, state.\"group\", \
-    state.is_triage, state.\"default\", state.external_source, state.external_id";
+    state.is_triage, state.is_hidden, state.\"default\", state.external_source, state.external_id";
 
 /// All 46 concrete `projects` columns (`Project.objects.get` order).
 pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
@@ -851,7 +851,7 @@ mod pins {
             names(&LITE_ISSUE_FIELDS),
             stems(LITE_ISSUE_COLUMNS, "issue")
         );
-        assert_eq!(full_row_aliases().len(), 177);
+        assert_eq!(full_row_aliases().len(), 178);
     }
 }
 
