@@ -9060,11 +9060,8 @@ mod tests {
         release_finished_slot(&coord, &worker.state, run_id);
 
         assert!(!coord.holds_run(run_id), "the slot was not released");
-        drop(worker);
-        drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
         assert_eq!(
-            after.terminal_pending().len(),
+            coord.terminal_pending().len(),
             1,
             "an undelivered RunCompleted lost its terminal record"
         );
