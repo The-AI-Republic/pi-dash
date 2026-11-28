@@ -396,4 +396,55 @@ mod tests {
         assert_eq!(argv.last().map(String::as_str), Some("--help me refactor"));
         assert_eq!(sep, argv.len() - 2, "`--` must directly precede the prompt");
     }
+
+    /// Review item 4 on #3502 at bf9a2ba: cursor-agent spawns a new process
+    /// every turn, so on the cgroup backend each turn's process, not only the
+    /// first, must join the chat unit's cgroup. A turn that runs inside the
+    /// unit's scope builds its command there, and its login shell joins the
+    /// cgroup before the agent starts.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn every_turns_process_joins_the_chat_units_cgroup() {
+        use crate::util::containment::BackendKind;
+        use crate::util::shell::{CHAT_ENV, ChatEnv};
+
+        let dir = tempfile::tempdir().unwrap();
+        let procs = dir.path().join("cgroup.procs");
+        let env = ChatEnv {
+            backend: BackendKind::Cgroup,
+            process_group: None,
+            cgroup_procs: Some(procs.clone()),
+        };
+        // No such binary: each turn's login shell joins the cgroup, then
+        // fails to start the agent, and the turn errors out.
+        let mut bridge = Bridge::spawn("pidash-no-such-cursor-agent", dir.path(), None)
+            .await
+            .expect("bridge setup");
+        let mut joined = Vec::new();
+        for turn in 0..2 {
+            std::fs::write(&procs, "").unwrap();
+            let payload = RunPayload {
+                run_id: Uuid::new_v4(),
+                prompt: format!("turn {turn}"),
+                model: None,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                CHAT_ENV.scope(env.clone(), bridge.run(&payload, dir.path())),
+            )
+            .await
+            .expect("turn did not finish");
+            assert!(result.is_err(), "a missing agent binary started a turn");
+            let pid = std::fs::read_to_string(&procs).unwrap().trim().to_string();
+            assert!(
+                !pid.is_empty(),
+                "turn {turn}'s process did not join the cgroup"
+            );
+            joined.push(pid);
+        }
+        assert_ne!(
+            joined[0], joined[1],
+            "the second turn reused the first's process"
+        );
+    }
 }

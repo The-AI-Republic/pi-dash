@@ -1,10 +1,13 @@
 pub mod backoff;
 pub mod broken_pipe;
 pub mod browser;
+pub mod chat_unit;
 pub mod confirm;
 pub mod containment;
 pub mod fs;
 pub mod group_ownership;
+#[cfg(unix)]
+pub mod group_recovery;
 pub mod hostname;
 pub mod logging;
 pub mod paths;

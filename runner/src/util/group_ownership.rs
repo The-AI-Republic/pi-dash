@@ -35,6 +35,14 @@
 //! anchor is never signalled: nothing pins its id between the last proof
 //! and `killpg`.
 //!
+//! After a crash (part 3, [`crate::util::group_recovery`]). On macOS the
+//! anchor outlives a daemon that dies without cleaning up: once its stdin
+//! closes it waits on `sleep` in a loop and never ends by itself, so it keeps
+//! holding the group id until a later daemon proves the group from the
+//! anchor's recorded identity and stops it ([`GroupOwner::adopt`]). An
+//! anchor whose daemon is never started again lingers until reboot; that
+//! is the price of never signalling an unpinned group.
+//!
 //! Scans are not atomic (Linux reads one `/proc/<pid>/stat` at a time), so
 //! a proven scan is accepted only if a process that anchored it is re-read
 //! *after* the scan with the same identity and group: that process was in
@@ -109,19 +117,44 @@ pub struct GroupOwner {
 struct Anchor {
     id: ProcId,
     child: Option<std::process::Child>,
+    /// Crash-recovery record of this group (part 3): removed with the
+    /// anchor once a cleanup confirmed the group empty, so it survives a
+    /// daemon that never got there.
+    record: Option<std::path::PathBuf>,
+    /// A cleanup's fresh, settled snapshot found the group empty.
+    confirmed_empty: bool,
+}
+
+/// The anchor's shell script. With `linger` (macOS, where crashed groups
+/// are recovered) the anchor survives the daemon: when its stdin closes the
+/// shell itself stays, ignoring every signal that would otherwise end it,
+/// and waits on `sleep` in a loop, so only SIGKILL ends it and the group id
+/// stays reserved for the next daemon's recovery. An orphaned anchor is
+/// reaped at once by its new parent, so any other way out would free its
+/// pid between recovery's proof and its signal. The shell is not replaced
+/// by `exec sleep`: some `sleep` builds reset signal handlers at start, and
+/// a `sleep` that dies only ends one round of the loop.
+pub(crate) fn anchor_script(linger: bool) -> &'static str {
+    if linger {
+        "trap '' HUP INT QUIT TRAP ABRT BUS FPE ILL SEGV SYS PIPE ALRM TERM XCPU XFSZ VTALRM PROF USR1 USR2; \
+         read _; while :; do sleep 2147483647; done"
+    } else {
+        "trap '' TERM INT HUP; read _"
+    }
 }
 
 impl Anchor {
     /// Spawn the placeholder as the leader of a new process group. It
-    /// ignores SIGTERM, SIGINT and SIGHUP and exits when the daemon closes
-    /// its stdin (including when the daemon dies), so it never outlives the
-    /// daemon.
+    /// ignores SIGTERM, SIGINT and SIGHUP (lingering, every other signal but
+    /// SIGKILL that would end it). Where crashed groups are not
+    /// recovered it exits when the daemon closes its stdin (including when
+    /// the daemon dies); on macOS it lingers instead ([`anchor_script`]).
     #[cfg(unix)]
     fn spawn_leader() -> Option<Self> {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "trap '' TERM INT HUP; read _"])
+            .args(["-c", anchor_script(crate::util::group_recovery::RECOVERS)])
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -136,6 +169,8 @@ impl Anchor {
             Some(p) => Some(Self {
                 id: ProcId::from(&p),
                 child: Some(child),
+                record: None,
+                confirmed_empty: false,
             }),
             None => {
                 let _ = child.kill();
@@ -153,9 +188,29 @@ impl Anchor {
 
 impl Drop for Anchor {
     fn drop(&mut self) {
+        // A recorded group no cleanup confirmed empty (shutdown during an
+        // unresolved or cancelled cleanup) keeps its record and its anchor:
+        // the anchor is left unreaped (lingering, it outlives the daemon),
+        // so the group id stays reserved and the next daemon's recovery
+        // can still judge the group. Killing it here would delete the only
+        // way to find what the run left running.
+        if self.record.is_some() && !self.confirmed_empty {
+            // Dropping the handle neither kills nor reaps the child.
+            drop(self.child.take());
+            tracing::warn!(
+                pgid = self.id.pid,
+                "run group not confirmed empty; its anchor and crash record are kept for recovery"
+            );
+            return;
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // Only once the anchor is gone: a record left by a crash must
+        // still find it lingering.
+        if let Some(record) = self.record.take() {
+            let _ = std::fs::remove_file(record);
         }
     }
 }
@@ -189,6 +244,49 @@ impl GroupOwner {
         })
     }
 
+    /// Claim a group a dead daemon left behind, from its crash-recovery
+    /// record: `anchor` is the identity the record holds, already matched
+    /// against the live process by the caller. The anchor is not this
+    /// daemon's child, so nothing reaps it here; it pins the group because
+    /// a lingering anchor ends only by SIGKILL.
+    pub fn adopt(pgid: i32, anchor: ProcId) -> Self {
+        Self {
+            pgid,
+            known: HashSet::new(),
+            anchor: Some(Anchor {
+                id: anchor,
+                child: None,
+                record: None,
+                confirmed_empty: false,
+            }),
+        }
+    }
+
+    /// Identity of the anchor, for the crash-recovery record.
+    pub fn anchor_identity(&self) -> Option<ProcId> {
+        self.anchor_id()
+    }
+
+    /// Remove `record` once the anchor is reaped (spawned anchors only).
+    pub fn set_record(&mut self, record: std::path::PathBuf) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            anchor.record = Some(record);
+        }
+    }
+
+    /// Path of the group's crash-recovery record, while it has one.
+    pub fn record_path(&self) -> Option<&std::path::Path> {
+        self.anchor.as_ref().and_then(|a| a.record.as_deref())
+    }
+
+    /// A cleanup found the group empty from a fresh, settled snapshot:
+    /// dropping the owner may now reap the anchor and retire its record.
+    pub fn confirm_empty(&mut self) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            anchor.confirmed_empty = true;
+        }
+    }
+
     /// Whether an [`Anchor`] keeps the group id reserved.
     pub fn is_anchored(&self) -> bool {
         self.anchor.is_some()
@@ -203,7 +301,12 @@ impl GroupOwner {
     /// Treat `id` as the group's anchor without spawning one (tests only).
     #[cfg(test)]
     fn with_anchor_id(mut self, id: ProcId) -> Self {
-        self.anchor = Some(Anchor { id, child: None });
+        self.anchor = Some(Anchor {
+            id,
+            child: None,
+            record: None,
+            confirmed_empty: false,
+        });
         self
     }
 
@@ -218,6 +321,13 @@ impl GroupOwner {
 
     pub fn pgid(&self) -> i32 {
         self.pgid
+    }
+
+    /// Every member a proven snapshot has shown, as `(pid, start)`, sorted.
+    pub fn known_ids(&self) -> Vec<(i32, u64)> {
+        let mut ids: Vec<(i32, u64)> = self.known.iter().map(|k| (k.pid, k.start)).collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Whether some remembered process has this pid (tests only).
@@ -258,9 +368,31 @@ impl GroupOwner {
         proof
     }
 
-    /// Take a fresh kernel snapshot and [`accept`](Self::accept) it.
+    /// Take a fresh kernel snapshot and [`accept`](Self::accept) it. An
+    /// empty verdict is confirmed by a scan no process creation raced.
     pub fn observe(&mut self) -> Proof {
-        self.observe_with(procinfo::group_members, procinfo::info)
+        self.observe_settling_with(
+            procinfo::group_members,
+            procinfo::group_members_settled,
+            procinfo::info,
+        )
+    }
+
+    /// [`observe_with`](Self::observe_with) `scan`, and when that finds the
+    /// group empty, again with `settled` (review of #3499 at 78368f6): a
+    /// scan lists the processes before it reads them, so a member that
+    /// forked and exited in between hides its child, and the group would
+    /// look empty while the child runs. Only a settled scan can say empty.
+    pub fn observe_settling_with(
+        &mut self,
+        scan: impl FnOnce(i32) -> std::io::Result<Vec<ProcInfo>>,
+        settled: impl FnOnce(i32) -> std::io::Result<Vec<ProcInfo>>,
+        reread: impl Fn(i32) -> Option<ProcInfo>,
+    ) -> Proof {
+        match self.observe_with(scan, &reread) {
+            Proof::Empty => self.observe_with(settled, reread),
+            other => other,
+        }
     }
 
     /// [`observe`](Self::observe) with the kernel reads injected: `scan`
@@ -300,10 +432,38 @@ impl GroupOwner {
     /// decision was made on; a proven but unpinned group is reported as
     /// [`Proof::Unproven`] and left alone.
     pub fn signal(&mut self, sig: GroupSignal) -> Proof {
-        match self.observe() {
-            Proof::Ours(live) if self.anchor.is_none() => Proof::Unproven(live),
+        self.signal_with(sig, Self::observe, procinfo::info, send_killpg)
+    }
+
+    /// Whether an anchor keeps the group id reserved through delivery. A
+    /// spawned anchor is this daemon's unreaped child, so it always does.
+    /// An adopted one (crash recovery) is not: it pins the group only while
+    /// it is still the recorded, live process in the group, so it is re-read
+    /// right before the signal. What is left is the gap between that read
+    /// and `killpg`; the anchor ends only by SIGKILL, and its pid would then
+    /// have to be reaped and handed to a new group leader within that gap.
+    fn pinned(&self, reread: impl Fn(i32) -> Option<ProcInfo>) -> bool {
+        match &self.anchor {
+            None => false,
+            Some(a) if a.child.is_some() => true,
+            Some(a) => reread(a.id.pid)
+                .is_some_and(|r| ProcId::from(&r) == a.id && r.pgid == self.pgid && !r.zombie),
+        }
+    }
+
+    /// [`signal`](Self::signal) with the snapshot, the anchor re-read and
+    /// the delivery injected.
+    fn signal_with(
+        &mut self,
+        sig: GroupSignal,
+        observe: impl FnOnce(&mut Self) -> Proof,
+        reread: impl Fn(i32) -> Option<ProcInfo>,
+        send: impl FnOnce(i32, GroupSignal),
+    ) -> Proof {
+        match observe(self) {
+            Proof::Ours(live) if !self.pinned(reread) => Proof::Unproven(live),
             Proof::Ours(live) => {
-                send_killpg(self.pgid, sig);
+                send(self.pgid, sig);
                 Proof::Ours(live)
             }
             other => other,
@@ -501,6 +661,88 @@ mod tests {
             |_| Some(p(10, 10, 500)),
         );
         assert_eq!(proof, Proof::Unknown);
+    }
+
+    #[test]
+    fn an_empty_scan_is_confirmed_by_a_settled_scan() {
+        // Review item 3 on #3499 at 78368f6: the Linux scan lists /proc
+        // before it reads any entry. The last live member forked a child
+        // and exited in between, so the first scan saw only the anchor.
+        // "Empty" is only accepted from a scan no process creation raced.
+        let anchor = ProcId {
+            pid: 20,
+            start: 700,
+        };
+        let mut owner = GroupOwner::claim(&p(10, 10, 500))
+            .unwrap()
+            .with_anchor_id(anchor);
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Ok(vec![p(20, 10, 700), p(13, 10, 800)]),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Ours(vec![p(13, 10, 800)]));
+        // A settled scan that cannot complete leaves the group unknown.
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Unknown);
+        // A settled scan that agrees confirms the group empty.
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Ok(vec![p(20, 10, 700)]),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Empty);
+    }
+
+    /// Review of #3501 at 591a610 (MUST 1) and #3502 at 7ba3185 (MUST 2):
+    /// an adopted anchor is not this daemon's unreaped child, so it pins the
+    /// group only while it is still alive. A proof that rests on a
+    /// remembered member alone must not lead to a group-wide signal once
+    /// the adopted anchor is gone: that member could exit before delivery.
+    #[test]
+    fn an_adopted_group_is_signalled_only_while_its_anchor_lives() {
+        let anchor = ProcId {
+            pid: 20,
+            start: 700,
+        };
+        let proven = |_: &mut GroupOwner| Proof::Ours(vec![p(11, 10, 600)]);
+        let mut owner = GroupOwner::adopt(10, anchor);
+        let mut sent = Vec::new();
+        let proof = owner.signal_with(
+            GroupSignal::Term,
+            proven,
+            |_| None,
+            |pgid, sig| sent.push((pgid, sig)),
+        );
+        assert!(matches!(proof, Proof::Unproven(_)), "{proof:?}");
+        assert!(
+            sent.is_empty(),
+            "signalled a group its gone anchor no longer pins"
+        );
+        // A replaced, moved or exited anchor pins nothing either.
+        for read in [p(20, 10, 701), p(20, 12, 700), zombie(20, 10, 700)] {
+            let proof = owner.signal_with(
+                GroupSignal::Kill,
+                proven,
+                |_| Some(read.clone()),
+                |pgid, sig| sent.push((pgid, sig)),
+            );
+            assert!(matches!(proof, Proof::Unproven(_)), "{read:?}");
+        }
+        assert!(sent.is_empty());
+        // The exact live anchor still pins the group.
+        let proof = owner.signal_with(
+            GroupSignal::Term,
+            proven,
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+            |pgid, sig| sent.push((pgid, sig)),
+        );
+        assert!(matches!(proof, Proof::Ours(_)));
+        assert_eq!(sent, vec![(10, GroupSignal::Term)]);
     }
 
     #[test]
