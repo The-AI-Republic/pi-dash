@@ -323,10 +323,15 @@ pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"ag
 /// engines take legacy `managed_runner` runs pinned to them always,
 /// plus pins and the pod queue while they take pod work
 /// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
-fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
+fn eligible_condition(
+    runner_id: Uuid,
+    alive_after: DateTime<Utc>,
+    facts: &DispatchFacts,
+) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
     let managed = AgentExecutorKind::PidashAgent.value();
     let pinned = col("agent_run", "pinned_runner_id");
+    let borrowed = borrowed_locality_condition(runner_id, alive_after);
     if facts.is_pidash_agent {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
@@ -348,7 +353,8 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
             return Condition::any()
                 .add(managed_arm)
                 .add(dedicated_arm)
-                .add(local_arm);
+                .add(local_arm)
+                .add(borrowed);
         }
         return Condition::any().add(managed_arm).add(dedicated_arm);
     }
@@ -359,20 +365,118 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     } else {
         Condition::all().add(pinned.eq(runner_id))
     };
-    Condition::all()
+    let own_agent = Condition::all()
         .add(col("agent_run", "executor_kind").eq(local))
-        .add(mine_or_pod)
+        .add(mine_or_pod);
+    if facts.pod_member {
+        return Condition::any().add(own_agent).add(borrowed);
+    }
+    own_agent
+}
+
+/// Another runner's locality pin while that runner is working
+/// (PDASHOSS01-419). A locality pin is a best-effort hint, so while the
+/// runner it names is online (`online`/`busy`, heartbeat at or after
+/// `alive_after`) and holds a busy-status run it is pod work: an idle pod
+/// member takes it rather than idling while the run waits. A silent
+/// runner's pins are left to the offline pin-release sweep and its grace
+/// period. It ranks last ([`rank_expr`]) and its pin is dropped when it
+/// is taken ([`release_borrowed_pin_stmts`]). Dedicated pins are never
+/// borrowed.
+pub(crate) fn borrowed_locality_condition(
+    runner_id: Uuid,
+    alive_after: DateTime<Utc>,
+) -> Condition {
+    let statuses: Vec<SimpleExpr> = BUSY_STATUSES
+        .iter()
+        .map(|status| status.value().into())
+        .collect();
+    let pinned_is_working = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("agent_run"), Alias::new("U9"))
+        .and_where(col("U9", "status").is_in(statuses))
+        .and_where(col("U9", "runner_id").eq(col("agent_run", "pinned_runner_id")))
+        .limit(1u64)
+        .to_owned();
+    let pinned_is_online = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("runner"), Alias::new("U8"))
+        .and_where(col("U8", "id").eq(col("agent_run", "pinned_runner_id")))
+        .and_where(col("U8", "status").is_in(["online", "busy"]))
+        .and_where(col("U8", "last_heartbeat_at").gte(alive_after))
+        .limit(1u64)
+        .to_owned();
+    Condition::all()
+        .add(col("agent_run", "executor_kind").eq(AgentExecutorKind::LocalRunner.value()))
+        .add(col("agent_run", "pin_kind").eq("locality"))
+        .add(col("agent_run", "pinned_runner_id").is_not_null())
+        .add(col("agent_run", "pinned_runner_id").ne(runner_id))
+        .add(Expr::exists(pinned_is_online))
+        .add(Expr::exists(pinned_is_working))
+}
+
+/// Whether a selected run was taken from another runner's locality pin
+/// ([`borrowed_locality_condition`]), read off the locked run row: only
+/// then does the assignment need [`release_borrowed_pin_stmts`].
+pub fn is_borrowed_pin(pinned_runner_id: Option<Uuid>, pin_kind: &str, runner_id: Uuid) -> bool {
+    pin_kind == "locality" && pinned_runner_id.is_some_and(|pinned| pinned != runner_id)
+}
+
+/// The pin release for a run taken from another runner's locality pin
+/// (see [`borrowed_locality_condition`]), run after the assignment write
+/// in the same transaction: clear the parent's resume hint, then the pin,
+/// as the release-pin paths do — the new runner has no session of the
+/// parent's to resume against. Both are no-ops for a run that is unpinned
+/// or pinned to `runner_id`.
+pub fn release_borrowed_pin_stmts(run_id: Uuid, runner_id: Uuid) -> [UpdateStatement; 2] {
+    let borrowed_parent = Query::select()
+        .column("parent_run_id")
+        .from(Alias::new("agent_run"))
+        .and_where(Expr::col("id").eq(run_id))
+        .and_where(Expr::col("pin_kind").eq("locality"))
+        .and_where(Expr::col("pinned_runner_id").is_not_null())
+        .and_where(Expr::col("pinned_runner_id").ne(runner_id))
+        .to_owned();
+    let parent = Query::update()
+        .table(Alias::new("agent_run"))
+        .value(Alias::new("thread_id"), "")
+        .and_where(Expr::col("thread_id").ne(""))
+        .and_where(Expr::col("id").in_subquery(borrowed_parent))
+        .to_owned();
+    let pin = Query::update()
+        .table(Alias::new("agent_run"))
+        .value(
+            Alias::new("pinned_runner_id"),
+            SimpleExpr::Value(sea_query::Value::Uuid(None)),
+        )
+        .and_where(Expr::col("id").eq(run_id))
+        .and_where(Expr::col("pin_kind").eq("locality"))
+        .and_where(Expr::col("pinned_runner_id").is_not_null())
+        .and_where(Expr::col("pinned_runner_id").ne(runner_id))
+        .to_owned();
+    [parent, pin]
 }
 
 /// The `_is_mine` rank (`matcher.py:181-192`): today pinned-to-me is
-/// 0 and shared is 1. Under §10.2 strict 1:1 alternation — after a
-/// dedicated run — locality pins stay 0, dedicated pins demote to 2,
-/// shared stays 1. Locality pins and `pod_once` runs count as shared
+/// 0, shared is 1 and another runner's (borrowed) locality pin is 3.
+/// Under §10.2 strict 1:1 alternation — after a dedicated run —
+/// locality pins stay 0, shared stays 1, borrowed pins are 2 and
+/// dedicated pins demote to 3. Locality pins and `pod_once` runs count as shared
 /// (a `pod_once` run has no pin, so it lands in the default arm).
 fn rank_expr(runner_id: Uuid, last_dedicated: bool) -> SimpleExpr {
     let pinned = col("agent_run", "pinned_runner_id");
     if !last_dedicated {
-        return Expr::case(pinned.eq(runner_id), 0).finally(1).into();
+        // Another runner's (borrowed) locality pin comes last (3).
+        return Expr::case(pinned.clone().eq(runner_id), 0)
+            .case(pinned.is_not_null(), 3)
+            .finally(1)
+            .into();
     }
     Expr::case(
         Condition::all()
@@ -382,10 +486,13 @@ fn rank_expr(runner_id: Uuid, last_dedicated: bool) -> SimpleExpr {
     )
     .case(
         Condition::all()
-            .add(pinned.eq(runner_id))
+            .add(pinned.clone().eq(runner_id))
             .add(col("agent_run", "pin_kind").eq("dedicated")),
-        2,
+        3,
     )
+    // A borrowed locality pin is shared work the runner owes after a
+    // dedicated run: behind the unpinned queue, ahead of its dedicated pins.
+    .case(pinned.is_not_null(), 2)
     .finally(1)
     .into()
 }
@@ -410,6 +517,7 @@ pub fn next_for_runner_stmt(
     pod_id: Uuid,
     runner_id: Uuid,
     owner_id: Uuid,
+    alive_after: DateTime<Utc>,
     facts: &DispatchFacts,
 ) -> Option<SelectStatement> {
     let usability = runs_usable_by_runner_predicate(
@@ -443,7 +551,7 @@ pub fn next_for_runner_stmt(
         ]))
         .and_where(col("agent_run", "pod_id").eq(pod_id))
         .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))
-        .cond_where(eligible_condition(runner_id, facts))
+        .cond_where(eligible_condition(runner_id, alive_after, facts))
         .cond_where(usability)
         .order_by(Alias::new("_is_mine"), Order::Asc)
         .order_by(("agent_run", "created_at"), Order::Asc)
@@ -942,6 +1050,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("manual arm"),
@@ -976,6 +1085,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(true, false),
             )
             .expect("engine arm"),
@@ -1002,6 +1112,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(false, false),
             )
             .expect("pinned engine"),
@@ -1026,6 +1137,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(true, true),
             )
             .expect("paused engine"),
@@ -1048,8 +1160,15 @@ mod tests {
         let mut facts = manual_facts();
         facts.last_dedicated = true;
         let sql = render(
-            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &facts)
-                .expect("alternation"),
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &facts,
+            )
+            .expect("alternation"),
         );
         assert!(sql.contains("\"pin_kind\" = 'locality'"));
         assert!(sql.contains("\"pin_kind\" = 'dedicated'"));
@@ -1061,12 +1180,129 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("today rank"),
         );
-        assert!(!sql.contains("\"pin_kind\" = 'locality'"));
+        // The CASE has no pin_kind arm (the borrowed-locality eligibility
+        // arm in WHERE names `pin_kind = 'locality'`, PDASHOSS01-419).
+        let case = sql
+            .split_once("CASE ")
+            .expect("rank CASE")
+            .1
+            .split_once(" END")
+            .expect("CASE end")
+            .0;
+        assert!(!case.contains("pin_kind"), "{case}");
         assert!(!sql.contains("\"pin_kind\" = 'dedicated'"));
+    }
+
+    #[test]
+    fn next_for_runner_borrows_busy_runners_locality_pins() {
+        // PDASHOSS01-419: a pod member also takes another runner's
+        // locality pin while that runner holds a busy-status run.
+        let busy = BUSY_STATUSES
+            .iter()
+            .map(|s| format!("'{}'", s.value()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let borrowed = format!(
+            "(\"agent_run\".\"executor_kind\" = 'local_runner' AND \"agent_run\".\"pin_kind\" = 'locality' AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"pinned_runner_id\" <> '{RUNNER_ID}' AND EXISTS(SELECT 1 AS \"a\" FROM \"runner\" AS \"U8\" WHERE \"U8\".\"id\" = \"agent_run\".\"pinned_runner_id\" AND \"U8\".\"status\" IN ('online', 'busy') AND \"U8\".\"last_heartbeat_at\" >= '2026-11-06 07:36:52.000000 +00:00' LIMIT 1) AND EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" AS \"U9\" WHERE \"U9\".\"status\" IN ({busy}) AND \"U9\".\"runner_id\" = \"agent_run\".\"pinned_runner_id\" LIMIT 1))"
+        );
+        for facts in [manual_facts(), engine_facts(true, false)] {
+            let sql = render(
+                &next_for_runner_stmt(
+                    VISIBILITY_PRIVATE,
+                    pod(),
+                    runner(),
+                    owner(),
+                    threshold(),
+                    &facts,
+                )
+                .expect("pod member"),
+            );
+            assert!(sql.contains(&borrowed), "{sql}");
+            // Borrowed pins rank last, after own pins and the shared queue.
+            assert!(
+                sql.contains(&format!(
+                    "CASE WHEN (\"agent_run\".\"pinned_runner_id\" = '{RUNNER_ID}') THEN 0 WHEN (\"agent_run\".\"pinned_runner_id\" IS NOT NULL) THEN 3 ELSE 1 END"
+                )),
+                "{sql}"
+            );
+        }
+        let mut alternating = manual_facts();
+        alternating.last_dedicated = true;
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &alternating,
+            )
+            .expect("alternation"),
+        );
+        // After a dedicated run the runner owes shared work: a borrowed
+        // pin (2) ranks behind the unpinned queue (1) but ahead of its
+        // own dedicated pins (3), so a steady dedicated queue cannot
+        // starve it (dedicated_runner_assignment design §10.2).
+        assert!(
+            sql.contains(&format!(
+                "CASE WHEN (\"agent_run\".\"pinned_runner_id\" = '{RUNNER_ID}' AND \"agent_run\".\"pin_kind\" = 'locality') THEN 0 WHEN (\"agent_run\".\"pinned_runner_id\" = '{RUNNER_ID}' AND \"agent_run\".\"pin_kind\" = 'dedicated') THEN 3 WHEN (\"agent_run\".\"pinned_runner_id\" IS NOT NULL) THEN 2 ELSE 1 END"
+            )),
+            "{sql}"
+        );
+        // Runners that take no pod work never borrow.
+        let mut pinned_only = manual_facts();
+        pinned_only.pod_member = false;
+        for facts in [
+            pinned_only,
+            engine_facts(false, false),
+            engine_facts(true, true),
+        ] {
+            let sql = render(
+                &next_for_runner_stmt(
+                    VISIBILITY_PRIVATE,
+                    pod(),
+                    runner(),
+                    owner(),
+                    threshold(),
+                    &facts,
+                )
+                .expect("no pod work"),
+            );
+            assert!(!sql.contains("\"U9\""), "{sql}");
+        }
+    }
+
+    #[test]
+    fn release_borrowed_pin_stmts_clear_parent_hint_then_pin() {
+        let run = Uuid::parse_str("0f6c3a43-4a77-4e0e-9c84-1f3a3c1f2b11").unwrap();
+        let [parent, pin] = release_borrowed_pin_stmts(run, runner());
+        assert_eq!(
+            parent.to_string(PostgresQueryBuilder),
+            format!(
+                "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"thread_id\" <> '' AND \"id\" IN (SELECT \"parent_run_id\" FROM \"agent_run\" WHERE \"id\" = '{run}' AND \"pin_kind\" = 'locality' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}')"
+            )
+        );
+        assert_eq!(
+            pin.to_string(PostgresQueryBuilder),
+            format!(
+                "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"id\" = '{run}' AND \"pin_kind\" = 'locality' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}'"
+            )
+        );
+    }
+
+    #[test]
+    fn is_borrowed_pin_only_for_another_runners_locality_pin() {
+        let other = Uuid::parse_str("0f6c3a43-4a77-4e0e-9c84-1f3a3c1f2b12").unwrap();
+        assert!(is_borrowed_pin(Some(other), "locality", runner()));
+        // Unpinned, pinned to the taker, or a dedicated pin: no release.
+        assert!(!is_borrowed_pin(None, "locality", runner()));
+        assert!(!is_borrowed_pin(Some(runner()), "locality", runner()));
+        assert!(!is_borrowed_pin(Some(other), "dedicated", runner()));
     }
 
     #[test]
@@ -1079,8 +1315,15 @@ mod tests {
             last_dedicated: false,
         };
         let sql = render(
-            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &team)
-                .expect("team engine"),
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &team,
+            )
+            .expect("team engine"),
         );
         assert!(sql.contains("\"agent_run\".\"owner_id\""));
         assert!(!sql.contains("NOT IN"));
@@ -1089,10 +1332,19 @@ mod tests {
 
     #[test]
     fn next_for_runner_non_private_selects_nothing() {
-        assert!(next_for_runner_stmt(99, pod(), runner(), owner(), &manual_facts()).is_none());
         assert!(
-            next_for_runner_stmt(1, pod(), runner(), owner(), &engine_facts(true, false)).is_none()
+            next_for_runner_stmt(99, pod(), runner(), owner(), threshold(), &manual_facts())
+                .is_none()
         );
+        assert!(next_for_runner_stmt(
+            1,
+            pod(),
+            runner(),
+            owner(),
+            threshold(),
+            &engine_facts(true, false)
+        )
+        .is_none());
     }
 
     #[test]
@@ -1103,6 +1355,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("manual"),

@@ -291,7 +291,8 @@ pub(crate) async fn drain_pod_by_id(
                 }
             }
         };
-        let Some(next_stmt) = next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, &facts)
+        let Some(next_stmt) =
+            next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, threshold, &facts)
         else {
             continue;
         };
@@ -345,6 +346,11 @@ pub(crate) async fn drain_pod_by_id(
             .exec(&txn)
             .await
             .map_err(map)?;
+        pidash_services::runner_sessions::live_drains::release_borrowed_pin(
+            &txn, &run, run_id, runner_id,
+        )
+        .await
+        .map_err(map)?;
         effects.push(plan.after_commit);
     }
     txn.commit().await.map_err(map)?;

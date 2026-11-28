@@ -330,6 +330,28 @@ async fn write_assignment(
     Ok(())
 }
 
+/// Drop the pin of a run taken from another runner's locality pin
+/// (PDASHOSS01-419, [`drain_kernel::release_borrowed_pin_stmts`]). Call
+/// right after the assignment write, in the same transaction, with the
+/// locked run row the drain selected. Issues no SQL unless that row was
+/// borrowed ([`drain_kernel::is_borrowed_pin`]).
+pub async fn release_borrowed_pin<C: ConnectionTrait>(
+    db: &C,
+    run: &sea_orm::QueryResult,
+    run_id: Uuid,
+    runner_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    let pinned_runner_id: Option<Uuid> = run.try_get("", "pinned_runner_id")?;
+    let pin_kind: String = run.try_get("", "pin_kind")?;
+    if !drain_kernel::is_borrowed_pin(pinned_runner_id, &pin_kind, runner_id) {
+        return Ok(());
+    }
+    for stmt in drain_kernel::release_borrowed_pin_stmts(run_id, runner_id) {
+        db.execute(DbBackend::Postgres.build(&stmt)).await?;
+    }
+    Ok(())
+}
+
 /// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
 /// flip a `busy` runner with no busy-status run back to `online`.
 /// Returns whether a row changed (the Python `bool(...)`). Runs on the
@@ -399,6 +421,7 @@ async fn drain_for_runner(
         pod_id,
         runner_id,
         owner_id,
+        threshold,
         &facts,
     ) else {
         txn.commit().await?;
@@ -428,6 +451,7 @@ async fn drain_for_runner(
         assignment_protocol,
     )
     .await?;
+    release_borrowed_pin(&txn, &run, run_id, runner_id).await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
         runner_id,
@@ -505,6 +529,7 @@ async fn drain_pod(
             pod_id,
             runner_id,
             owner_id,
+            threshold,
             &facts,
         ) else {
             continue;
@@ -532,6 +557,7 @@ async fn drain_pod(
             assignment_protocol,
         )
         .await?;
+        release_borrowed_pin(&txn, &run, run_id, runner_id).await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,

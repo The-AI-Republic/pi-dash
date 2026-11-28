@@ -21,8 +21,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, JoinType,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, IntoActiveModel,
+    JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sea_query::LockType;
 use serde_json::{json, Value};
@@ -66,6 +66,7 @@ pub const POD_DISPATCH_POD_MEMBER: &str = "pod_member";
 pub const RUNNER_STATUS_REVOKED: &str = "revoked";
 pub const RUNNER_STATUS_OFFLINE: &str = "offline";
 pub const RUNNER_STATUS_ONLINE: &str = "online";
+pub const RUNNER_STATUS_BUSY: &str = "busy";
 
 /// `DEDICATED_RUN_QUEUED_MAX_AGE_SECS` (12 h, design §11.3): the bound an
 /// automatic dedicated run waits at most. The Django config registry
@@ -114,8 +115,13 @@ pub async fn is_busy(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<bool,
 }
 
 /// Offline per design §11.1 (status or heartbeat freshness).
+///
+/// A `busy` runner with a fresh heartbeat is online and working, not
+/// offline: "Busy is not unavailable" (§11.1). Treating it as offline made
+/// `dispatch_wait` say `runner_offline` for a working runner and refused a
+/// person's run on a busy dedicated runner (PDASHOSS01-419).
 pub fn runner_is_offline(runner: &runner::Model, now: DateTime<Utc>) -> bool {
-    if runner.status != RUNNER_STATUS_ONLINE {
+    if runner.status != RUNNER_STATUS_ONLINE && runner.status != RUNNER_STATUS_BUSY {
         return true;
     }
     match runner.last_heartbeat_at {
@@ -1468,11 +1474,20 @@ pub async fn runs_ahead(
             .filter(agent_run::Column::Id.ne(run.id))
             .count(db)
             .await?;
-        // One shared run is served before the next dedicated (§10.2).
+        // One shared run is served before the next dedicated (§10.2):
+        // unpinned pod work, or another busy runner's locality pin that
+        // this runner would borrow (PDASHOSS01-419).
         let shared = agent_run::Entity::find()
             .filter(agent_run::Column::PodId.eq(run.pod_id))
             .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
-            .filter(agent_run::Column::PinnedRunnerId.is_null())
+            .filter(
+                Condition::any()
+                    .add(agent_run::Column::PinnedRunnerId.is_null())
+                    .add(crate::runner_sessions::drain::borrowed_locality_condition(
+                        pinned_id,
+                        alive_threshold(Utc::now()),
+                    )),
+            )
             .one(db)
             .await?;
         if shared.is_some() {
@@ -3238,6 +3253,22 @@ mod tests {
         runner.status = RUNNER_STATUS_ONLINE.to_owned();
         runner.last_heartbeat_at = None;
         assert!(runner_is_offline(&runner, Utc::now()));
+    }
+
+    /// PDASHOSS01-419: a busy runner with a fresh heartbeat is online
+    /// (§11.1 "Busy is not unavailable"); a stale one is still offline.
+    #[test]
+    fn busy_runner_with_fresh_heartbeat_is_not_offline() {
+        let now = Utc::now();
+        let mut runner = runner_fixture();
+        runner.status = RUNNER_STATUS_BUSY.to_owned();
+        runner.last_heartbeat_at = Some(now.into());
+        assert!(!runner_is_offline(&runner, now));
+        runner.last_heartbeat_at = Some((now - chrono::Duration::minutes(10)).into());
+        assert!(runner_is_offline(&runner, now));
+        runner.status = RUNNER_STATUS_REVOKED.to_owned();
+        runner.last_heartbeat_at = Some(now.into());
+        assert!(runner_is_offline(&runner, now));
     }
 
     #[test]
