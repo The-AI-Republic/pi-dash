@@ -77,18 +77,23 @@ case "$svc:$1" in
     while [ $# -gt 0 ]; do case "$1" in -U) user=$2; shift 2 ;; -d) db=$2; shift 2 ;; -h) host=$2; shift 2 ;; -p) port=$2; shift 2 ;; *) shift ;; esac; done
     if [ "$port" != "5432" ]; then echo "psql: error: connection to server at \\"$host\\", port $port failed: Connection refused" >&2; exit 2; fi
     if [ "$user" != "$STUB_PG_ROLE" ]; then echo "psql: error: FATAL:  role \\"$user\\" does not exist" >&2; exit 2; fi
-    # The official image trusts the local socket; TCP needs the password.
-    if [ -n "$host" ] && [ "\${cenv[PGPASSWORD]}" != "\${STUB_PG_PASS-pi-dash}" ]; then
+    # The official image's pg_hba.conf trusts the socket and loopback
+    # (127.0.0.1, ::1); only other addresses need the password.
+    case "$host" in ""|127.0.0.1|localhost|::1) trusted=1 ;; *) trusted="" ;; esac
+    if [ -z "$trusted" ] && [ "\${cenv[PGPASSWORD]}" != "\${STUB_PG_PASS-pi-dash}" ]; then
       echo "psql: error: connection to server at \\"$host\\", port $port failed: FATAL:  password authentication failed for user \\"$user\\"" >&2; exit 2
     fi
     if [ "$db" != "$STUB_PG_DB" ]; then echo "psql: error: FATAL:  database \\"$db\\" does not exist" >&2; exit 2; fi
     echo 1; exit 0 ;;
-  pi-dash-mq:rabbitmq-diagnostics) exit 0 ;;
+  pi-dash-mq:rabbitmq-diagnostics) [ -n "$STUB_MQ_DOWN" ] && exit 69; exit 0 ;;
   pi-dash-mq:rabbitmqctl)
     shift; [ "$1" == "-q" ] || [ "$1" == "-s" ] && shift
     case "$1" in
       authenticate_user)
-        [ "$2" == "$STUB_MQ_USER" ] && [ "$3" == "$STUB_MQ_PASS" ] && { echo "Success"; exit 0; }
+        # The password must come on stdin, never in the arguments.
+        [ $# -eq 2 ] || { echo "password passed as an argument" >&2; exit 97; }
+        IFS= read -r pass
+        [ "$2" == "$STUB_MQ_USER" ] && [ "$pass" == "$STUB_MQ_PASS" ] && { echo "Success"; exit 0; }
         echo "Error: failed to authenticate user \\"$2\\"" >&2; exit 65 ;;
       list_vhosts) printf '%s\\n' "$STUB_MQ_VHOST"; exit 0 ;;
       list_permissions)
@@ -244,8 +249,10 @@ describe("install.sh credential preflight", () => {
   it("logs in to Postgres on the URL's port", () => {
     const env = "DATABASE_URL=postgresql://pi-dash:pi-dash@pi-dash-db:6543/pi-dash\n";
     const { status, out, calls } = runCheck({ env });
-    assert.notEqual(status, 0, out);
-    assert.match(calls, /psql -h 127\.0\.0\.1 -p 6543 /);
+    assert.match(calls, /psql -h pi-dash-db -p 6543 /);
+    // Nothing answers there: a warning, not a credential mismatch.
+    assert.equal(status, 0, out);
+    assert.match(out, /not ready/);
     assert.doesNotMatch(out, /credentials the volume/);
   });
 
@@ -279,12 +286,34 @@ describe("install.sh credential preflight", () => {
     assert.match(out, /AMQP_URL/);
   });
 
-  it("reports a database that never became ready, not a credential mismatch", () => {
-    const { status, out } = runCheck({ extra: { STUB_PG_BOOT: "100" } });
-    assert.notEqual(status, 0, out);
+  it("warns and carries on when Postgres is slow to become ready", () => {
+    // A healthy database still in crash recovery is no credential problem;
+    // the API retries its own connection, as it did before the preflight.
+    const { status, out, calls } = runCheck({ extra: { STUB_PG_BOOT: "100" } });
+    assert.equal(status, 0, out);
     assert.match(out, /PostgreSQL/);
-    assert.match(out, /not ready|did not become ready/);
+    assert.match(out, /not ready/);
     assert.doesNotMatch(out, /credentials the volume/);
+    assert.match(calls, /rabbitmqctl/);
+  });
+
+  it("warns and carries on when RabbitMQ is slow to become ready", () => {
+    const { status, out } = runCheck({ extra: { STUB_MQ_DOWN: "1" } });
+    assert.equal(status, 0, out);
+    assert.match(out, /RabbitMQ/);
+    assert.match(out, /not ready/);
+  });
+
+  it("logs in to Postgres through the service address, which the image does not trust", () => {
+    const { calls } = runCheck();
+    assert.match(calls, /psql -h pi-dash-db -p 5432 /);
+  });
+
+  it("passes the RabbitMQ password on stdin, so a leading - and the process list are safe", () => {
+    const env = "AMQP_URL=amqp://pi-dash:-s3cret@pi-dash-mq:5672/pi-dash\n";
+    const { status, out, calls } = runCheck({ env, volumes: { ...VOLUMES_OK, STUB_MQ_PASS: "-s3cret" } });
+    assert.equal(status, 0, out);
+    assert.doesNotMatch(calls, /s3cret/);
   });
 });
 

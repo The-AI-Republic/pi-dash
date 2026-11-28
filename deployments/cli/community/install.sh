@@ -493,13 +493,15 @@ function credentialMismatch() {
     echo "   Stop the data services with: ./setup.sh stop" >&2
 }
 
+# A slow service (first boot, crash recovery) is not a credential problem:
+# warn, skip its check and let the app retry its own connection.
 function serviceNotReady() {
     local service=$1 detail=$2
     echo "" >&2
-    echo "   $service did not become ready: $detail ❌" >&2
+    echo "   $service is not ready yet ($detail); skipping its credential check ⚠️" >&2
+    echo "   If the app cannot connect, check its logs with:" >&2
+    echo "   $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH logs $3" >&2
     echo "" >&2
-    echo "   Check its logs with: $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH logs $3" >&2
-    echo "   Stop the data services with: ./setup.sh stop" >&2
 }
 
 # Postgres and RabbitMQ only take their credentials from the environment
@@ -526,27 +528,8 @@ function checkBundledCredentials() {
         done
         if [ -z "$ready" ]; then
             serviceNotReady "PostgreSQL" "no answer on port $port (${out:-no output})" "pi-dash-db"
-            return 1
-        fi
-        # Log in over TCP with the password, as the app does: the image
-        # trusts its local socket, which would skip the password.
-        ready=""
-        for ((i = 0; i < attempts; i++)); do
-            out=$(PGPASSWORD="$password" $compose exec -T -e PGPASSWORD pi-dash-db psql -h 127.0.0.1 -p "$port" -U "$user" -d "$name" -tAc "select 1" 2>&1) && { ready=1; break; }
-            [[ $out == *"does not exist"* || $out == *"password authentication failed"* ]] && break
-            sleep "$interval"
-        done
-        if [[ $out == *"password authentication failed"* ]]; then
-            credentialMismatch "PostgreSQL" "the database volume does not accept the password for role \"$user\"" "DATABASE_URL"
-            return 1
-        fi
-        if [[ $out == *"does not exist"* ]]; then
-            credentialMismatch "PostgreSQL" "the database volume has no role \"$user\" with database \"$name\" (${out##*FATAL:  })" "DATABASE_URL"
-            return 1
-        fi
-        if [ -z "$ready" ]; then
-            serviceNotReady "PostgreSQL" "${out##*error: }" "pi-dash-db"
-            return 1
+        else
+            checkPostgresLogin || return 1
         fi
     fi
 
@@ -565,21 +548,52 @@ function checkBundledCredentials() {
         done
         if [ -z "$ready" ]; then
             serviceNotReady "RabbitMQ" "the broker is not running" "pi-dash-mq"
-            return 1
+        else
+            checkRabbitLogin || return 1
         fi
-        if ! $compose exec -T pi-dash-mq rabbitmqctl -q authenticate_user "$user" "$password" >/dev/null 2>&1; then
-            credentialMismatch "RabbitMQ" "the broker volume does not accept user \"$user\"" "AMQP_URL"
-            return 1
-        fi
-        if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_vhosts name 2>/dev/null | grep -qxF -- "$name"; then
-            credentialMismatch "RabbitMQ" "the broker volume has no vhost \"$name\"" "AMQP_URL"
-            return 1
-        fi
-        # A valid user on an existing vhost can still lack access to it.
-        if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_permissions -p "$name" 2>/dev/null | cut -f1 | grep -qxF -- "$user"; then
-            credentialMismatch "RabbitMQ" "user \"$user\" has no permissions on vhost \"$name\"" "AMQP_URL"
-            return 1
-        fi
+    fi
+    return 0
+}
+
+# Uses checkBundledCredentials' locals. Logs in by the service name, as the
+# app does: the image's pg_hba.conf trusts the socket and loopback, so only
+# a connection from the container's network address checks the password.
+function checkPostgresLogin() {
+    ready=""
+    for ((i = 0; i < attempts; i++)); do
+        out=$(PGPASSWORD="$password" $compose exec -T -e PGPASSWORD pi-dash-db psql -h "$host" -p "$port" -U "$user" -d "$name" -tAc "select 1" 2>&1) && { ready=1; break; }
+        [[ $out == *"does not exist"* || $out == *"password authentication failed"* ]] && break
+        sleep "$interval"
+    done
+    if [[ $out == *"password authentication failed"* ]]; then
+        credentialMismatch "PostgreSQL" "the database volume does not accept the password for role \"$user\"" "DATABASE_URL"
+        return 1
+    fi
+    if [[ $out == *"does not exist"* ]]; then
+        credentialMismatch "PostgreSQL" "the database volume has no role \"$user\" with database \"$name\" (${out##*FATAL:  })" "DATABASE_URL"
+        return 1
+    fi
+    if [ -z "$ready" ]; then
+        serviceNotReady "PostgreSQL" "${out##*error: }" "pi-dash-db"
+    fi
+    return 0
+}
+
+# Uses checkBundledCredentials' locals. The password goes on stdin, so it is
+# not in any process's arguments and a leading "-" is not read as an option.
+function checkRabbitLogin() {
+    if ! printf '%s\n' "$password" | $compose exec -T pi-dash-mq rabbitmqctl -q authenticate_user "$user" >/dev/null 2>&1; then
+        credentialMismatch "RabbitMQ" "the broker volume does not accept user \"$user\"" "AMQP_URL"
+        return 1
+    fi
+    if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_vhosts name 2>/dev/null | grep -qxF -- "$name"; then
+        credentialMismatch "RabbitMQ" "the broker volume has no vhost \"$name\"" "AMQP_URL"
+        return 1
+    fi
+    # A valid user on an existing vhost can still lack access to it.
+    if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_permissions -p "$name" 2>/dev/null | cut -f1 | grep -qxF -- "$user"; then
+        credentialMismatch "RabbitMQ" "user \"$user\" has no permissions on vhost \"$name\"" "AMQP_URL"
+        return 1
     fi
     return 0
 }
