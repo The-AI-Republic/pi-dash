@@ -101,6 +101,9 @@ def test_run_ai_queues_behind_busy_dedicated(admin_client, seeder, world, online
         json={"triggered_by": "run_ai", "work_item": world["issue1"]["id"]},
     )
     assert resp.status_code == 201, resp.text[:500]
+    # The server created this run; track it so teardown removes it before
+    # the runner, issue, pod and workspace it references.
+    seeder.track.add("agent_run", resp.json()["id"])
     assert resp.json()["dispatch_wait"]["reason"] == "runner_busy"
     run = seeder.db.fetchone(
         "SELECT status, pinned_runner_id FROM agent_run WHERE id = %s",
