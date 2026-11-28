@@ -3022,6 +3022,40 @@ async fn issue_busy_refuses_to_call_the_branch_free_without_an_active_run_key() 
     assert!(err.message.contains("active_run"), "{}", err.message);
 }
 
+#[tokio::test]
+async fn issue_busy_treats_an_active_run_without_an_id_as_busy() {
+    // Fail closed: a non-null block means some run holds the slot, even if
+    // its id is missing or blank, so the branch is never called free.
+    for id in [r#""id":"","#, ""] {
+        let block =
+            running_block(Some("pi-dash/eng-7")).replace(&format!(r#""id":"{BUSY_RUN}","#), id);
+        assert!(!block.contains(BUSY_RUN));
+        let body = busy_issue_body(Some(&block), "pi-dash/eng-7");
+        let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+        let out = pidash::cli::issue::issue_busy(&client_for_run(&fake, BUSY_RUN), "ENG-7")
+            .await
+            .expect("issue busy");
+        assert_eq!(out["busy"], serde_json::json!(true), "{out}");
+        assert_eq!(out["owned_by_caller"], serde_json::json!(false), "{out}");
+        let advice = out["advice"].as_str().unwrap();
+        assert!(advice.contains("do not push"), "{advice}");
+    }
+}
+
+#[tokio::test]
+async fn issue_busy_keeps_an_explicit_null_run_branch() {
+    // The server sent `active_run.branch: null` (it knows no branch for the
+    // run). The top-level `git_work_branch` may be a stale replica read, so
+    // the CLI must not name it as the run's branch.
+    let body = busy_issue_body(Some(&running_block(None)), "pi-dash/stale");
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let out = pidash::cli::issue::issue_busy(&client(&fake), "ENG-7")
+        .await
+        .expect("issue busy");
+    assert_eq!(out["busy"], serde_json::json!(true));
+    assert_eq!(out["branch"], serde_json::Value::Null, "{out}");
+}
+
 // ---- `state list` project forms (PDASHOSS01-403) ----
 
 const STATES_BODY: &str = r#"{"count":2,"results":[{"id":"s1","name":"Todo","group":"unstarted"},{"id":"s2","name":"Done","group":"completed"}]}"#;

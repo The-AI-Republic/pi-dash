@@ -637,8 +637,10 @@ pub async fn issue_busy(client: &ApiClient, identifier: &str) -> Result<Value, C
 ///
 /// `active_run` is the server's block verbatim (`null` when no run occupies
 /// the slot).
-/// `branch` is the run's working branch when the server reports one
-/// (`active_run.branch`), else the issue's `git_work_branch`, else `null`.
+/// `branch` is the run's `active_run.branch` when the block has that key
+/// (an explicit `null` stays `null`); only a block without the key falls
+/// back to the issue's `git_work_branch`. With no active run it is the
+/// issue's `git_work_branch`.
 /// Any active run other than the caller's own makes the branch busy, from
 /// `queued` on: a queued run is about to check that branch out.
 pub fn busy_report(raw: &Value, identifier: &str, caller_run_id: Option<&str>) -> Value {
@@ -654,18 +656,25 @@ pub fn busy_report(raw: &Value, identifier: &str, caller_run_id: Option<&str>) -
         .cloned()
         .unwrap_or(Value::Null);
     let run_id = non_empty(active_run.get("id"));
-    let branch =
-        non_empty(active_run.get("branch")).or_else(|| non_empty(raw.get("git_work_branch")));
+    // An explicit `branch` (even `null`) is the server's answer for the run;
+    // the top-level `git_work_branch` is only a fallback for servers whose
+    // block has no `branch` key.
+    let branch = match active_run.get("branch") {
+        Some(b) => non_empty(Some(b)),
+        None => non_empty(raw.get("git_work_branch")),
+    };
     let owned_by_caller = match (run_id.as_deref(), caller_run_id) {
         (Some(run), Some(caller)) => run.eq_ignore_ascii_case(caller.trim()),
         _ => false,
     };
-    let busy = run_id.is_some() && !owned_by_caller;
+    // Fail closed: any non-null block means a run holds the slot, even when
+    // its id is missing.
+    let busy = active_run.is_object() && !owned_by_caller;
     let advice = if owned_by_caller {
         "this run owns the issue; push to its branch as usual".to_string()
     } else if busy {
         let status = non_empty(active_run.get("status")).unwrap_or_else(|| "active".to_string());
-        let run = run_id.as_deref().unwrap_or_default();
+        let run = run_id.as_deref().unwrap_or("(id unknown)");
         match branch.as_deref() {
             Some(b) => format!(
                 "agent run {run} ({status}) owns branch {b}: do not push to it; comment on {identifier} instead"

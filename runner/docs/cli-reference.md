@@ -56,8 +56,10 @@ state, state_group}`) plus `has_open_blockers` (true while any
   owned_by_caller, branch, active_run, advice}`. `busy` is `true` while
   another agent run is active on the issue (from `queued` on);
   `owned_by_caller` is `true` when that run is your own (`PIDASH_RUN_ID`),
-  and then `busy` is `false`. `branch` is `active_run.branch`, else the
-  issue's `git_work_branch`, else `null`. Read-only: it takes no lock, and
+  and then `busy` is `false`. Any non-null `active_run` counts as busy,
+  even one without an `id`. `branch` is `active_run.branch` (an explicit
+  `null` stays `null`); only a block without a `branch` key, or an idle
+  issue, falls back to the issue's `git_work_branch`. Read-only: it takes no lock, and
   exits 0 whenever the read succeeds — check `busy`. It fails (exit 5)
   when the server's issue read has no `active_run` key (a server that
   predates it), because an active run would not show; treat that as
