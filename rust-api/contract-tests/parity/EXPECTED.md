@@ -147,7 +147,7 @@ routes (GET/PATCH, merge-into, replace-candidates). Nothing pending.
 
 ```
 
-### Rust-only routes (9, all justified in-script)
+### Rust-only routes (11, all justified in-script)
 
 New Rust-only surface fails the check until a justification is added to
 `RUST_ONLY_JUSTIFICATIONS` in `route_inventory.py` (reviewed). Current:
@@ -163,6 +163,10 @@ New Rust-only surface fails the check until a justification is added to
   Django's compound `{project_identifier}-{issue_identifier}` (the
   `ALIASES` join; dashless segments proxy so Django answers its own
   404 — behaviorally exact, hence not rust-only).
+- `/api/runners/{runner_id}/reconfigure/` and
+  `/api/runners/{runner_id}/reconfigure/{request_id}/` — the runner edit
+  dialog's machine-settings path (#3399): new-system-only, the old system
+  has no runner edit, so Django has no counterpart.
 - The four v1 scheduler read routes (`.../schedulers/`,
   `.../projects/{project_id}/schedulers[/{scheduler_id}[/runs]]/`) —
   stage-8 drift (PIDASHCONV-1061): live on `origin/main` (04920ea3) but
@@ -232,6 +236,22 @@ they diff as MISSING under the reserved `W-cloud-agent` gap id.
 W-cloud-agent :: cloud_agent.run_agent_run :: absent-from-rust-table
 W-cloud-agent :: cloud_agent.scan_queued_runs :: absent-from-rust-table
 W-cloud-agent :: cloud_agent.sweep_stale_runs :: absent-from-rust-table
+```
+
+### W-github-sync (3 rows; retired in Rust by PDASHOSS01-358)
+
+PDASHOSS01-358 (c111c75d3, #3041, github_* sunset) deleted the legacy
+`github_sync_task` poller from the Rust worker: no Rust registration,
+the 4h beat runs `git_sync.sync_all_bindings` instead, and the deploy
+step drops queued `pi_dash.bgtasks.github_sync_task.%` rows. Django
+still registers the three tasks (its oracles pin them until the Django
+side of the sunset lands), so they diff as MISSING under the reserved
+`W-github-sync` gap id. Delete this block when Django drops them.
+
+```expected-jobs
+W-github-sync :: pi_dash.bgtasks.github_sync_task.post_completion_comment :: absent-from-rust-table
+W-github-sync :: pi_dash.bgtasks.github_sync_task.sync_all_repos :: absent-from-rust-table
+W-github-sync :: pi_dash.bgtasks.github_sync_task.sync_one_repo :: absent-from-rust-table
 ```
 
 ### W-mail (0 rows; wired by PIDASHCONV-865)
