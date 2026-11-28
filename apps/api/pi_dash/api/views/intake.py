@@ -78,7 +78,7 @@ class IntakeIssueListCreateAPIEndpoint(BaseAPIView):
                 project_id=self.kwargs.get("project_id"),
                 intake_id=intake.id,
             )
-            .select_related("issue", "workspace", "project")
+            .select_related("issue", "issue__state", "workspace", "project")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         )
 
@@ -248,7 +248,7 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
                 project_id=self.kwargs.get("project_id"),
                 intake_id=intake.id,
             )
-            .select_related("issue", "workspace", "project")
+            .select_related("issue", "issue__state", "workspace", "project")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         )
 

@@ -361,7 +361,8 @@ pub struct ListArgs {
     pub priority: Option<String>,
 
     /// Return only these fields per item, comma-separated, e.g.
-    /// `id,sequence_id,name,state,parent`.
+    /// `id,sequence_id,name,state,state_detail,parent`. `state` is the state
+    /// UUID; `state_detail` is `{name, group}` for it (null without a state).
     #[arg(long)]
     pub fields: Option<String>,
 }
