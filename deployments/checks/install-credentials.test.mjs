@@ -344,6 +344,89 @@ syncEnvFile; echo "status=$?"`,
     assert.match(out, /DATABASE_URL/);
   });
 
+  // Upgrade: the downloaded template is merged with the old values while
+  // staged, and becomes the active pi_dash.env only once the merge worked.
+  function runUpgradeEnv(body, { env, template }) {
+    const dir = mkdtempSync(join(tmpdir(), "pidash-upgrade-"));
+    const envFile = join(dir, "pi_dash.env");
+    writeFileSync(envFile, env);
+    const staged = join(dir, "variables-upgrade.env");
+    writeFileSync(staged, template);
+    const script = [
+      `cd ${JSON.stringify(dir)}`,
+      `SETUP_SH_SOURCE_ONLY=1 source ${JSON.stringify(INSTALL_SH)}`,
+      `PI_DASH_INSTALL_DIR=${JSON.stringify(dir)}`,
+      `DOCKER_ENV_PATH=${JSON.stringify(envFile)}`,
+      "TS=ts",
+      'mkdir -p "$PI_DASH_INSTALL_DIR/archive"',
+      body,
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: dir } });
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null);
+    return {
+      status: result.status,
+      out: `${result.stdout}${result.stderr}`,
+      file: readFileSync(envFile, "utf8"),
+      backup: read("pi_dash.env.bak"),
+      staged: read("variables-upgrade.env"),
+    };
+  }
+
+  const OLD_ENV = `APP_RELEASE=v1\nDATABASE_URL=${URL_VALUE}\nAMQP_URL=amqp://u:p@pi-dash-mq:5672/v\n`;
+  const TEMPLATE = "APP_RELEASE=stable\nDATABASE_URL=\nAMQP_URL=\nNEW_KEY=x\n";
+
+  it("leaves the active env file intact when the upgrade merge fails", () => {
+    // Only the second value fails to carry over: a partial merge must not
+    // become pi_dash.env, and a retry must still back up the original.
+    const { file, backup, out } = runUpgradeEnv(
+      `updateCustomVariables() { :; }
+eval "orig_$(declare -f updateEnvFile)"
+updateEnvFile() { [ "$1" = AMQP_URL ] && return 1; orig_updateEnvFile "$@"; }
+installUpgradeEnvFile "$PI_DASH_INSTALL_DIR/variables-upgrade.env"; echo "status=$?"`,
+      { env: OLD_ENV, template: TEMPLATE }
+    );
+    assert.match(out, /status=[1-9]/);
+    assert.equal(file, OLD_ENV, out);
+    assert.equal(backup, OLD_ENV);
+    assert.match(out, /AMQP_URL/);
+    assert.match(out, /unchanged/);
+  });
+
+  it("leaves the active env file intact when the custom variables cannot be written", () => {
+    const { file, out } = runUpgradeEnv(
+      `DOCKERHUB_USER=u APP_RELEASE=stable PULL_POLICY=if_not_present CUSTOM_BUILD=false
+updateEnvFile() { return 1; }
+installUpgradeEnvFile "$PI_DASH_INSTALL_DIR/variables-upgrade.env"; echo "status=$?"`,
+      { env: OLD_ENV, template: TEMPLATE }
+    );
+    assert.match(out, /status=[1-9]/);
+    assert.equal(file, OLD_ENV, out);
+  });
+
+  it("installs the merged template as the active env file on success", () => {
+    const { file, backup, staged, out } = runUpgradeEnv(
+      `updateCustomVariables() { :; }
+installUpgradeEnvFile "$PI_DASH_INSTALL_DIR/variables-upgrade.env"; echo "status=$?"`,
+      { env: OLD_ENV, template: TEMPLATE }
+    );
+    assert.match(out, /status=0/);
+    assert.equal(
+      file,
+      `APP_RELEASE=v1\nDATABASE_URL=${URL_VALUE}\nAMQP_URL=amqp://u:p@pi-dash-mq:5672/v\nNEW_KEY=x\n`,
+      out
+    );
+    assert.equal(backup, OLD_ENV);
+    assert.equal(staged, null, "staged template left behind");
+  });
+
+  it("download() installs the env file through the staged merge", () => {
+    const text = readFileSync(INSTALL_SH, "utf8");
+    const body = /function download\(\) \{([\s\S]*?)\n\}/.exec(text);
+    assert.ok(body !== null, "download not found");
+    assert.match(body[1], /installUpgradeEnvFile "\$PI_DASH_INSTALL_DIR\/variables-upgrade\.env" \|\| exit 1/);
+    assert.doesNotMatch(body[1], /mv \S*variables-upgrade\.env/);
+  });
+
   it("carries a connection URL from the backup into the new env file on upgrade", () => {
     const { file, out } = runEnv("syncEnvFile", {
       env: "APP_RELEASE=stable\nDATABASE_URL=\nAMQP_URL=\n",

@@ -213,23 +213,26 @@ function ensureGeneratedSecret() {
 }
 
 function updateCustomVariables(){
+    local file=${1:-$DOCKER_ENV_PATH}
     echo "Updating custom variables..." >&2
-    updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
-    updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$DOCKER_ENV_PATH"
-    updateEnvFile "PULL_POLICY" "$PULL_POLICY" "$DOCKER_ENV_PATH"
-    updateEnvFile "CUSTOM_BUILD" "$CUSTOM_BUILD" "$DOCKER_ENV_PATH"
+    updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$file" &&
+    updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$file" &&
+    updateEnvFile "PULL_POLICY" "$PULL_POLICY" "$file" &&
+    updateEnvFile "CUSTOM_BUILD" "$CUSTOM_BUILD" "$file" || return 1
     echo "Custom variables updated successfully" >&2
 }
 
 function syncEnvFile(){
+    # Merge into $1 (default: the active pi_dash.env).
+    local target=${1:-$DOCKER_ENV_PATH}
     echo "Syncing environment variables..." >&2
     if [ -f "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" ]; then
-        updateCustomVariables
-        
-        # READ keys of pi_dash.env and update the values from pi_dash.env.bak.
-        # Read a snapshot: updateEnvFile rewrites pi_dash.env in place.
+        updateCustomVariables "$target" || return 1
+
+        # READ keys of the target and update the values from pi_dash.env.bak.
+        # Read a snapshot: updateEnvFile rewrites the target in place.
         local current failed=""
-        current=$(cat "$DOCKER_ENV_PATH")
+        current=$(cat "$target") || return 1
         while IFS= read -r line
         do
             # ignore is the line is empty or starts with #
@@ -239,15 +242,37 @@ function syncEnvFile(){
             key=$(echo "$line" | cut -d'=' -f1)
             value=$(getEnvValue "$key" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
             if [ -n "$value" ]; then
-                updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH" || failed+=" $key"
+                updateEnvFile "$key" "$value" "$target" || failed+=" $key"
             fi
         done <<< "$current"
         if [ -n "$failed" ]; then
-            echo "Could not carry over:$failed. Copy them from $PI_DASH_INSTALL_DIR/pi_dash.env.bak into $DOCKER_ENV_PATH ❌" >&2
+            echo "Could not carry over:$failed from $PI_DASH_INSTALL_DIR/pi_dash.env.bak into $target ❌" >&2
             return 1
         fi
     fi
     echo "Environment variables synced successfully" >&2
+}
+
+# Upgrade: back up the active pi_dash.env, merge its values into the staged
+# template $1, and only then make the merged template the active file. A
+# failed merge leaves pi_dash.env (and so the next run's backup) unchanged.
+function installUpgradeEnvFile(){
+    local staged=$1
+    if [ -f "$DOCKER_ENV_PATH" ]; then
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env" &&
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" || {
+            echo "Could not back up $DOCKER_ENV_PATH; it was left unchanged ❌" >&2
+            return 1
+        }
+    fi
+    if ! syncEnvFile "$staged"; then
+        echo "$DOCKER_ENV_PATH was left unchanged; the partly merged template is $staged ❌" >&2
+        return 1
+    fi
+    if ! mv -f "$staged" "$DOCKER_ENV_PATH"; then
+        echo "Could not replace $DOCKER_ENV_PATH; it was left unchanged ❌" >&2
+        return 1
+    fi
 }
 
 function buildYourOwnImage(){
@@ -360,15 +385,7 @@ function download() {
         fi
     fi
 
-    if [ -f "$DOCKER_ENV_PATH" ];
-    then
-        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak"
-    fi
-
-    mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
-
-    syncEnvFile || exit 1
+    installUpgradeEnvFile "$PI_DASH_INSTALL_DIR/variables-upgrade.env" || exit 1
 
     # Generate fresh per-install values for any blank secrets. On upgrades
     # syncEnvFile will already have pulled forward the user's existing values,
