@@ -744,6 +744,7 @@ async fn promised_env_vars_are_set_for_the_kind() {
         let env = RunEnv {
             run_id: uuid::Uuid::new_v4(),
             backend: BackendKind::None,
+            process_group: None,
             runner_bin_dir: None,
             config_dir: None,
             data_dir: None,
