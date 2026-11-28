@@ -6,6 +6,7 @@ pub mod fs;
 pub mod hostname;
 pub mod logging;
 pub mod paths;
+pub mod procinfo;
 pub mod runner_id;
 pub mod runner_name;
 pub mod shell;
