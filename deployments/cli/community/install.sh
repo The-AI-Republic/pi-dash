@@ -384,6 +384,7 @@ IFS= read -r -d '' CREDENTIAL_PROBE <<'PROBE' || true
 # Prints one "credential-check<TAB>STATUS<TAB>SERVICE<TAB>DETAIL" line per
 # bundled service; STATUS is OK, SKIP, MISMATCH or NOTREADY.
 import os
+import re
 import signal
 import sys
 import time
@@ -430,6 +431,24 @@ def retry(service, attempt):
         signal.alarm(0)
 
 
+# The server's own login rejections, as libpq reports them ("FATAL:  ...").
+# Client-side failures (a missing TLS file, a refused connection) are not
+# about the volume's credentials and must not match.
+POSTGRES_REFUSAL = re.compile(
+    r"FATAL:\s+("
+    r"password authentication failed for user "
+    r'|role "[^"]*" does not exist'
+    r'|database "[^"]*" does not exist'
+    r'|role "[^"]*" is not permitted to log in'
+    r"|no pg_hba\.conf entry for "
+    r")"
+)
+
+
+def postgres_refusal(text):
+    return POSTGRES_REFUSAL.search(text) is not None
+
+
 def check_postgres():
     import dj_database_url
     import psycopg
@@ -465,14 +484,9 @@ def check_postgres():
             return ("OK", "")
         except psycopg.OperationalError as error:
             text = str(error)
-            # 28P01 bad password, 28000 no such role / no pg_hba entry,
-            # 3D000 no such database. Over TCP these only come from the
-            # final server: the image's init server listens on the socket.
-            if (
-                getattr(error, "sqlstate", None) in ("28P01", "28000", "3D000")
-                or "password authentication failed" in text
-                or "does not exist" in text
-            ):
+            # Over TCP these only come from the final server: the image's
+            # first-boot init server listens on the socket only.
+            if postgres_refusal(text):
                 return ("MISMATCH", text.split("FATAL:")[-1].strip())
             return ("RETRY", text)
 
@@ -520,10 +534,18 @@ def check_rabbitmq():
     retry("RabbitMQ", attempt)
 
 
+def guarded(service, check):
+    """A crash in one check must not hide another's result."""
+    try:
+        check()
+    except Exception as error:
+        say("ERROR", service, f"{type(error).__name__}: {error}")
+
+
 if "db" in SERVICES:
-    check_postgres()
+    guarded("PostgreSQL", check_postgres)
 if "mq" in SERVICES:
-    check_rabbitmq()
+    guarded("RabbitMQ", check_rabbitmq)
 PROBE
 
 function credentialMismatch() {
@@ -568,17 +590,18 @@ function checkBundledCredentials() {
         return 0
     fi
 
-    local out
-    if ! out=$(printf '%s\n' "$CREDENTIAL_PROBE" | $compose run --rm --no-deps -T \
+    local out run_status
+    out=$(printf '%s\n' "$CREDENTIAL_PROBE" | $compose run --rm --no-deps -T \
         -e CREDENTIAL_CHECK_SERVICES="${check# }" -e CREDENTIAL_CHECK_SECONDS="$seconds" \
-        api python3 - 2>&1); then
-        credentialCheckSkipped "The credential check could not run" "$(tail -n 1 <<< "$out")"
-        return 0
-    fi
+        api python3 - 2>&1)
+    run_status=$?
 
-    local tag status service detail failed=0
+    # Act on every result the probe reported, even if the container failed
+    # afterwards: a reported refusal still stops the start.
+    local tag status service detail failed=0 reported=0
     while IFS=$'\t' read -r tag status service detail; do
         [ "$tag" == "credential-check" ] || continue
+        reported=1
         case $status in
             MISMATCH)
                 if [ "$service" == "PostgreSQL" ]; then
@@ -591,11 +614,21 @@ function checkBundledCredentials() {
             NOTREADY)
                 credentialCheckSkipped "$service is not ready yet" "$detail"
                 ;;
+            ERROR)
+                credentialCheckSkipped "$service could not be checked" "$detail"
+                ;;
             OK)
                 echo "   $service accepts the app's credentials ✅"
                 ;;
         esac
     done <<< "$out"
+    if [ $run_status -ne 0 ]; then
+        if [ $reported -eq 0 ]; then
+            credentialCheckSkipped "The credential check could not run" "$(tail -n 1 <<< "$out")"
+        else
+            credentialCheckSkipped "The credential check did not finish" "$(tail -n 1 <<< "$out")"
+        fi
+    fi
     return $failed
 }
 

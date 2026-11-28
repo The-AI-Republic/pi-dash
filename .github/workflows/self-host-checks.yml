@@ -21,6 +21,8 @@ on:
       - "apps/proxy/**"
       - "apps/web_new/e2e/parity/stack/docker-compose.yml"
       - ".github/workflows/self-host-checks.yml"
+      # The credential probe's client libraries are pinned there.
+      - "apps/api/requirements/base.txt"
   push:
     branches: [main]
     paths:
@@ -31,6 +33,8 @@ on:
       - "apps/proxy/**"
       - "apps/web_new/e2e/parity/stack/docker-compose.yml"
       - ".github/workflows/self-host-checks.yml"
+      # The credential probe's client libraries are pinned there.
+      - "apps/api/requirements/base.txt"
 
 jobs:
   self-host-checks:

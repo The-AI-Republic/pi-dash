@@ -87,8 +87,8 @@ def recv_exact(conn, n):
 class FakePostgres(FakeServer):
     """Cleartext-password login against {role: password} and a set of databases."""
 
-    def __init__(self, roles, databases):
-        self.roles, self.databases = roles, databases
+    def __init__(self, roles, databases, hba_reject=False):
+        self.roles, self.databases, self.hba_reject = roles, databases, hba_reject
         super().__init__()
 
     @staticmethod
@@ -111,6 +111,10 @@ class FakePostgres(FakeServer):
         user = params.get(b"user", b"").decode()
         database = params.get(b"database", b"").decode()
         self.seen.append((user, database))
+        if self.hba_reject:
+            return self.error(
+                conn, "28000", f'no pg_hba.conf entry for host "172.18.0.5", user "{user}", database "{database}", no encryption'
+            )
         if user not in self.roles:
             return self.error(conn, "28000", f'role "{user}" does not exist')
         conn.sendall(self.message(b"R", struct.pack("!I", 3)))
@@ -280,6 +284,42 @@ class ProbeTest(unittest.TestCase):
         results, out = self.run_probe(env, services="db")
         self.assertEqual(results["PostgreSQL"][0], "NOTREADY", out)
         self.assertLess(self.elapsed, 20)
+
+    def test_postgres_no_pg_hba_entry_is_a_refusal(self):
+        pg = FakePostgres({"pi-dash": "pi-dash"}, {"pi-dash"}, hba_reject=True)
+        results, out = self.run_probe({"DATABASE_URL": self.pg_url(pg)}, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "MISMATCH", out)
+        self.assertIn("no pg_hba.conf entry", results["PostgreSQL"][1])
+
+    def test_postgres_refusal_matches_only_server_login_rejections(self):
+        probe = {}
+        exec(compile(self.source, "probe", "exec"), probe)
+        refusal = probe["postgres_refusal"]
+        prefix = 'connection failed: connection to server at "172.18.0.2", port 5432 failed: '
+        for text in (
+            prefix + 'FATAL:  password authentication failed for user "pi-dash"',
+            prefix + 'FATAL:  role "pi-dash" does not exist',
+            prefix + 'FATAL:  database "pi-dash" does not exist',
+            prefix + 'FATAL:  no pg_hba.conf entry for host "172.18.0.5", user "pi-dash", database "pi-dash", no encryption',
+        ):
+            self.assertTrue(refusal(text), text)
+        for text in (
+            # Client-side TLS setup: not the volume's credentials.
+            prefix + 'root certificate file "/certs/ca.pem" does not exist\nEither provide the file or change sslmode.',
+            prefix + 'certificate present, but not private key file "/certs/client.key"',
+            prefix + "Connection refused",
+            prefix + "FATAL:  the database system is starting up",
+        ):
+            self.assertFalse(refusal(text), text)
+
+    def test_a_crash_in_one_check_keeps_the_others_results(self):
+        # PostgreSQL refuses, then the AMQP URL cannot even be parsed: the
+        # PostgreSQL result must still reach the installer.
+        pg = FakePostgres({"pi-dash": "custom"}, {"pi-dash"})
+        env = {"DATABASE_URL": self.pg_url(pg), "AMQP_URL": "amqp://pi-dash:pi-dash@pi-dash-mq:notaport/pi-dash"}
+        results, out = self.run_probe(env)
+        self.assertEqual(results["PostgreSQL"][0], "MISMATCH", out)
+        self.assertEqual(results["RabbitMQ"][0], "ERROR", out)
 
     def test_postgres_external_host_is_skipped(self):
         results, out = self.run_probe({"DATABASE_URL": "postgresql://app:secret@external-db/app"}, services="db")

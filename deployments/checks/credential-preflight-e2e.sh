@@ -37,8 +37,12 @@ scenario() {
         echo "::endgroup::"
         return
     fi
-    if [ -n "${SETUP:-}" ]; then
-        eval "$SETUP"
+    if [ -n "${SETUP:-}" ] && ! eval "$SETUP"; then
+        echo "::error::$name: setup failed"
+        failures=$((failures + 1))
+        $dc down -v --remove-orphans > /dev/null 2>&1
+        echo "::endgroup::"
+        return
     fi
     local out status
     # install.sh sets its paths at the top, so override them after sourcing.
@@ -107,7 +111,7 @@ scenario mq-password-characters pass "$ACCEPTED" \
 # root-owned and the broker then fails to read it and exits.
 SETUP='for i in $(seq 1 60); do $dc exec -T -u rabbitmq pi-dash-mq rabbitmqctl -q await_startup && break; sleep 2; done
 $dc exec -T -u rabbitmq pi-dash-mq rabbitmqctl -q add_user nopriv nopriv' \
-    scenario mq-no-permissions fail "RabbitMQ: .*(NOT_ALLOWED|refused)" \
+    scenario mq-no-permissions fail "RabbitMQ: .*NOT_ALLOWED - access to vhost 'pi-dash' refused for user 'nopriv'" \
     "AMQP_URL=amqp://nopriv:nopriv@pi-dash-mq:5672/pi-dash"
 
 rm -rf "$work"

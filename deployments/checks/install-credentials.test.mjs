@@ -43,6 +43,7 @@ case "$1" in
   up) [ -n "$STUB_UP_FAIL" ] && exit 1; exit 0 ;;
   run)
     cat > "$STUB_STDIN"
+    [ -n "$STUB_RUN_FAIL_AFTER_OUTPUT" ] && { printf '%b' "$STUB_PROBE_OUT"; echo "Traceback: boom" >&2; exit 1; }
     [ -n "$STUB_RUN_FAIL" ] && { echo "Error response from daemon: pull access denied for airepublic/pi-dash-backend" >&2; exit 1; }
     printf '%b' "$STUB_PROBE_OUT"; exit 0 ;;
 esac
@@ -163,6 +164,23 @@ describe("install.sh credential preflight", () => {
     assert.equal(status, 0, out);
     assert.match(out, /could not run/);
     assert.match(out, /pull access denied/);
+  });
+
+  it("keeps a reported mismatch when the probe container then fails", () => {
+    const probe = 'credential-check\\tMISMATCH\\tPostgreSQL\\tpassword authentication failed for user "pi-dash"\\n';
+    const { status, out } = runCheck({ probe, extra: { STUB_RUN_FAIL: "1", STUB_RUN_FAIL_AFTER_OUTPUT: "1" } });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /PostgreSQL: password authentication failed/);
+    assert.match(out, /DATABASE_URL/);
+  });
+
+  it("warns about a service whose check errored, and carries on", () => {
+    const probe =
+      "credential-check\\tOK\\tPostgreSQL\\t\\ncredential-check\\tERROR\\tRabbitMQ\\tValueError: bad port\\n";
+    const { status, out } = runCheck({ probe });
+    assert.equal(status, 0, out);
+    assert.match(out, /RabbitMQ could not be checked/);
+    assert.match(out, /ValueError: bad port/);
   });
 
   it("ignores other output from the container", () => {

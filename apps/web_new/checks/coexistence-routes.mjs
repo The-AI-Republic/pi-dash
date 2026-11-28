@@ -244,7 +244,12 @@ export function publicPathsOf(publicDir = PUBLIC_DIR) {
   return paths;
 }
 
-/** Every path web_new serves as a static file: bundles plus public files. */
+/**
+ * Every path web_new serves as a static file: bundles plus public files.
+ * In CE, `/static/*` is listed too but only `/static/logos/*` reaches this
+ * block: the hand-written routes above it send the rest of `/static/*` to
+ * api:8000, and the first matching route wins.
+ */
 function staticPaths(publicPaths) {
   return ["/assets/*", ...publicPaths];
 }
