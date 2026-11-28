@@ -591,7 +591,7 @@ def compare_response(
     scaffolding) while still enforcing status, location, cookies, and
     every ``body_contains`` ([(dj_substr, rs_substr)]) presence pin.
     """
-    from .session import render_template
+    from .session import ABSENT, render_template
 
     if dj_resp.status_code != rs_resp.status_code:
         return (
@@ -730,19 +730,26 @@ def compare_response(
             return f"known-body pin {pointer} ({issue}): unrenderable match: {exc}"
         dj_found, dj_have = _json_pointer_get(dj_norm, pointer)
         rs_found, rs_have = _json_pointer_get(rs_norm, pointer)
-        if not dj_found or dj_have != dj_want:
+        dj_ok = not dj_found if dj_want == ABSENT else dj_found and dj_have == dj_want
+        rs_ok = not rs_found if rs_want == ABSENT else rs_found and rs_have == rs_want
+        if not dj_ok:
             return (
                 f"known-body pin {pointer} ({issue}): Django body changed — "
-                f"got {dj_have!r}, want {dj_want!r}"
+                f"got {dj_have if dj_found else ABSENT!r}, want {dj_want!r}"
             )
-        if not rs_found or rs_have != rs_want:
+        if not rs_ok:
             return (
                 f"known-body pin {pointer} ({issue}): Rust body changed — "
                 "fix landed or behavior changed; remove or update the pin. "
-                f"got {rs_have!r}, want {rs_want!r}"
+                f"got {rs_have if rs_found else ABSENT!r}, want {rs_want!r}"
             )
-        _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
-        _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+        if ABSENT in (dj_want, rs_want):
+            # One side never renders the key: drop it from the other.
+            _json_pointer_del(dj_norm, pointer)
+            _json_pointer_del(rs_norm, pointer)
+        else:
+            _json_pointer_set(dj_norm, pointer, effects.VOLATILE_PLACEHOLDER)
+            _json_pointer_set(rs_norm, pointer, effects.VOLATILE_PLACEHOLDER)
     for entry in known_body_aliases or []:
         # 4-tuple asserts the same value under both keys
         # (PIDASHCONV-901); the optional 5th element pins a
