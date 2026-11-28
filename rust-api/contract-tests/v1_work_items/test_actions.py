@@ -215,6 +215,30 @@ def test_issue_detail_unstarted_run_reports_its_dispatch_pin(api, world, seeder)
         )
 
 
+def _seed_runner(seeder, world, pod, owner_id, suffix):
+    """A private runner owned by ``owner_id`` with a fixed heartbeat."""
+    runner = {"id": str(uuid.uuid4())}
+    seeder.db.execute(
+        """INSERT INTO runner
+           (id, owner_id, workspace_id, pod_id, name, host_label,
+            provisioning, visibility, status, capabilities,
+            os, arch, runner_version,
+            refresh_token_hash, refresh_token_fingerprint,
+            refresh_token_generation, previous_refresh_token_hash,
+            access_token_signing_key_version,
+            enrollment_token_hash, enrollment_token_fingerprint,
+            revoked_reason, dev_metadata, protocol_version, last_heartbeat_at,
+            created_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,'', 'manual',0,'online','[]',
+                   '','','', '','',0,'',1, '','', '', '{}',1,
+                   '2026-11-27T16:59:30+00:00', now(), now())""",
+        (runner["id"], owner_id, world["workspace"]["id"], pod["id"],
+         f"runner-{seeder.tag}-{suffix}"),
+    )
+    seeder._put("runner", runner["id"])
+    return runner
+
+
 def test_issue_detail_hides_runner_metadata_from_non_owners(api, world, seeder):
     """Only the runner's owner sees which runner holds the run and its
     heartbeat (``can_view_runner``); everyone sees the run itself."""
@@ -223,25 +247,7 @@ def test_issue_detail_hides_runner_metadata_from_non_owners(api, world, seeder):
     seeder.create_workspace_member(world["workspace"]["id"], other["id"], role=20)
     url = issue_url(world, world["issue"]["id"])
     for owner_id, visible in ((other["id"], False), (world["owner"]["id"], True)):
-        runner = {"id": str(uuid.uuid4())}
-        seeder.db.execute(
-            """INSERT INTO runner
-               (id, owner_id, workspace_id, pod_id, name, host_label,
-                provisioning, visibility, status, capabilities,
-                os, arch, runner_version,
-                refresh_token_hash, refresh_token_fingerprint,
-                refresh_token_generation, previous_refresh_token_hash,
-                access_token_signing_key_version,
-                enrollment_token_hash, enrollment_token_fingerprint,
-                revoked_reason, dev_metadata, protocol_version, last_heartbeat_at,
-                created_at, updated_at)
-               VALUES (%s,%s,%s,%s,%s,'', 'manual',0,'online','[]',
-                       '','','', '','',0,'',1, '','', '', '{}',1,
-                       '2026-11-27T16:59:30+00:00', now(), now())""",
-            (runner["id"], owner_id, world["workspace"]["id"], pod["id"],
-             f"runner-{seeder.tag}-407-{int(visible)}"),
-        )
-        seeder._put("runner", runner["id"])
+        runner = _seed_runner(seeder, world, pod, owner_id, f"407-{int(visible)}")
         run = seeder.create_agent_run(
             world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
         )
@@ -250,6 +256,40 @@ def test_issue_detail_hides_runner_metadata_from_non_owners(api, world, seeder):
         )
         block = api.get(url).json()["active_run"]
         assert list(block) == ACTIVE_RUN_KEYS
+        assert block["id"] == run["id"]
+        if visible:
+            assert block["runner_id"] == runner["id"]
+            assert block["runner_last_heartbeat_at"] == "2026-11-27T16:59:30+00:00"
+        else:
+            assert block["runner_id"] is None
+            assert block["runner_last_heartbeat_at"] is None
+        seeder.db.execute(
+            "UPDATE agent_run SET status = 'completed' WHERE id = %s", (run["id"],)
+        )
+
+
+def test_write_response_keeps_runner_metadata_for_its_owner(api, world, seeder):
+    """Rust write responses (Django's carry no ``active_run``, DIFF-44)
+    show the runner to the acting user exactly as the detail GET does:
+    the runner's owner keeps ``runner_id`` and the heartbeat after a
+    PATCH; another user's private runner stays hidden (PDASHOSS01-407)."""
+    if not is_rust():
+        pytest.skip("Django write responses carry no active_run (DIFF-44)")
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    other = seeder.create_user()
+    seeder.create_workspace_member(world["workspace"]["id"], other["id"], role=20)
+    url = issue_url(world, world["issue"]["id"])
+    for owner_id, visible in ((world["owner"]["id"], True), (other["id"], False)):
+        runner = _seed_runner(seeder, world, pod, owner_id, f"407w-{int(visible)}")
+        run = seeder.create_agent_run(
+            world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+        )
+        seeder.db.execute(
+            "UPDATE agent_run SET runner_id = %s WHERE id = %s", (runner["id"], run["id"])
+        )
+        patched = api.patch(url, json={"name": f"renamed while running {int(visible)}"})
+        assert patched.status_code == 200, patched.text
+        block = patched.json()["active_run"]
         assert block["id"] == run["id"]
         if visible:
             assert block["runner_id"] == runner["id"]

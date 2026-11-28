@@ -152,7 +152,7 @@ async fn fetch_active_run(
     };
     // Runner metadata only for a reader who may view the runner
     // (`can_view_runner`: private and owned by the reader).
-    let runner_row = match run.runner_id {
+    let runner_row = match run.runner_id.filter(|_| run_viewer.is_some()) {
         Some(runner_id) => match runner::Entity::find_by_id(runner_id).one(&orm).await {
             Ok(model) => model,
             Err(_) => return Err(Error::Failed("render-decoded")),
@@ -346,9 +346,14 @@ pub struct RenderRequest<'a> {
     pub viewer: Option<Uuid>,
     /// The reader whose runner access decides whether the `active_run`
     /// block shows `runner_id` / `runner_last_heartbeat_at`
-    /// (PDASHOSS01-407): `Some` on the three single-issue GETs
-    /// (detail, by-identifier, external-id), `None` elsewhere (redacted).
+    /// (PDASHOSS01-407): the reader on the three single-issue GETs
+    /// (detail, by-identifier, external-id) and the acting user on write
+    /// responses; `None` (redacted) on lists.
     pub run_viewer: Option<Uuid>,
+    /// Render an idle issue as `"active_run": null` instead of omitting
+    /// the key: the three single-issue GETs, like Django. Write responses
+    /// keep omitting it (DIFF-44).
+    pub active_run_null_when_idle: bool,
     pub web_base: Option<&'a str>,
 }
 
@@ -1669,10 +1674,9 @@ pub async fn render_decoded(
     let active_run = if run_gate {
         match fetch_active_run(pool, issue_id, &decoded.git_work_branch, req.run_viewer).await? {
             Some(run) => Some(Some(run)),
-            // Idle renders `null` on the three single-issue GETs (the
-            // `run_viewer` callers), like Django; write responses keep
-            // omitting the key (DIFF-44).
-            None if req.run_viewer.is_some() => Some(None),
+            // Idle renders `null` on the three single-issue GETs, like
+            // Django; write responses keep omitting the key (DIFF-44).
+            None if req.active_run_null_when_idle => Some(None),
             None => None,
         }
     } else {
@@ -1903,12 +1907,15 @@ pub async fn fetch_project_for_write(
 
 /// Render a write response / `current_instance` image: the full
 /// representation (`serializer.data` with no `fields`/`expand`, no viewer
-/// — relations omitted, blocker keys present).
+/// — relations omitted, blocker keys present). `actor` is the acting
+/// user: the `active_run` block shows them the runner exactly as the
+/// detail GET would (PDASHOSS01-407).
 pub async fn render_write_response(
     pool: &PgPool,
     decoded: &DecodedIssue,
     tz: &Tz,
     web_base: Option<&str>,
+    actor: Uuid,
 ) -> Result<Value, Error> {
     let kept = filter_fields(shape::FIELDS_IN_ORDER, None)
         .map_err(|_| Error::Failed("render-write-response"))?;
@@ -1923,7 +1930,8 @@ pub async fn render_write_response(
             expand: &expand_refs,
             is_list: false,
             viewer: None,
-            run_viewer: None,
+            run_viewer: Some(actor),
+            active_run_null_when_idle: false,
             web_base,
         },
     )
@@ -2804,7 +2812,7 @@ mod live {
         assert_eq!(decoded.sequence_id, 101);
         assert_eq!(decoded.project_identifier, "SEED");
         assert!(decoded.created_at.ends_with('Z'));
-        let rendered = render_write_response(&db, &decoded, &tz, None)
+        let rendered = render_write_response(&db, &decoded, &tz, None, world.user_id)
             .await
             .expect("renders");
         assert_eq!(rendered["id"], Value::String(world.issue_id.to_string()));
@@ -2850,6 +2858,7 @@ mod live {
                 is_list: true,
                 viewer: None,
                 run_viewer: None,
+                active_run_null_when_idle: false,
                 web_base: None,
             },
         )
