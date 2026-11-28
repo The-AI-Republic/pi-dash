@@ -287,7 +287,9 @@ test(
         };
         await driver.page.reload();
         const cap = driver.page.getByTestId("capacity-waiting");
-        await expect.poll(async () => (await cap.textContent()) ?? "", { timeout: 60_000 }).toContain("last known");
+        await expect.poll(async () => (await cap.textContent()) ?? "", { timeout: 60_000 }).toContain(
+          "last known"
+        );
       });
 
       await test.step("no capacity wait hides the capacity line", async () => {
