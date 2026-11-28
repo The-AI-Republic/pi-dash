@@ -294,8 +294,18 @@ impl RecoveryHold {
     /// Recover the held records again; keep those still unresolved.
     pub async fn recheck(&mut self) {
         let dir = self.dir.clone();
-        let held = recover_dir(dir, crate::util::containment::CLEANUP_GRACE).await;
-        self.retain_unresolved(held);
+        match recover_dir(dir, crate::util::containment::CLEANUP_GRACE).await {
+            Some(done) => self.retain_unresolved(done),
+            // Skipped (another daemon holds the lock) or failed: nothing was
+            // proven, so every record still on disk stays held (review of
+            // #3501 at ba9c1c3, MUST 1). The next recheck tries again.
+            None => {
+                self.held = list_records(&self.dir)
+                    .into_iter()
+                    .filter_map(|(_, record)| record)
+                    .collect();
+            }
+        }
     }
 
     fn retain_unresolved(&mut self, done: Vec<(PathBuf, Recovery, Option<GroupRecord>)>) {
@@ -346,16 +356,20 @@ async fn recover_in(dir: PathBuf, recovers: bool, containment_on: bool) -> Recov
 /// Only one daemon recovers a record dir at a time (`.recovery.lock`, held
 /// for the pass): two daemons starting together after a crash would
 /// otherwise both adopt a group, and one could kill an anchor the other
-/// had just proven. A daemon that finds the lock held skips recovery.
+/// had just proven. A daemon that finds the lock held skips recovery:
+/// `None`, as when the pass fails, so callers never read a skipped pass as
+/// an empty one.
 pub(crate) async fn recover_dir(
     dir: PathBuf,
     grace: Duration,
-) -> Vec<(PathBuf, Recovery, Option<GroupRecord>)> {
+) -> Option<Vec<(PathBuf, Recovery, Option<GroupRecord>)>> {
     tokio::task::spawn_blocking(move || {
-        let Some(_lock) = recovery_lock(&dir) else {
-            return Vec::new();
+        let _lock = match recovery_lock(&dir) {
+            Lock::Held(file) => file,
+            Lock::NothingToRecover => return Some(Vec::new()),
+            Lock::Unavailable => return None,
         };
-        list_records(&dir)
+        let done = list_records(&dir)
             .into_iter()
             .map(|(path, record)| {
                 let done = match &record {
@@ -371,10 +385,12 @@ pub(crate) async fn recover_dir(
                 let record = record.map(|r| read_record(&path).unwrap_or(r));
                 (path, done, record)
             })
-            .collect()
+            .collect();
+        Some(done)
     })
     .await
-    .unwrap_or_default()
+    .ok()
+    .flatten()
 }
 
 fn read_record(path: &Path) -> Option<GroupRecord> {
@@ -383,25 +399,41 @@ fn read_record(path: &Path) -> Option<GroupRecord> {
 
 const RECOVERY_LOCK: &str = ".recovery.lock";
 
-/// The exclusive recovery lock of `dir`; `None` when there is nothing to
-/// recover or another daemon holds it.
-fn recovery_lock(dir: &Path) -> Option<std::fs::File> {
+/// The outcome of taking the recovery lock of a record dir.
+enum Lock {
+    /// Held for the pass.
+    Held(std::fs::File),
+    /// No record dir: nothing to recover.
+    NothingToRecover,
+    /// Another daemon holds it, or it could not be opened.
+    Unavailable,
+}
+
+/// The exclusive recovery lock of `dir`.
+fn recovery_lock(dir: &Path) -> Lock {
     use fs2::FileExt;
     if !dir.is_dir() {
-        return None;
+        return Lock::NothingToRecover;
     }
-    let file = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(dir.join(RECOVERY_LOCK))
-        .ok()?;
+    {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e,
+                "run group recovery skipped: lock unavailable");
+            return Lock::Unavailable;
+        }
+    };
     match file.try_lock_exclusive() {
-        Ok(()) => Some(file),
+        Ok(()) => Lock::Held(file),
         Err(e) => {
             tracing::warn!(dir = %dir.display(), error = %e,
                 "run group recovery skipped: another daemon is recovering");
-            None
+            Lock::Unavailable
         }
     }
 }
@@ -668,7 +700,10 @@ mod process_tests {
     }
 
     /// The (path, outcome) pairs of a recovery pass.
-    fn outcomes(done: Vec<(PathBuf, Recovery, Option<GroupRecord>)>) -> Vec<(PathBuf, Recovery)> {
+    fn outcomes(
+        done: Option<Vec<(PathBuf, Recovery, Option<GroupRecord>)>>,
+    ) -> Vec<(PathBuf, Recovery)> {
+        let done = done.expect("the recovery pass was skipped");
         done.into_iter().map(|(p, r, _)| (p, r)).collect()
     }
 
@@ -976,9 +1011,9 @@ mod process_tests {
         let held = std::fs::File::create(dir.path().join(RECOVERY_LOCK)).unwrap();
         held.lock_exclusive().unwrap();
 
-        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
+        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
 
-        assert!(done.is_empty());
+        assert!(done.is_none(), "a skipped pass must not look empty");
         assert!(running(&mut anchor) && path.exists());
         drop(held);
         assert_eq!(
@@ -986,6 +1021,39 @@ mod process_tests {
             vec![(path, Recovery::Stopped(CleanupOutcome::Clean))]
         );
         let _ = anchor.wait();
+    }
+
+    /// Review of #3501 at ba9c1c3 (MUST 1): a pass skipped because another
+    /// daemon holds the recovery lock proves nothing, so it must neither
+    /// admit work at start nor release runners already held.
+    #[tokio::test]
+    async fn a_skipped_recovery_pass_keeps_the_runners_reserved() {
+        use fs2::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let runner = Uuid::new_v4();
+        let mut record = record_for(&a, dead_pid());
+        record.runner_id = Some(runner);
+        let path = write_record(dir.path(), &record).unwrap();
+        orphan(&mut anchor);
+        let held = std::fs::File::create(dir.path().join(RECOVERY_LOCK)).unwrap();
+        held.lock_exclusive().unwrap();
+
+        let mut hold = recover_in(dir.path().to_path_buf(), true, true).await;
+        let at_start = hold.affects(runner);
+        hold.recheck().await;
+        let after_recheck = hold.affects(runner);
+
+        drop(held);
+        hold.recheck().await;
+        let after_release = hold.is_empty();
+        let _ = anchor.wait();
+        assert!(at_start, "a skipped startup pass admitted the runner");
+        assert!(after_recheck, "a skipped recheck released the runner");
+        assert!(
+            after_release && !path.exists(),
+            "the next pass must recover it"
+        );
     }
 
     #[tokio::test]
