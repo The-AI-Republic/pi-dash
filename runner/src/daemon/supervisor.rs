@@ -6358,7 +6358,18 @@ impl AssignWorker {
             };
         if let Err(err) = self.out.send(msg).await {
             tracing::warn!(error = %err, "failed to send runner lifecycle message");
-            if let Some((run_id, reason, ended_at, detail)) = failed_signal {
+            // A managed run whose exact result is already in the SQLite
+            // outbox is retried from there. A journal copy would be
+            // replayed first at startup, without tokens or model, and the
+            // cloud keeps the first report it accepts.
+            let in_outbox = |run_id: uuid::Uuid| {
+                self.coordinator
+                    .as_ref()
+                    .is_some_and(|c| c.terminal_pending().iter().any(|e| e.run_id == run_id))
+            };
+            if let Some((run_id, reason, ended_at, detail)) =
+                failed_signal.filter(|(run_id, ..)| !in_outbox(*run_id))
+            {
                 // Journal the signal so the (always-on) replay loop
                 // redelivers it until the cloud acknowledges; the
                 // server's first-writer-wins finalize makes a late
@@ -9597,6 +9608,79 @@ mod tests {
             journal[0].detail,
             "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
         );
+    }
+
+    /// Review of #3501 at 591a610 (MUST 3): a managed run's exact result is
+    /// already in the SQLite outbox. If its send fails, the legacy journal
+    /// must not get a copy too: startup replays the journal first, without
+    /// tokens or model, and the cloud keeps the first report it accepts.
+    #[tokio::test]
+    async fn a_managed_failure_with_an_outbox_record_is_not_journaled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx); // every send fails
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.daemon_paths.ensure().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        let failed = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::AgentCrash,
+            detail: Some("boom".into()),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        assert!(
+            coord
+                .persist_terminal(run_id, &serde_json::to_vec(&failed).unwrap(), "held")
+                .unwrap()
+        );
+
+        assert!(!worker.deliver(failed).await);
+
+        assert!(
+            drain_journal::load(&worker.daemon_paths).is_empty(),
+            "journaled a failure whose exact payload is already in the outbox"
+        );
+        // Without an outbox record the journal is still the fallback.
+        let other = uuid::Uuid::new_v4();
+        assert!(
+            !worker
+                .deliver(ClientMsg::RunFailed {
+                    run_id: other,
+                    reason: FailureReason::AgentCrash,
+                    detail: None,
+                    ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .await
+        );
+        let journal = drain_journal::load(&worker.daemon_paths);
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].run_id, other);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
