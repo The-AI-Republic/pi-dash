@@ -26,13 +26,27 @@ jobs:
       - run: cd rust-api/contract-tests && python -m pytest --collect-only -q
 
   live:
+    # Runs the whole contract tree, including the tasks_webhooks link-crawl
+    # parity tests that need production's html.parser (CPython 3.12.10) and
+    # skip on >=3.12.12. Same pin as the contract-tests job in
+    # rust-api-contract-tests.yml: ubuntu-24.04 still ships 3.12.10, so move
+    # both together.
     runs-on: ubuntu-24.04
     needs: collect
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
+      - name: Assert production html.parser (link-crawl parity tests must not skip)
+        run: |
+          python - <<'PY'
+          import sys
+          from html.parser import HTMLParser
+          if hasattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS"):
+              sys.exit(f"Python {sys.version.split()[0]} has the new html.parser; the requires_legacy_parser link-crawl tests would skip. Keep this job on CPython 3.12.10.")
+          print(f"Python {sys.version.split()[0]}: legacy html.parser OK")
+          PY
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - name: Run contract suites against the backend
         env:

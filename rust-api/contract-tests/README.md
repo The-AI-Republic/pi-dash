@@ -28,10 +28,10 @@ the production image (`apps/api/Dockerfile.api`). `html.parser`
 differs across 3.12 patch versions (PIDASHCONV-1693): distro 3.12.3
 builds and later 3.12.x carry the HTML5 rewrite, while 3.12.10 has the
 classic parser, and recorded fixtures pin the 3.12.10 behavior. In CI,
-the `contract-tests` job in `rust-api-contract-tests.yml` (which runs the
-parser-sensitive `tasks_webhooks/test_link_crawl_*` tests) pins
-`python-version: "3.12.10"` on `ubuntu-24.04`; the other `rust-api-*`
-workflows use `"3.12.x"`. Match 3.12.10 locally (e.g. a 3.12.10 venv or
+the jobs that run the parser-sensitive `tasks_webhooks/test_link_crawl_*`
+tests pin `python-version: "3.12.10"` on `ubuntu-24.04`: `contract-tests`
+in `rust-api-contract-tests.yml` and `live` in `rust-api-contract.yml`.
+The other `rust-api-*` workflows use `"3.12.x"`. Match 3.12.10 locally (e.g. a 3.12.10 venv or
 container) before recording or re-recording fixtures.
 
 ## Layout

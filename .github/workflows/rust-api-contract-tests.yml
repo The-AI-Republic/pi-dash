@@ -234,13 +234,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.10" # see runs-on comment
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
             apps/api/requirements/base.txt
             apps/api/requirements/test.txt
             rust-api/contract-tests/requirements.txt
+
+      - name: Assert production html.parser (link-crawl parity tests must not skip)
+        run: |
+          python - <<'PY'
+          import sys
+          from html.parser import HTMLParser
+          if hasattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS"):
+              sys.exit(f"Python {sys.version.split()[0]} has the new html.parser; the requires_legacy_parser link-crawl tests would skip. Keep this job on CPython 3.12.10.")
+          print(f"Python {sys.version.split()[0]}: legacy html.parser OK")
+          PY
 
       - name: Install API dependencies
         working-directory: apps/api
