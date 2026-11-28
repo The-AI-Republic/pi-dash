@@ -102,6 +102,19 @@ mod tests {
         assert!(is_stdout_broken_pipe_message(&message));
     }
 
+    /// Pinned to the text std actually prints on Linux / macOS, so the
+    /// check does not only compare the matcher against itself.
+    #[cfg(unix)]
+    #[test]
+    fn matches_the_literal_unix_panic_text() {
+        assert!(is_stdout_broken_pipe_message(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(!is_stdout_broken_pipe_message(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
+    }
+
     #[test]
     fn ignores_other_stdout_errors() {
         let cause = io::Error::from(ErrorKind::PermissionDenied);

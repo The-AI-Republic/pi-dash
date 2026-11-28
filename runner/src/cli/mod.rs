@@ -527,7 +527,9 @@ fn run_crud(code: i32) -> Result<()> {
 
 /// Whether `command` gets the broken-pipe hook (see `util::broken_pipe`).
 /// Everything except the long-running daemon (`pidash __run`), whose
-/// behaviour on a broken socket or child pipe must not change.
+/// behaviour on a broken socket or child pipe must not change. The
+/// short-lived Pi Dash Agent helper (`pidash __engine`) is covered too: if
+/// the agent stops reading its stdout, it exits 141 instead of panicking.
 fn quiet_on_broken_pipe(command: Option<&Command>) -> bool {
     !matches!(command, Some(Command::Run(_)))
 }
@@ -547,6 +549,7 @@ mod broken_pipe_scope_tests {
             &["pidash", "issue", "get", "ENG-1"][..],
             &["pidash", "workspace", "me"][..],
             &["pidash", "status"][..],
+            &["pidash", "__engine", "model-token"][..],
             &["pidash"][..],
         ] {
             assert!(quiet_on_broken_pipe(command(argv).as_ref()), "{argv:?}");

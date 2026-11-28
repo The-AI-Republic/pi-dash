@@ -7,8 +7,8 @@
 //! "failed printing to stdout: Broken pipe".
 //!
 //! The test drives the real binary against a loopback HTTP fake. The
-//! child's stdout is a pipe whose read end is closed before the command
-//! prints, so the write hits EPIPE exactly as it does behind `head`.
+//! child's stdout is a pipe whose read end is closed before the child is
+//! spawned, so its first write hits EPIPE exactly as it does behind `head`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -40,29 +40,35 @@ fn serve_json(listener: TcpListener, body: String) {
     });
 }
 
-/// Run `pidash <args>` with its stdout read end closed before it prints,
-/// and return its exit status and stderr.
+/// Run `pidash <args>` with a stdout whose read end is already closed,
+/// and return its exit status and stderr. `PIDASH_RUN_ID` is cleared
+/// unless `envs` sets it.
 fn run_with_closed_stdout(
     config_dir: &std::path::Path,
     envs: &[(&str, String)],
     args: &[&str],
 ) -> (std::process::ExitStatus, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pidash"))
+    // Close the read end before spawning, so the child can never write
+    // into a still-open pipe however the scheduler orders the two.
+    let (reader, writer) = std::io::pipe().expect("create stdout pipe");
+    drop(reader);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pidash"));
+    command
         .env("PIDASH_CONFIG_DIR", config_dir)
         .env("PIDASH_DATA_DIR", config_dir.join("data"))
-        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .env_remove("PIDASH_RUN_ID")
         .env_remove("PIDASH_ALLOW_OPERATOR")
+        .env_remove("PIDASH_ISSUE_IDENTIFIER")
         .env_remove("RUST_BACKTRACE")
+        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn pidash");
-
-    // Close the read end before the command has printed anything.
-    drop(child.stdout.take());
+        .stdout(writer)
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn pidash");
+    // Drop the parent's copy of the write end with the builder.
+    drop(command);
 
     let mut stderr = String::new();
     child
@@ -88,25 +94,56 @@ fn assert_quiet_broken_pipe_exit(status: std::process::ExitStatus, stderr: &str)
     );
 }
 
-#[test]
-fn workspace_me_with_closed_stdout_exits_quietly() {
+/// Serve one JSON body for every request and return the env that points
+/// `pidash` at it.
+fn fake_api(body: serde_json::Value) -> Vec<(&'static str, String)> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    // Large enough that no pipe buffer could absorb it.
-    let body = serde_json::json!({ "id": "u-1", "padding": "x".repeat(256 * 1024) }).to_string();
-    serve_json(listener, body);
+    serve_json(listener, body.to_string());
+    vec![
+        ("PIDASH_API_URL", format!("http://{addr}")),
+        ("PIDASH_WORKSPACE_SLUG", "acme".to_string()),
+        ("PIDASH_TOKEN", "test-token".to_string()),
+    ]
+}
 
+#[test]
+fn workspace_me_with_closed_stdout_exits_quietly() {
+    let envs = fake_api(serde_json::json!({ "id": "u-1", "padding": "x".repeat(256 * 1024) }));
     let config_dir = tempfile::tempdir().unwrap();
-    let (status, stderr) = run_with_closed_stdout(
-        config_dir.path(),
-        &[
-            ("PIDASH_API_URL", format!("http://{addr}")),
-            ("PIDASH_WORKSPACE_SLUG", "acme".to_string()),
-            ("PIDASH_TOKEN", "test-token".to_string()),
-        ],
-        &["workspace", "me"],
-    );
+    let (status, stderr) = run_with_closed_stdout(config_dir.path(), &envs, &["workspace", "me"]);
     assert_quiet_broken_pipe_exit(status, &stderr);
+}
+
+/// A second `println!` command, one that resolves the issue first: the
+/// fake answers both requests with a body that serves as the issue and
+/// as the comment list.
+#[test]
+fn comment_list_with_closed_stdout_exits_quietly() {
+    let envs = fake_api(serde_json::json!({
+        "id": "11111111-1111-1111-1111-111111111111",
+        "project": "22222222-2222-2222-2222-222222222222",
+        "results": [],
+    }));
+    let config_dir = tempfile::tempdir().unwrap();
+    let (status, stderr) =
+        run_with_closed_stdout(config_dir.path(), &envs, &["comment", "list", "ENG-1"]);
+    assert_quiet_broken_pipe_exit(status, &stderr);
+}
+
+/// Inside an agent run, `pidash --help`, `-h` and `help` print the
+/// filtered help from `main`, before `cli::run` installs the hook.
+#[test]
+fn agent_run_top_level_help_with_closed_stdout_exits_quietly() {
+    let config_dir = tempfile::tempdir().unwrap();
+    for arg in ["--help", "-h", "help"] {
+        let (status, stderr) = run_with_closed_stdout(
+            config_dir.path(),
+            &[("PIDASH_RUN_ID", "run-1".to_string())],
+            &[arg],
+        );
+        assert_quiet_broken_pipe_exit(status, &stderr);
+    }
 }
 
 /// Bare `pidash` on a configured host prints clap's help through a
