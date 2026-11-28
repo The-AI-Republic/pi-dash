@@ -3372,8 +3372,9 @@ async fn render_write_response(
     decoded: &DecodedIssue,
     tz: &Tz,
     web_base: Option<&str>,
+    actor: Uuid,
 ) -> Result<Value, Error> {
-    read::render_write_response(pool, decoded, tz, web_base)
+    read::render_write_response(pool, decoded, tz, web_base, actor)
         .await
         .map_err(|error| match error {
             read::Error::NotFound | read::Error::Failed(_) => Error::ServerError,
@@ -3635,8 +3636,14 @@ pub async fn create(
     decoded.created_at = pidash_compat::datetime::render_datetime_in(&created_at, &tz);
     decoded.created_at_dt = created_at;
     decoded.created_by = Some(ctx.actor.user_id.to_string());
-    let rendered =
-        render_write_response(&deps.pool, &decoded, &tz, write.web_base.as_deref()).await?;
+    let rendered = render_write_response(
+        &deps.pool,
+        &decoded,
+        &tz,
+        write.web_base.as_deref(),
+        ctx.actor.user_id,
+    )
+    .await?;
     Ok(Outcome::created(
         serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?,
     ))
@@ -3961,8 +3968,14 @@ pub async fn update(
         .map_err(|_| Error::ServerError)?;
     }
     let decoded = fetch_issue_for_write(&deps.pool, slug, &project_id, &pk, &tz).await?;
-    let rendered =
-        render_write_response(&deps.pool, &decoded, &tz, write.web_base.as_deref()).await?;
+    let rendered = render_write_response(
+        &deps.pool,
+        &decoded,
+        &tz,
+        write.web_base.as_deref(),
+        ctx.actor.user_id,
+    )
+    .await?;
     let mut outcome =
         Outcome::ok(serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?);
     outcome.drain_pod = drain_pod;

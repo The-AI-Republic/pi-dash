@@ -60,7 +60,8 @@ ISSUE_WRITE_KEYS = ISSUE_ROW_KEYS | {"relations_summary", "has_open_blockers"}
 
 ISSUE_DETAIL_KEYS = (
     ISSUE_WRITE_KEYS
-    | {"relations"}
+    # `active_run` is `null` on idle single-issue reads (PDASHOSS01-407).
+    | {"relations", "active_run"}
     | expect("DIFF-68", django=set(), rust={"code_reviews"})
 )
 

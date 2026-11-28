@@ -99,6 +99,8 @@ async fn fetch_assigned_runner_detail(
 async fn fetch_active_run(
     pool: &PgPool,
     issue_id: Uuid,
+    issue_branch: &str,
+    run_viewer: Option<Uuid>,
 ) -> Result<Option<shape::ActiveRunSummary>, Error> {
     use pidash_db::entity::{agent_run, runner};
     use sea_orm::EntityTrait;
@@ -111,6 +113,7 @@ async fn fetch_active_run(
         created_at: sea_orm::prelude::DateTimeWithTimeZone,
         assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
         started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        run_config: serde_json::Value,
     }
 
     use pidash_types::runner_runs::AgentRunStatus;
@@ -136,6 +139,7 @@ async fn fetch_active_run(
         .column_as(agent_run::Column::CreatedAt, "created_at")
         .column_as(agent_run::Column::AssignedAt, "assigned_at")
         .column_as(agent_run::Column::StartedAt, "started_at")
+        .column_as(agent_run::Column::RunConfig, "run_config")
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .filter(agent_run::Column::Status.is_in(statuses))
         .order_by_desc(agent_run::Column::CreatedAt)
@@ -146,19 +150,35 @@ async fn fetch_active_run(
     else {
         return Ok(None);
     };
-    let heartbeat = match run.runner_id {
+    // Runner metadata only for a reader who may view the runner
+    // (`can_view_runner`: private and owned by the reader).
+    let runner_row = match run.runner_id.filter(|_| run_viewer.is_some()) {
         Some(runner_id) => match runner::Entity::find_by_id(runner_id).one(&orm).await {
-            Ok(Some(model)) => model.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
-            Ok(None) => None,
+            Ok(model) => model,
             Err(_) => return Err(Error::Failed("render-decoded")),
         },
         None => None,
     };
+    let visible = match (&runner_row, run_viewer) {
+        (Some(model), Some(viewer)) => pidash_auth::permissions::runner::can_view_runner(
+            &pidash_auth::permissions::runner::RunnerFacts {
+                workspace: pidash_types::WorkspaceId::from(model.workspace_id.to_string()),
+                authenticated: true,
+                visibility: i32::from(model.visibility),
+                owned_by_requester: model.owner_id == viewer,
+            },
+        ),
+        _ => false,
+    };
+    let heartbeat = runner_row
+        .filter(|_| visible)
+        .and_then(|model| model.last_heartbeat_at.map(|at| at.with_timezone(&Utc)));
     let created = run.created_at.with_timezone(&Utc);
+    let branch = active_run_branch(&run.status, issue_branch, &run.run_config);
     Ok(Some(shape::ActiveRunSummary {
         id: run.id.to_string(),
         status: run.status,
-        runner_id: run.runner_id.map(|id| id.to_string()),
+        runner_id: run.runner_id.filter(|_| visible).map(|id| id.to_string()),
         created_at: crate::integrations::serializers::isoformat(&created),
         assigned_at: run
             .assigned_at
@@ -170,7 +190,44 @@ async fn fetch_active_run(
         runner_last_heartbeat_at: heartbeat
             .as_ref()
             .map(crate::integrations::serializers::isoformat),
+        branch,
     }))
+}
+
+/// The active run's working branch (PDASHOSS01-407), `None` when unknown.
+/// Before the run starts (`queued`, `assigned`, `waiting_for_worktree`)
+/// the branch pinned in its `run_config` at dispatch wins: that is what
+/// the assignment sends the runner. Once it runs, the issue's current
+/// `git_work_branch` wins: a run records the branch it cuts there. Each
+/// falls back to the other; blank values fall through.
+fn active_run_branch(
+    status: &str,
+    issue_branch: &str,
+    run_config: &serde_json::Value,
+) -> Option<String> {
+    use pidash_types::runner_runs::AgentRunStatus;
+
+    let issue_branch = Some(issue_branch.trim())
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned);
+    let pinned = run_config
+        .get("git_work_branch")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned);
+    let pre_start = [
+        AgentRunStatus::Queued,
+        AgentRunStatus::Assigned,
+        AgentRunStatus::WaitingForWorktree,
+    ]
+    .iter()
+    .any(|pre| pre.value() == status);
+    if pre_start {
+        pinned.or(issue_branch)
+    } else {
+        issue_branch.or(pinned)
+    }
 }
 
 /// Attached code reviews (NEWPIDASH-366): the issue's
@@ -287,6 +344,16 @@ pub struct RenderRequest<'a> {
     pub expand: &'a [&'a str],
     pub is_list: bool,
     pub viewer: Option<Uuid>,
+    /// The reader whose runner access decides whether the `active_run`
+    /// block shows `runner_id` / `runner_last_heartbeat_at`
+    /// (PDASHOSS01-407): the reader on the three single-issue GETs
+    /// (detail, by-identifier, external-id) and the acting user on write
+    /// responses; `None` (redacted) on lists.
+    pub run_viewer: Option<Uuid>,
+    /// Render an idle issue as `"active_run": null` instead of omitting
+    /// the key: the three single-issue GETs, like Django. Write responses
+    /// keep omitting it (DIFF-44).
+    pub active_run_null_when_idle: bool,
     pub web_base: Option<&'a str>,
 }
 
@@ -1602,11 +1669,16 @@ pub async fn render_decoded(
     }
 
     // Newest active run (NEWPIDASH-251): single payloads,
-    // `?fields=`-gated. Fetched only when the gate passes; the key
-    // is omitted when no run occupies the slot.
+    // `?fields=`-gated. Fetched only when the gate passes.
     let run_gate = !req.is_list && (requested.is_empty() || requested.contains(&"active_run"));
     let active_run = if run_gate {
-        fetch_active_run(pool, issue_id).await?
+        match fetch_active_run(pool, issue_id, &decoded.git_work_branch, req.run_viewer).await? {
+            Some(run) => Some(Some(run)),
+            // Idle renders `null` on the three single-issue GETs, like
+            // Django; write responses keep omitting the key (DIFF-44).
+            None if req.active_run_null_when_idle => Some(None),
+            None => None,
+        }
     } else {
         None
     };
@@ -1642,7 +1714,7 @@ pub async fn render_decoded(
         blockers: blockers.as_ref(),
         relations: relations.as_ref(),
         code_reviews: code_reviews.as_deref(),
-        active_run: active_run.as_ref(),
+        active_run: active_run.as_ref().map(Option::as_ref),
         expansions: &expansions,
     })
     .map_err(|_| Error::Failed("render-decoded"))?;
@@ -1835,12 +1907,15 @@ pub async fn fetch_project_for_write(
 
 /// Render a write response / `current_instance` image: the full
 /// representation (`serializer.data` with no `fields`/`expand`, no viewer
-/// — relations omitted, blocker keys present).
+/// — relations omitted, blocker keys present). `actor` is the acting
+/// user: the `active_run` block shows them the runner exactly as the
+/// detail GET would (PDASHOSS01-407).
 pub async fn render_write_response(
     pool: &PgPool,
     decoded: &DecodedIssue,
     tz: &Tz,
     web_base: Option<&str>,
+    actor: Uuid,
 ) -> Result<Value, Error> {
     let kept = filter_fields(shape::FIELDS_IN_ORDER, None)
         .map_err(|_| Error::Failed("render-write-response"))?;
@@ -1855,6 +1930,8 @@ pub async fn render_write_response(
             expand: &expand_refs,
             is_list: false,
             viewer: None,
+            run_viewer: Some(actor),
+            active_run_null_when_idle: false,
             web_base,
         },
     )
@@ -2288,6 +2365,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn active_run_branch_prefers_the_issue_branch_then_the_run_snapshot() {
+        // PDASHOSS01-407: once running, the issue's live branch wins over
+        // the dispatch snapshot; blank values fall through; nothing known
+        // is `None`.
+        let pinned = serde_json::json!({"git_work_branch": "feat/pinned"});
+        assert_eq!(
+            active_run_branch("running", "pi-dash/eng-7", &pinned).as_deref(),
+            Some("pi-dash/eng-7")
+        );
+        assert_eq!(
+            active_run_branch("running", "", &pinned).as_deref(),
+            Some("feat/pinned")
+        );
+        assert_eq!(
+            active_run_branch(
+                "running",
+                "  ",
+                &serde_json::json!({"git_work_branch": null})
+            ),
+            None
+        );
+        assert_eq!(
+            active_run_branch("running", "", &serde_json::json!({"git_work_branch": ""})),
+            None
+        );
+        assert_eq!(
+            active_run_branch("running", "", &serde_json::json!({})),
+            None
+        );
+    }
+
+    #[test]
+    fn active_run_branch_prefers_the_dispatch_pin_before_the_run_starts() {
+        // PDASHOSS01-407: the runner checks out the pinned branch, even if
+        // the issue's branch changed after dispatch.
+        let pinned = serde_json::json!({"git_work_branch": "feat/a"});
+        for status in ["queued", "assigned", "waiting_for_worktree"] {
+            assert_eq!(
+                active_run_branch(status, "pi-dash/edited", &pinned).as_deref(),
+                Some("feat/a"),
+                "{status}"
+            );
+            assert_eq!(
+                active_run_branch(status, "pi-dash/edited", &serde_json::json!({})).as_deref(),
+                Some("pi-dash/edited"),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
     fn relations_pool_qualifies_columns_and_filters_membership_in_where() {
         let viewer = Uuid::from_u128(7);
         let sql = relations_pool_select(&[Uuid::nil()], &Uuid::nil(), &viewer)
@@ -2684,7 +2812,7 @@ mod live {
         assert_eq!(decoded.sequence_id, 101);
         assert_eq!(decoded.project_identifier, "SEED");
         assert!(decoded.created_at.ends_with('Z'));
-        let rendered = render_write_response(&db, &decoded, &tz, None)
+        let rendered = render_write_response(&db, &decoded, &tz, None, world.user_id)
             .await
             .expect("renders");
         assert_eq!(rendered["id"], Value::String(world.issue_id.to_string()));
@@ -2729,6 +2857,8 @@ mod live {
                 expand: &["project"],
                 is_list: true,
                 viewer: None,
+                run_viewer: None,
+                active_run_null_when_idle: false,
                 web_base: None,
             },
         )

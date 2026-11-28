@@ -744,8 +744,9 @@ pub(super) async fn render_write_response(
     decoded: &DecodedIssue,
     tz: &Tz,
     web_base: Option<&str>,
+    actor: Uuid,
 ) -> Result<Value, Denial> {
-    read::render_write_response(pool, decoded, tz, web_base)
+    read::render_write_response(pool, decoded, tz, web_base, actor)
         .await
         .map_err(|error| match error {
             read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
@@ -1115,6 +1116,8 @@ async fn by_identifier_inner(
             expand: &expand_refs,
             is_list: false,
             viewer: Some(pre.actor.id),
+            run_viewer: Some(pre.actor.id),
+            active_run_null_when_idle: true,
             web_base: web_base.as_deref(),
         },
     )
@@ -1285,6 +1288,8 @@ async fn issue_list_inner(
                 expand: &expand_refs,
                 is_list: false,
                 viewer: None,
+                run_viewer: Some(pre.actor.id),
+                active_run_null_when_idle: true,
                 web_base: web_base.as_deref(),
             },
         )
@@ -1343,6 +1348,8 @@ async fn issue_list_inner(
                     expand: &expand_refs,
                     is_list: true,
                     viewer: None,
+                    run_viewer: None,
+                    active_run_null_when_idle: false,
                     web_base: web_base.as_deref(),
                 },
             )
@@ -1433,6 +1440,8 @@ async fn issue_detail_inner(
             expand: &expand_refs,
             is_list: false,
             viewer: Some(pre.actor.id),
+            run_viewer: Some(pre.actor.id),
+            active_run_null_when_idle: true,
             web_base: web_base.as_deref(),
         },
     )
@@ -1810,7 +1819,7 @@ pub(super) async fn patch_issue_inner(
         state.settings().urls.app_base_url.as_deref(),
     );
     let current_rendered =
-        render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await?;
+        render_write_response(&pre.pool, &current, &tz, web_base.as_deref(), pre.actor.id).await?;
     let current_text =
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
 
@@ -2000,7 +2009,7 @@ async fn delete_issue_inner(
         state.settings().urls.app_base_url.as_deref(),
     );
     let current_rendered =
-        render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await?;
+        render_write_response(&pre.pool, &current, &tz, web_base.as_deref(), pre.actor.id).await?;
     let current_text =
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
 

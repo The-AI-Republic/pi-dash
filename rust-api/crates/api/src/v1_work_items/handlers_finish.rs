@@ -716,11 +716,18 @@ async fn finish_inner(
             Ok(project) => project,
             Err(denial) => return Ok(denial.into_response()),
         };
-        let current_rendered =
-            match render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await {
-                Ok(rendered) => rendered,
-                Err(denial) => return Ok(denial.into_response()),
-            };
+        let current_rendered = match render_write_response(
+            &pre.pool,
+            &current,
+            &tz,
+            web_base.as_deref(),
+            pre.actor.id,
+        )
+        .await
+        {
+            Ok(rendered) => rendered,
+            Err(denial) => return Ok(denial.into_response()),
+        };
         let current_text =
             pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
         let move_body = json!({ "state": target_id.to_string() });
