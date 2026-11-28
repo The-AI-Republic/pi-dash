@@ -320,6 +320,7 @@
       "agent_test_default_interval_seconds",
       "agent_ticking_enabled",
       "default_agent_executor",
+      "dedicated_runner_lost_action",
       "default_work_type",
       "settings",
       "created_by",
@@ -329,8 +330,7 @@
       "project_lead",
       "cover_image_asset",
       "estimate",
-      "default_state",
-      "dedicated_runner_lost_action"
+      "default_state"
     ],
     "golden": {
       "id": "c99f8a01-966a-49b3-b1c9-b867196dd9cd",
@@ -398,6 +398,7 @@
       "agent_test_default_interval_seconds": 10800,
       "agent_ticking_enabled": true,
       "default_agent_executor": "local_runner",
+      "dedicated_runner_lost_action": "fail_to_backlog",
       "default_work_type": "general",
       "settings": {},
       "created_by": null,
@@ -407,8 +408,7 @@
       "project_lead": null,
       "cover_image_asset": null,
       "estimate": null,
-      "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "default_state": null
     }
   },
   "list_serializer": {
@@ -479,6 +479,7 @@
       "agent_test_default_interval_seconds": 10800,
       "agent_ticking_enabled": true,
       "default_agent_executor": "local_runner",
+      "dedicated_runner_lost_action": "fail_to_backlog",
       "default_work_type": "general",
       "settings": {},
       "created_by": null,
@@ -488,8 +489,7 @@
       "project_lead": null,
       "cover_image_asset": null,
       "estimate": null,
-      "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "default_state": null
     },
     "key_order": [
       "id",
@@ -539,6 +539,7 @@
       "agent_test_default_interval_seconds",
       "agent_ticking_enabled",
       "default_agent_executor",
+      "dedicated_runner_lost_action",
       "default_work_type",
       "settings",
       "created_by",
@@ -548,8 +549,7 @@
       "project_lead",
       "cover_image_asset",
       "estimate",
-      "default_state",
-      "dedicated_runner_lost_action"
+      "default_state"
     ],
     "members": ["c5545f98-21b6-4fac-88e7-af418831335d"],
     "next_seq_empty": 1,
@@ -705,6 +705,7 @@
       "agent_test_default_interval_seconds": 10800,
       "agent_ticking_enabled": true,
       "default_agent_executor": "local_runner",
+      "dedicated_runner_lost_action": "fail_to_backlog",
       "default_work_type": "general",
       "settings": {},
       "created_by": null,
@@ -712,8 +713,7 @@
       "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
       "cover_image_asset": null,
       "estimate": null,
-      "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "default_state": null
     },
     "key_order": [
       "id",
@@ -761,6 +761,7 @@
       "agent_test_default_interval_seconds",
       "agent_ticking_enabled",
       "default_agent_executor",
+      "dedicated_runner_lost_action",
       "default_work_type",
       "settings",
       "created_by",
@@ -768,8 +769,7 @@
       "workspace",
       "cover_image_asset",
       "estimate",
-      "default_state",
-      "dedicated_runner_lost_action"
+      "default_state"
     ]
   },
   "deploy_board": {

@@ -568,8 +568,9 @@ pub struct ProjectUpdate<'a> {
     pub default_executor: &'a str,
     pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
-    /// `Project.default_work_type` (PDASHOSS01-234).
-    pub default_work_type: &'a str,
+    /// `Project.default_work_type` (PDASHOSS01-234): `None` when the
+    /// request omitted the field, so the column is left as stored.
+    pub default_work_type: Option<&'a str>,
     pub workspace_id: Uuid,
     pub deleted_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -577,11 +578,15 @@ pub struct ProjectUpdate<'a> {
     pub created_by: Option<Uuid>,
 }
 
-/// The app PATCH/PUT statement: all 44 setter columns for one row.
+/// The app PATCH/PUT statement: the 45 setter columns for one row, plus
+/// `default_work_type` when the request supplied it.
 fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<projects::Entity> {
     use projects::Column as C;
-    projects::Entity::update_many()
-        .col_expr(C::Name, Expr::value(upd.name))
+    let mut stmt = projects::Entity::update_many();
+    if let Some(work_type) = upd.default_work_type {
+        stmt = stmt.col_expr(C::DefaultWorkType, Expr::value(work_type));
+    }
+    stmt.col_expr(C::Name, Expr::value(upd.name))
         .col_expr(C::Description, Expr::value(upd.description))
         .col_expr(
             C::DescriptionText,
@@ -660,7 +665,7 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
 }
 
 /// The app project PATCH/PUT write (`ProjectSerializer.update()` +
-/// `save()`): all 44 setter columns for one row. Runs on the
+/// `save()`): all setter columns for one row. Runs on the
 /// caller's connection (the update tx also holds the default-clear).
 pub async fn apply_update(
     db: &impl ConnectionTrait,
@@ -2871,7 +2876,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
-            default_work_type: "software",
+            default_work_type: Some("software"),
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,
@@ -2881,9 +2886,30 @@ mod tests {
         let update = sql(&project_update_stmt(id, &upd));
         assert_eq!(
             update.matches(" = ").count(),
-            45 + 1,
-            "45 setters plus the id filter"
+            46 + 1,
+            "46 setters plus the id filter"
         );
+        assert!(update.contains("\"default_work_type\" = 'software'"));
+        // An omitted work type writes nothing, so a concurrent write
+        // to the column is not overwritten with the pre-tx read; an
+        // explicit blank is still a write.
+        let omitted = sql(&project_update_stmt(
+            id,
+            &ProjectUpdate {
+                default_work_type: None,
+                ..upd
+            },
+        ));
+        assert_eq!(omitted.matches(" = ").count(), 45 + 1);
+        assert!(!omitted.contains("default_work_type"));
+        let blank = sql(&project_update_stmt(
+            id,
+            &ProjectUpdate {
+                default_work_type: Some(""),
+                ..upd
+            },
+        ));
+        assert!(blank.contains("\"default_work_type\" = ''"));
         assert!(update.contains(&format!("\"created_by_id\" = '{actor}'")));
         assert!(update.contains("\"deleted_at\" = NULL"));
         assert!(update.ends_with(&format!("WHERE \"projects\".\"id\" = '{id}'")));
@@ -3527,7 +3553,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
-            default_work_type: "software",
+            default_work_type: Some("software"),
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,

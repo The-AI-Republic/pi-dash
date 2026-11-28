@@ -1,8 +1,10 @@
 """Contract tests: projects.settings reads and PATCH (NEWPIDASH-278).
 
 Full-serializer reads render the validated settings with defaults
-filled in (DIFF-53: ``{"issue_run_policy": "creator_and_assignees"}``
-on Rust, the raw stored ``{}`` on Django); the
+filled in (DIFF-53: ``issue_run_policy`` defaults to
+``creator_and_assignees`` on Rust, the raw stored ``{}`` on Django; DIFF-51:
+Rust fills every other known key, such as ``agent_stages``, with its
+default); the
 compact ``.values()`` list projection has no settings key, like the
 Django projection. PATCH accepts a nested ``settings`` object and
 merges it atomically. Django's app serializers use
@@ -12,6 +14,15 @@ PATCH validation on Rust is the deliberate difference DIFF-51.
 
 from _harness.diffs import expect, is_rust
 
+# Rust reads fill every known settings key with its default
+# (`project_settings::KNOWN_KEYS`); `agent_stages` defaults to Auto with
+# both optional stages on.
+AGENT_STAGES_DEFAULT = {"mode": "auto", "review": True, "test": True}
+RUST_DEFAULT_SETTINGS = {
+    "issue_run_policy": "creator_and_assignees",
+    "agent_stages": AGENT_STAGES_DEFAULT,
+}
+
 
 def test_retrieve_includes_settings_with_defaults(world):
     client, user, ws, project = world.full_stack()
@@ -20,7 +31,7 @@ def test_retrieve_includes_settings_with_defaults(world):
     assert resp.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -33,7 +44,7 @@ def test_details_list_includes_settings_with_defaults(world):
     assert rows[0]["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -52,7 +63,7 @@ def test_patch_empty_settings_is_noop(world):
     assert resp.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -97,7 +108,7 @@ def test_read_renders_validated_settings_only(world):
     assert resp.json()["settings"] == expect(
         "DIFF-51",
         django={"unknown_key": 1},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -117,10 +128,12 @@ def test_issue_run_policy_admin_can_change(world):
         url, json={"settings": {"issue_run_policy": "project_members"}}
     )
     assert resp.status_code == expect("DIFF-51", django=200, rust=200)
+    # DIFF-51: Rust reads fill the keys not written (agent_stages) with
+    # their defaults.
     assert resp.json()["settings"] == expect(
         "DIFF-51",
         django={"issue_run_policy": "project_members"},
-        rust={"issue_run_policy": "project_members"},
+        rust={"issue_run_policy": "project_members", "agent_stages": AGENT_STAGES_DEFAULT},
     )
 
 
@@ -175,7 +188,7 @@ def test_issue_run_policy_member_cannot_change(world):
     assert client.get(url).json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -191,6 +204,8 @@ def test_issue_run_policy_roundtrip_default(world):
         url, json={"settings": {"issue_run_policy": "creator_and_assignees"}}
     )
     assert resp.status_code == 200, resp.text[:500]
-    assert resp.json()["settings"] == {
-        "issue_run_policy": "creator_and_assignees"
-    }
+    assert resp.json()["settings"] == expect(
+        "DIFF-51",
+        django={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
+    )

@@ -5117,10 +5117,9 @@ async fn apply_update(
         members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
-        default_work_type: validated
-            .default_work_type
-            .as_deref()
-            .unwrap_or(&instance.default_work_type),
+        // Only a supplied work type is written: falling back to the
+        // pre-tx read would overwrite a concurrent v1 write.
+        default_work_type: validated.default_work_type.as_deref(),
         workspace_id: validated.workspace.unwrap_or(instance.workspace_id),
         deleted_at: validated.deleted_at.unwrap_or(None),
         updated_at: now,

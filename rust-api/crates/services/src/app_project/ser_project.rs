@@ -1000,6 +1000,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "default_work_type",
     "settings",
     "created_by",
@@ -1010,7 +1011,6 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
-    "dedicated_runner_lost_action",
 ];
 
 /// `ProjectListSerializer` wire order (`:136-168` over `fields =
@@ -1064,6 +1064,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "default_work_type",
     "settings",
     "created_by",
@@ -1074,7 +1075,6 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
-    "dedicated_runner_lost_action",
 ];
 
 /// `ProjectLiteSerializer.Meta.fields` (`:123-132`), in list order (also
@@ -1140,6 +1140,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "default_work_type",
     "settings",
     "created_by",
@@ -1148,7 +1149,6 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
-    "dedicated_runner_lost_action",
 ];
 
 /// `DeployBoardSerializer.Meta.read_only_fields` (`:266`).
@@ -1279,6 +1279,11 @@ pub struct ProjectRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// Dedicated-runner lost-runner handling: a model `CharField`, so
+    /// `__all__` renders it with the scalar fields, right after
+    /// `default_agent_executor` (declaration order). Non-Option per
+    /// Django (a choice with a default).
+    pub dedicated_runner_lost_action: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
     /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
@@ -1301,9 +1306,6 @@ pub struct ProjectRead {
     pub estimate: Option<String>,
     /// `State` FK (`PrimaryKeyRelatedField`).
     pub default_state: Option<String>,
-    /// Dedicated-runner lost-runner handling (`__all__` last field).
-    /// Non-Option per Django (a choice with a default).
-    pub dedicated_runner_lost_action: String,
 }
 
 /// `ProjectListSerializer` read shape (`:136-168`,
@@ -1416,6 +1418,11 @@ pub struct ProjectListRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// Dedicated-runner lost-runner handling: a model `CharField`, so
+    /// `__all__` renders it with the scalar fields, right after
+    /// `default_agent_executor` (declaration order). Non-Option per
+    /// Django (a choice with a default).
+    pub dedicated_runner_lost_action: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
     /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
@@ -1438,8 +1445,6 @@ pub struct ProjectListRead {
     pub estimate: Option<String>,
     /// `State` FK.
     pub default_state: Option<String>,
-    /// Dedicated-runner lost-runner handling (`__all__` last field).
-    pub dedicated_runner_lost_action: String,
 }
 
 /// `ProjectLiteSerializer` read shape (`:120-133`,
@@ -1569,6 +1574,11 @@ pub struct ProjectDetailRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// Dedicated-runner lost-runner handling: a model `CharField`, so
+    /// `__all__` renders it with the scalar fields, right after
+    /// `default_agent_executor` (declaration order). Non-Option per
+    /// Django (a choice with a default).
+    pub dedicated_runner_lost_action: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
     /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
@@ -1587,8 +1597,6 @@ pub struct ProjectDetailRead {
     pub estimate: Option<String>,
     /// `State` FK.
     pub default_state: Option<String>,
-    /// Dedicated-runner lost-runner handling (`__all__` last field).
-    pub dedicated_runner_lost_action: String,
 }
 
 /// `DeployBoardSerializer` read shape (`:259-266`,
