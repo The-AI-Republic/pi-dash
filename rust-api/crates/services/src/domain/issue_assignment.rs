@@ -21,8 +21,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, JoinType,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, IntoActiveModel,
+    JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sea_query::LockType;
 use serde_json::{json, Value};
@@ -1474,11 +1474,19 @@ pub async fn runs_ahead(
             .filter(agent_run::Column::Id.ne(run.id))
             .count(db)
             .await?;
-        // One shared run is served before the next dedicated (§10.2).
+        // One shared run is served before the next dedicated (§10.2):
+        // unpinned pod work, or another busy runner's locality pin that
+        // this runner would borrow (PDASHOSS01-419).
         let shared = agent_run::Entity::find()
             .filter(agent_run::Column::PodId.eq(run.pod_id))
             .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
-            .filter(agent_run::Column::PinnedRunnerId.is_null())
+            .filter(
+                Condition::any()
+                    .add(agent_run::Column::PinnedRunnerId.is_null())
+                    .add(crate::runner_sessions::drain::borrowed_locality_condition(
+                        pinned_id,
+                    )),
+            )
             .one(db)
             .await?;
         if shared.is_some() {

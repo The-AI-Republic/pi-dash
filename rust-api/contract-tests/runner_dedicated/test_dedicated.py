@@ -193,3 +193,33 @@ def test_cross_project_pod_move_refused(admin_client, world, dedicated_issue, on
     # move is refused, dedicated issues or not.
     assert resp.status_code == 400, resp.text[:500]
     assert resp.json()["code"] == "runner_project_fixed"
+
+
+def test_dedicated_wait_counts_borrowable_pin_ahead(admin_client, seeder, world, online_runner):
+    # PDASHOSS01-419 / §10.2: after a dedicated run the runner owes one
+    # shared run, and another busy runner's locality pin is shared work it
+    # would borrow, so the next dedicated run reports one run ahead.
+    w = (world["admin"]["id"], world["ws"]["id"], world["pod"]["id"])
+    mine = online_runner["id"]
+    busy = seeder.enroll_runner(*w, "dr-busy-token")["id"]
+    seeder.db.execute("UPDATE runner SET status='busy', last_heartbeat_at=now() WHERE id=%s", (busy,))
+    seeder.create_daemon_run(*w, busy, status="running")
+    served = seeder.create_daemon_run(*w, mine, status="completed")["id"]
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id=%s, pin_kind='dedicated', assigned_at=now() - interval '1 minute' "
+        "WHERE id=%s",
+        (mine, served),
+    )
+    waiting = seeder.create_daemon_run(*w, mine, status="queued")["id"]
+    seeder.db.execute(
+        "UPDATE agent_run SET runner_id=NULL, pinned_runner_id=%s, pin_kind='dedicated' WHERE id=%s",
+        (mine, waiting),
+    )
+    borrowable = seeder.create_daemon_run(*w, busy, status="queued")["id"]
+    seeder.db.execute(
+        "UPDATE agent_run SET runner_id=NULL, pinned_runner_id=%s, pin_kind='locality' WHERE id=%s",
+        (busy, borrowable),
+    )
+    body = admin_client.get(f"/api/runners/runs/{waiting}/").json()
+    assert body["dispatch_wait"]["runs_ahead"] == 1, body.get("dispatch_wait")
+    assert body["dispatch_wait"]["reason"] == "runner_busy"

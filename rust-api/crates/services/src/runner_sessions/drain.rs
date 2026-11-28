@@ -376,7 +376,7 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
 /// member takes it rather than idling while the run waits. It ranks last
 /// ([`rank_expr`]) and its pin is dropped when it is taken
 /// ([`release_borrowed_pin_stmts`]). Dedicated pins are never borrowed.
-fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
+pub(crate) fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
     let statuses: Vec<SimpleExpr> = BUSY_STATUSES
         .iter()
         .map(|status| status.value().into())
