@@ -34,6 +34,7 @@ use crate::ipc::protocol::{
     HelloWorkspace, IPC_VERSION, Response, RunnerChanges, version_lt,
 };
 use crate::ipc::server::IpcServer;
+use crate::util::chat_unit::ChatUnit;
 use crate::util::containment::{self, CleanupOutcome, RunGroup};
 
 /// Empty a run's containment unit and execute its run-end hook, if the
@@ -1465,6 +1466,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     // work dir.
     let attach_working_dir = resolve_working_dir(inst);
     let inst_chat_active = inst.chat_active.clone();
+    let inst_chat_sessions = inst.chat_sessions.clone();
     let inst_engine = ctx.engine.clone();
     let inst_coordinator = ctx.run_coordinator.clone();
     let inst_queue_blocked = ctx.run_queue_blocked;
@@ -1484,6 +1486,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             live_instances,
             current_run: None,
             current_chat: None,
+            stopping_chat: None,
+            chat_sessions: inst_chat_sessions,
             local_chat_active: inst_chat_active,
             engine: inst_engine,
             coordinator: inst_coordinator,
@@ -2396,6 +2400,13 @@ struct RunnerLoop {
     /// next inbound frame.
     current_run: Option<CurrentRun>,
     current_chat: Option<CurrentChat>,
+    /// A chat runtime whose processes are not confirmed gone yet (see
+    /// [`release_chat_dir`]).
+    stopping_chat: Option<StoppingChat>,
+    /// This runner's local (IPC) chat sessions: an Assign ends their idle
+    /// agents and stops what those left running before taking the working
+    /// copy (PDASHOSS01-417).
+    chat_sessions: crate::ipc::chat::ChatRegistry,
     /// Shared with this runner's `RunnerInstance` (and therefore the IPC
     /// server): `true` while a *local* chat turn (PDASHOSS01-159, driven over
     /// the daemon IPC socket, not this cloud loop) holds the working copy. The
@@ -2486,7 +2497,131 @@ struct CurrentChat {
     chat_session_id: uuid::Uuid,
     tx: mpsc::Sender<ChatCommand>,
     active_rx: watch::Receiver<bool>,
+    /// Fires when the runtime's worker has ended.
     done_rx: oneshot::Receiver<()>,
+    /// Fires once the runtime's containment unit is finished clean: nothing
+    /// its agents started can still be using the working copy.
+    clean_rx: oneshot::Receiver<()>,
+}
+
+/// A chat runtime that has ended, or was told to, whose agents' processes
+/// are not confirmed gone yet. While set, the working copy is not handed to
+/// a run or another chat runtime (see [`release_chat_dir`]).
+struct StoppingChat {
+    chat_session_id: uuid::Uuid,
+    clean_rx: oneshot::Receiver<()>,
+    /// How long a handoff waits for `clean_rx` before refusing.
+    deadline: tokio::time::Instant,
+}
+
+/// How long handing a chat runtime's working copy over waits for the old
+/// runtime: its bridge shutdown (5 s), the unit's TERM → KILL grace, and a
+/// margin for reaping.
+const CHAT_HANDOFF_BOUND: Duration =
+    Duration::from_secs(5 + containment::CLEANUP_GRACE.as_secs() + 5);
+
+/// Start a chat runtime: the worker runs with its agents in its own
+/// containment unit, which is finished when the worker ends.
+fn spawn_chat_runtime(
+    mut worker: ChatWorker,
+    chat_session_id: uuid::Uuid,
+    tx: mpsc::Sender<ChatCommand>,
+    active_rx: watch::Receiver<bool>,
+) -> CurrentChat {
+    let (done_tx, done_rx) = oneshot::channel();
+    let (clean_tx, clean_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        match worker.unit.as_ref().map(ChatUnit::env) {
+            Some(env) => {
+                crate::util::shell::CHAT_ENV
+                    .scope(env, worker.run(chat_session_id))
+                    .await
+            }
+            None => worker.run(chat_session_id).await,
+        }
+        let _ = done_tx.send(());
+        if let Some(unit) = worker.unit.take() {
+            finish_chat_unit(unit, &worker.state).await;
+        }
+        let _ = clean_tx.send(());
+    });
+    CurrentChat {
+        chat_session_id,
+        tx,
+        active_rx,
+        done_rx,
+        clean_rx,
+    }
+}
+
+/// Finish an ended chat runtime's unit. While it is unresolved the runner
+/// stays reserved (local chat and hot restarts honour the reservation) and
+/// the unit is re-checked every [`UNRESOLVED_CLEANUP_RECHECK`]; daemon
+/// shutdown ends the wait.
+async fn finish_chat_unit(mut unit: ChatUnit, state: &StateHandle) {
+    if unit.finish().await == CleanupOutcome::Clean {
+        return;
+    }
+    tracing::warn!(
+        "chat runtime's processes are not confirmed gone; runner stays reserved until they are"
+    );
+    state.set_cleanup_reserved(true);
+    let shutdown = state.shutdown_notified();
+    let notified = shutdown.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    loop {
+        if state.shutdown_reason().is_some() {
+            return;
+        }
+        tokio::select! {
+            _ = &mut notified => return,
+            _ = tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK) => {}
+        }
+        if unit.finish().await == CleanupOutcome::Clean {
+            state.set_cleanup_reserved(false);
+            tracing::info!("chat runtime's processes are gone; runner released");
+            return;
+        }
+    }
+}
+
+/// Free the working copy held by a chat runtime before a run or another chat
+/// runtime starts in it. A live runtime in `current` is released (Release,
+/// not Shutdown: the cloud session stays open for revival) and moves to
+/// `stopping`. Waits, at most until its deadline, for the old runtime's unit
+/// to finish clean. `false` while it has not: the caller must not start
+/// anything in the working copy, and a later call checks again.
+async fn release_chat_dir(
+    current: &mut Option<CurrentChat>,
+    stopping: &mut Option<StoppingChat>,
+) -> bool {
+    if let Some(chat) = current.take() {
+        let _ = chat.tx.send(ChatCommand::Release).await;
+        *stopping = Some(StoppingChat {
+            chat_session_id: chat.chat_session_id,
+            clean_rx: chat.clean_rx,
+            deadline: tokio::time::Instant::now() + CHAT_HANDOFF_BOUND,
+        });
+    }
+    let Some(st) = stopping.as_mut() else {
+        return true;
+    };
+    match tokio::time::timeout_at(st.deadline, &mut st.clean_rx).await {
+        // A closed channel means the runtime's task is gone (daemon
+        // shutdown): its unit's drop made the last attempt.
+        Ok(_) => {
+            *stopping = None;
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                chat_session_id = %st.chat_session_id,
+                "previous chat runtime's processes are not confirmed gone; not handing over the working copy"
+            );
+            false
+        }
+    }
 }
 
 async fn acknowledge_cancel_without_active_process(out: &RunnerOut, run_id: uuid::Uuid) {
@@ -2635,15 +2770,24 @@ impl RunnerLoop {
         });
     }
 
-    async fn stop_idle_chat_runtime(&mut self) {
-        let Some(mut chat) = self.current_chat.take() else {
-            return;
-        };
-        // Release, not Shutdown: swapping the runtime to another session must
-        // not close the old session in the cloud — the user may switch back to
-        // it from the chat history panel, and a warm/message revives it.
-        let _ = chat.tx.send(ChatCommand::Release).await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
+    /// See [`release_chat_dir`]. Swapping the runtime to another session
+    /// releases it rather than shutting it down: the user may switch back to
+    /// the old session from the chat history panel, and a warm/message
+    /// revives it.
+    async fn release_chat_dir(&mut self) -> bool {
+        release_chat_dir(&mut self.current_chat, &mut self.stopping_chat).await
+    }
+
+    /// Start a runtime for `chat_session_id` once the previous one's
+    /// processes are gone; `None` while they are not.
+    async fn fresh_chat_runtime(
+        &mut self,
+        chat_session_id: uuid::Uuid,
+    ) -> Option<mpsc::Sender<ChatCommand>> {
+        if !self.release_chat_dir().await {
+            return None;
+        }
+        Some(self.start_chat_runtime(chat_session_id).await)
     }
 
     async fn start_chat_runtime(
@@ -2652,14 +2796,7 @@ impl RunnerLoop {
     ) -> mpsc::Sender<ChatCommand> {
         let (tx, rx) = mpsc::channel(8);
         let (active_tx, active_rx) = watch::channel(false);
-        let (done_tx, done_rx) = oneshot::channel();
-        self.current_chat = Some(CurrentChat {
-            chat_session_id,
-            tx: tx.clone(),
-            active_rx,
-            done_rx,
-        });
-        let mut worker = ChatWorker {
+        let worker = ChatWorker {
             runner_config: self.runner_config.clone(),
             state: self.state.clone(),
             approvals: self.approvals.clone(),
@@ -2667,11 +2804,14 @@ impl RunnerLoop {
             command_rx: rx,
             active_tx,
             guidance_sent: false,
+            unit: Some(ChatUnit::new(chat_session_id)),
         };
-        tokio::spawn(async move {
-            worker.run(chat_session_id).await;
-            let _ = done_tx.send(());
-        });
+        self.current_chat = Some(spawn_chat_runtime(
+            worker,
+            chat_session_id,
+            tx.clone(),
+            active_rx,
+        ));
         tx
     }
 
@@ -2816,7 +2956,16 @@ impl RunnerLoop {
                         continue;
                     }
                     () = wait_chat_done(&mut self.current_chat) => {
-                        self.current_chat = None;
+                        // The runtime ended on its own (idle timeout, Close):
+                        // its unit is being finished, and the working copy
+                        // is held until it is clean.
+                        if let Some(chat) = self.current_chat.take() {
+                            self.stopping_chat = Some(StoppingChat {
+                                chat_session_id: chat.chat_session_id,
+                                clean_rx: chat.clean_rx,
+                                deadline: tokio::time::Instant::now() + CHAT_HANDOFF_BOUND,
+                            });
+                        }
                         continue;
                     }
                     f = &mut inbound => f,
@@ -2954,9 +3103,6 @@ impl RunnerLoop {
                         );
                         continue;
                     }
-                    if self.current_chat.is_some() {
-                        self.stop_idle_chat_runtime().await;
-                    }
                     // Intra-assign-lane guard — one issue in flight at a time —
                     // is kept for ALL runners (the assign lane stays
                     // single-tenant; the cloud reaper assumes it, design §3.4).
@@ -2972,6 +3118,33 @@ impl RunnerLoop {
                                 "assign rejected: run {} is still in flight on this runner",
                                 current.run_id
                             ),
+                        );
+                        continue;
+                    }
+                    // Hand the working copy over only once no chat agent can
+                    // still be using it (PDASHOSS01-417): the cloud chat
+                    // runtime and every idle local chat session are ended and
+                    // what they started is stopped, ownership proven first.
+                    if !self.release_chat_dir().await || !self.chat_sessions.release_idle().await {
+                        tracing::warn!(
+                            %run_id,
+                            "assign received while a chat session's processes are still stopping; rejecting"
+                        );
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: a chat session's processes are still stopping on this runner"
+                                .to_string(),
+                        );
+                        continue;
+                    }
+                    // A local turn that began while the handoff waited.
+                    if self
+                        .local_chat_active
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: a chat turn is active on this runner".to_string(),
                         );
                         continue;
                     }
@@ -3154,7 +3327,7 @@ impl RunnerLoop {
                                     .await;
                                 continue;
                             }
-                            chat.tx.clone()
+                            Some(chat.tx.clone())
                         } else if *chat.active_rx.borrow() {
                             let _ = self
                                 .out
@@ -3167,11 +3340,25 @@ impl RunnerLoop {
                                 .await;
                             continue;
                         } else {
-                            self.stop_idle_chat_runtime().await;
-                            self.start_chat_runtime(chat_session_id).await
+                            self.fresh_chat_runtime(chat_session_id).await
                         }
                     } else {
-                        self.start_chat_runtime(chat_session_id).await
+                        self.fresh_chat_runtime(chat_session_id).await
+                    };
+                    let Some(tx) = tx else {
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatFailed {
+                                chat_session_id,
+                                code: "runner_busy".into(),
+                                detail: Some(
+                                    "the previous chat session's processes are still stopping"
+                                        .into(),
+                                ),
+                                failed_at: Utc::now(),
+                            })
+                            .await;
+                        continue;
                     };
                     if tx.send(ChatCommand::Message(turn)).await.is_err() {
                         let _ = self
@@ -3229,7 +3416,7 @@ impl RunnerLoop {
                                     .await;
                                 continue;
                             }
-                            chat.tx.clone()
+                            Some(chat.tx.clone())
                         } else if *chat.active_rx.borrow() {
                             let _ = self
                                 .out
@@ -3244,11 +3431,24 @@ impl RunnerLoop {
                                 .await;
                             continue;
                         } else {
-                            self.stop_idle_chat_runtime().await;
-                            self.start_chat_runtime(chat_session_id).await
+                            self.fresh_chat_runtime(chat_session_id).await
                         }
                     } else {
-                        self.start_chat_runtime(chat_session_id).await
+                        self.fresh_chat_runtime(chat_session_id).await
+                    };
+                    let Some(tx) = tx else {
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatEvent {
+                                chat_session_id,
+                                bridge_seq: 0,
+                                kind: "chat_warm_skipped".into(),
+                                payload: serde_json::json!({
+                                    "reason": "runner_busy",
+                                }),
+                            })
+                            .await;
+                        continue;
                     };
                     if tx.send(ChatCommand::Warm(warm)).await.is_err() {
                         let _ = self
@@ -3589,9 +3789,20 @@ struct ChatWorker {
     /// worker (revival) starts with a fresh subprocess, so this
     /// starts false and is cleared whenever the bridge is dropped.
     guidance_sent: bool,
+    /// The runtime's containment unit (PDASHOSS01-417), finished when the
+    /// worker ends (see [`spawn_chat_runtime`]). `None` in tests.
+    unit: Option<ChatUnit>,
 }
 
 impl ChatWorker {
+    /// Record a bridge just spawned in the runtime's unit (cgroup backend:
+    /// move its agent into the unit's cgroup).
+    fn adopt(&mut self, bridge: Option<&AgentBridge>) {
+        if let (Some(unit), Some(bridge)) = (self.unit.as_mut(), bridge) {
+            unit.adopt(bridge.process_handle().pid);
+        }
+    }
+
     async fn run(&mut self, chat_session_id: uuid::Uuid) {
         // A session's runtime idles out after 5 minutes of silence and the
         // worker exits. Chat runs in the runner's one working directory and
@@ -3853,6 +4064,7 @@ impl ChatWorker {
                 )
                 .await?,
             );
+            self.adopt(bridge.as_ref());
             self.send_timing_event(
                 chat_session_id,
                 bridge_seq,
@@ -3976,6 +4188,7 @@ impl ChatWorker {
                 )
                 .await?,
             );
+            self.adopt(bridge_slot.as_ref());
             self.send_timing_event(
                 chat_session_id,
                 bridge_seq,
@@ -7328,6 +7541,118 @@ mod tests {
         }
     }
 
+    /// An idle cloud chat worker over `unit`, with its command channel.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_chat_worker(
+        unit: ChatUnit,
+    ) -> (ChatWorker, mpsc::Sender<ChatCommand>, watch::Receiver<bool>) {
+        let config = runner_config("main", "WEB", PathBuf::from("/nonexistent"));
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (active_tx, active_rx) = watch::channel(false);
+        let worker = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                auth_event: None,
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, out_tx),
+            command_rx: cmd_rx,
+            active_tx,
+            guidance_sent: false,
+            unit: Some(unit),
+        };
+        (worker, cmd_tx, active_rx)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn process_alive(pid: u32) -> bool {
+        crate::util::procinfo::info(pid as i32).is_some_and(|p| !p.zombie)
+    }
+
+    /// PDASHOSS01-417 (#2952 review item 3): handing the working copy over
+    /// from an idle cloud chat runtime stops what its agent left running
+    /// there before anything else may start in it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn chat_handoff_stops_what_the_idle_runtime_left_running() {
+        let id = uuid::Uuid::new_v4();
+        let mut unit = ChatUnit::new(id);
+        // A background process the chat agent started in the working copy.
+        let mut leftover = unit
+            .scoped(async {
+                crate::util::shell::login_shell_command("sleep", &["300"], None)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .await;
+        let pid = leftover.id().unwrap();
+        unit.adopt(Some(pid));
+        let reaper = tokio::spawn(async move { leftover.wait().await });
+        let (worker, tx, active_rx) = idle_chat_worker(unit);
+        let mut current = Some(spawn_chat_runtime(worker, id, tx, active_rx));
+        let mut stopping = None;
+        assert!(release_chat_dir(&mut current, &mut stopping).await);
+        assert!(current.is_none() && stopping.is_none());
+        let _ = tokio::time::timeout(Duration::from_secs(5), reaper).await;
+        assert!(
+            !process_alive(pid),
+            "the chat agent's process outlived the handoff"
+        );
+    }
+
+    /// PDASHOSS01-417: a chat runtime whose processes cannot be proven gone
+    /// keeps the working copy (and the runner) reserved, signals nothing it
+    /// cannot prove its own, and frees both once they are gone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn chat_handoff_waits_while_the_runtimes_processes_are_unresolved() {
+        use std::os::unix::process::CommandExt;
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = stranger.id();
+        let info = crate::util::procinfo::info(pid as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let unit = ChatUnit::from_group(RunGroup::claimed_for_test(&recorded));
+        let id = uuid::Uuid::new_v4();
+        let (worker, tx, active_rx) = idle_chat_worker(unit);
+        let state = worker.state.clone();
+        let mut current = Some(spawn_chat_runtime(worker, id, tx, active_rx));
+        let mut stopping = None;
+        let handed_over = release_chat_dir(&mut current, &mut stopping).await;
+        let reserved = state.cleanup_reserved();
+        let again = release_chat_dir(&mut current, &mut stopping).await;
+        let stranger_alive = process_alive(pid);
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(!handed_over, "working copy handed over while unresolved");
+        assert!(reserved, "runner not reserved while unresolved");
+        assert!(!again, "a later handoff ignored the unresolved runtime");
+        assert!(stranger_alive, "an unproven group was signalled");
+        // Once the processes are gone, the next re-check frees both.
+        tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK * 3).await;
+        assert!(release_chat_dir(&mut current, &mut stopping).await);
+        assert!(
+            !state.cleanup_reserved(),
+            "reservation outlived the processes"
+        );
+    }
+
     /// PDASHOSS01-417 part 2 (review item 2 on #2952): when run-end cleanup
     /// is unresolved, the worker does not finish, so the runner loop keeps
     /// the run in flight and turns away new work. The group it cannot prove
@@ -7596,6 +7921,7 @@ mod tests {
             command_rx: cmd_rx,
             active_tx,
             guidance_sent: false,
+            unit: None,
         };
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
@@ -7688,6 +8014,7 @@ mod tests {
             command_rx: cmd_rx,
             active_tx,
             guidance_sent: false,
+            unit: None,
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)

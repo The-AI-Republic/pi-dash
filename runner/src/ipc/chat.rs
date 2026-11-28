@@ -74,6 +74,8 @@ use crate::pidash_agent::chat_server::{
     ApprovalOutcome, ApprovalRequest as SharedApprovalRequest, SendSpec, TurnSink, TurnTerminal,
     WarmSpec,
 };
+use crate::util::chat_unit::ChatUnit;
+use crate::util::containment::CleanupOutcome;
 use crate::util::fs::create_dir_all_private;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
@@ -135,6 +137,10 @@ struct ChatSession {
 #[derive(Default)]
 struct SessionRuntime {
     bridge: Option<AgentBridge>,
+    /// The session's containment unit (PDASHOSS01-417): what its agents
+    /// start lives until the session's runtime ends, not one turn. Created
+    /// with the first bridge; finished by [`end_runtime`].
+    unit: Option<ChatUnit>,
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
@@ -160,11 +166,68 @@ struct SessionRuntime {
 #[derive(Clone, Default)]
 pub struct ChatRegistry {
     sessions: Arc<Mutex<HashMap<Uuid, Arc<ChatSession>>>>,
+    /// Units of ended runtimes whose processes are not confirmed gone. The
+    /// working copy is not handed to a run while any is left (see
+    /// [`ChatRegistry::release_idle`]).
+    lingering: Arc<Mutex<Vec<ChatUnit>>>,
+}
+
+/// Shut a session runtime's bridge down, then stop what its agents left in
+/// the session's unit. Returns the unit when that is unresolved: its
+/// processes may still be using the working copy.
+async fn end_runtime(rt: &mut SessionRuntime, grace: Duration) -> Option<ChatUnit> {
+    if let Some(bridge) = rt.bridge.take() {
+        bridge.shutdown(grace).await.ok();
+    }
+    rt.started_sent = false;
+    rt.guidance_sent = false;
+    let mut unit = rt.unit.take()?;
+    (unit.finish().await == CleanupOutcome::Unresolved).then_some(unit)
 }
 
 impl ChatRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// [`end_runtime`], keeping an unresolved unit in [`Self::lingering`].
+    async fn end_runtime(&self, rt: &mut SessionRuntime, grace: Duration) {
+        if let Some(unit) = end_runtime(rt, grace).await {
+            tracing::warn!(
+                "local chat session's processes are not confirmed gone; the working copy stays held"
+            );
+            self.lingering.lock().await.push(unit);
+        }
+    }
+
+    /// Free the working copy for a run (PDASHOSS01-417): end the agent of
+    /// every idle session, stopping what it left running, and re-check the
+    /// units of runtimes that ended unresolved. Sessions stay registered: the
+    /// next warm/send resumes the thread in a fresh bridge. `true` only when
+    /// no session is busy (a warm or turn holds its runtime) and nothing a
+    /// session started may still be running.
+    pub(crate) async fn release_idle(&self) -> bool {
+        let sessions: Vec<Arc<ChatSession>> =
+            self.sessions.lock().await.values().cloned().collect();
+        let mut free = true;
+        for session in sessions {
+            let Ok(mut rt) = session.rt.try_lock() else {
+                free = false;
+                continue;
+            };
+            if rt.bridge.is_some() || rt.unit.is_some() {
+                self.end_runtime(&mut rt, Duration::from_secs(5)).await;
+            }
+        }
+        let mut lingering = self.lingering.lock().await;
+        let mut left = Vec::new();
+        for mut unit in lingering.drain(..) {
+            if unit.finish().await == CleanupOutcome::Unresolved {
+                left.push(unit);
+            }
+        }
+        *lingering = left;
+        free && lingering.is_empty()
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
@@ -254,11 +317,14 @@ impl ChatRegistry {
                 };
                 let session = map.remove(&id).expect("entry checked present");
                 let _ = session;
-                rt.bridge.take()
+                SessionRuntime {
+                    bridge: rt.bridge.take(),
+                    unit: rt.unit.take(),
+                    ..SessionRuntime::default()
+                }
             };
-            if let Some(bridge) = bridge {
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
-            }
+            let mut ended = bridge;
+            self.end_runtime(&mut ended, Duration::from_secs(5)).await;
         }
     }
 
@@ -456,6 +522,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
     );
     let workspace = match ensure_bridge(
         host,
+        chat_session_id,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -565,6 +632,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     );
     let workspace = match ensure_bridge(
         host,
+        chat_session_id,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -595,11 +663,14 @@ pub(crate) async fn handle_send<S: ChatSink>(
     let guidance = (!rt.guidance_sent).then(crate::chat_guidance::chat_guidance);
     let injected = guidance.is_some();
     let outcome = {
+        let rt = &mut *rt;
         let bridge = rt
             .bridge
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
-        drive_turn(
+        // A one-shot engine spawns per turn: those processes join the
+        // session's unit too.
+        let turn = drive_turn(
             DriveCtx {
                 chat_session_id,
                 message_id: args.message_id,
@@ -617,8 +688,11 @@ pub(crate) async fn handle_send<S: ChatSink>(
             &mut bridge_seq,
             &mut started_sent,
             sink,
-        )
-        .await
+        );
+        match rt.unit.as_ref() {
+            Some(unit) => unit.scoped(turn).await,
+            None => turn.await,
+        }
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
@@ -689,10 +763,9 @@ pub(crate) async fn handle_close<S: ChatSink>(
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
         let mut rt = session.rt.lock().await;
-        if let Some(bridge) = rt.bridge.take() {
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
-        }
-        rt.started_sent = false;
+        host.sessions
+            .end_runtime(&mut rt, Duration::from_secs(5))
+            .await;
     }
     host.sessions.remove(chat_session_id).await;
     sink.emit(Response::ChatClosed {
@@ -1110,6 +1183,7 @@ async fn resolve_shared_approval<S: ChatSink>(
 /// workspace path.
 async fn ensure_bridge(
     host: &ChatHost<'_>,
+    chat_session_id: Uuid,
     rt: &mut SessionRuntime,
     cwd: Option<&str>,
     model: Option<String>,
@@ -1138,10 +1212,14 @@ async fn ensure_bridge(
         // does not disturb the captured value — the new mode only lands when a
         // fresh session spawns its own bridge.
         rt.approval_mode = mode.unwrap_or_default();
-        rt.bridge = Some(
-            host.spawn(&workspace, model, resume_id, rt.approval_mode)
-                .await?,
-        );
+        let unit = rt
+            .unit
+            .get_or_insert_with(|| ChatUnit::new(chat_session_id));
+        let bridge = unit
+            .scoped(host.spawn(&workspace, model, resume_id, rt.approval_mode))
+            .await?;
+        unit.adopt(bridge.process_handle().pid);
+        rt.bridge = Some(bridge);
     }
     Ok(workspace)
 }
@@ -2425,6 +2503,115 @@ mod tests {
         assert!(!inst.chat_active.load(Ordering::SeqCst));
         inst.state.set_cleanup_reserved(false);
         let _g = try_begin_local_turn(&inst).expect("claim after cleanup resolves");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn process_alive(pid: u32) -> bool {
+        crate::util::procinfo::info(pid as i32).is_some_and(|p| !p.zombie)
+    }
+
+    /// A session whose unit holds a process its agent left running.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn session_with_leftover(registry: &ChatRegistry) -> (Arc<ChatSession>, u32) {
+        let id = Uuid::new_v4();
+        let mut unit = ChatUnit::new(id);
+        let mut leftover = unit
+            .scoped(async {
+                crate::util::shell::login_shell_command("sleep", &["300"], None)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .await;
+        let pid = leftover.id().unwrap();
+        unit.adopt(Some(pid));
+        tokio::spawn(async move { leftover.wait().await });
+        let session = registry.get_or_create(id).await;
+        session.rt.lock().await.unit = Some(unit);
+        (session, pid)
+    }
+
+    /// PDASHOSS01-417 (#2952 review item 3): an idle local chat session's
+    /// processes are part of the working-copy handoff. A run may take the
+    /// working copy only once they are stopped; the session itself stays,
+    /// so the next turn resumes its thread.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn release_idle_stops_what_an_idle_local_session_left_running() {
+        let registry = ChatRegistry::new();
+        let (session, pid) = session_with_leftover(&registry).await;
+        assert!(registry.release_idle().await);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while process_alive(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_alive(pid),
+            "the idle session's process outlived the handoff"
+        );
+        assert!(session.rt.lock().await.unit.is_none());
+        assert_eq!(registry.sessions.lock().await.len(), 1, "session dropped");
+    }
+
+    /// A session with a warm or turn in flight holds the working copy: the
+    /// handoff refuses and leaves its processes alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn release_idle_refuses_while_a_local_session_is_busy() {
+        let registry = ChatRegistry::new();
+        let (session, pid) = session_with_leftover(&registry).await;
+        let busy = session.rt.lock().await;
+        let released = registry.release_idle().await;
+        let alive = process_alive(pid);
+        drop(busy);
+        assert!(
+            !released,
+            "handed over while a local turn holds the session"
+        );
+        assert!(alive, "a busy session's processes were stopped");
+        assert!(registry.release_idle().await);
+    }
+
+    /// A closed session whose processes cannot be proven gone keeps the
+    /// working copy held, and nothing unproven is signalled.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn release_idle_refuses_while_a_closed_sessions_processes_are_unresolved() {
+        use std::os::unix::process::CommandExt;
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = stranger.id();
+        let info = crate::util::procinfo::info(pid as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let registry = ChatRegistry::new();
+        let mut rt = SessionRuntime {
+            unit: Some(ChatUnit::from_group(
+                crate::util::containment::RunGroup::claimed_for_test(&recorded),
+            )),
+            ..SessionRuntime::default()
+        };
+        registry.end_runtime(&mut rt, Duration::from_secs(1)).await;
+        let released = registry.release_idle().await;
+        let alive = process_alive(pid);
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(
+            !released,
+            "handed over while a closed session is unresolved"
+        );
+        assert!(alive, "an unproven group was signalled");
+        assert!(
+            registry.release_idle().await,
+            "gone processes still hold the copy"
+        );
     }
 
     #[test]

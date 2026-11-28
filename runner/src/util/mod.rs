@@ -1,6 +1,7 @@
 pub mod backoff;
 pub mod broken_pipe;
 pub mod browser;
+pub mod chat_unit;
 pub mod confirm;
 pub mod containment;
 pub mod fs;

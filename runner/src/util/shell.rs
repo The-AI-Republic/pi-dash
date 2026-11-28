@@ -64,6 +64,23 @@ tokio::task_local! {
     pub static RUN_ENV: RunEnv;
 }
 
+tokio::task_local! {
+    /// Containment for a chat runtime's agents (PDASHOSS01-417), scoped to
+    /// the task that spawns them. A chat session is not a run: it carries
+    /// none of [`RUN_ENV`]'s run identity, only the process group of the
+    /// session's containment unit, so the agents it starts can be stopped
+    /// when the session ends. Ignored inside a [`RUN_ENV`] scope.
+    pub static CHAT_ENV: ChatEnv;
+}
+
+/// What [`CHAT_ENV`] carries.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatEnv {
+    pub backend: BackendKind,
+    /// The session's anchored process group, as [`RunEnv::process_group`].
+    pub process_group: Option<i32>,
+}
+
 /// What [`RUN_ENV`] carries. Kept as a struct so more per-run values can
 /// ride along without touching the bridges.
 #[derive(Debug, Clone)]
@@ -170,8 +187,24 @@ fn apply_run_env(cmd: &mut Command) {
         }
         #[cfg(target_os = "windows")]
         apply_run_env_windows(cmd, &env);
+    } else {
+        apply_chat_env(cmd);
     }
 }
+
+/// Outside a run, put a chat runtime's agent in its session's group (see
+/// [`CHAT_ENV`]).
+#[cfg(unix)]
+fn apply_chat_env(cmd: &mut Command) {
+    if let Ok(env) = CHAT_ENV.try_with(|e| *e)
+        && env.backend == BackendKind::ProcessGroup
+    {
+        cmd.process_group(env.process_group.unwrap_or(0));
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_chat_env(_cmd: &mut Command) {}
 
 /// Windows half of [`apply_run_env`]: there is no shell, so nothing can
 /// clobber what we set — export the real names directly instead of relying
@@ -678,6 +711,42 @@ mod tests {
             .map(|p| p.pgid);
         let _ = child.kill().await;
         assert_eq!(joined, Some(pgid), "agent did not join the run's group");
+    }
+
+    /// PDASHOSS01-417: a chat runtime's agents join the session's group
+    /// (so they can be stopped when it ends) without any run identity.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn chat_scope_spawns_agents_into_the_sessions_group() {
+        let owner = crate::util::group_ownership::GroupOwner::new_anchored().expect("anchored");
+        let pgid = owner.pgid();
+        let cmd = CHAT_ENV
+            .scope(
+                ChatEnv {
+                    backend: BackendKind::ProcessGroup,
+                    process_group: Some(pgid),
+                },
+                async { login_shell_command("sleep", &["30"], None) },
+            )
+            .await;
+        assert_eq!(env_value(&cmd, RUN_ID_ENV), None, "chat is not a run");
+        let mut cmd = cmd;
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let joined = child
+            .id()
+            .and_then(|pid| crate::util::procinfo::info(pid as i32))
+            .map(|p| p.pgid);
+        let _ = child.kill().await;
+        assert_eq!(
+            joined,
+            Some(pgid),
+            "chat agent did not join the session's group"
+        );
     }
 
     /// NEWPIDASH-320 §6.3: issue runs export the issue, project and agent
