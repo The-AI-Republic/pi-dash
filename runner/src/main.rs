@@ -22,6 +22,9 @@ fn main() -> Result<()> {
     // Subcommand help keeps clap's default rendering: an operator command
     // is refused when actually run.
     if cli::wants_filtered_help(&argv) {
+        // This help is printed before `cli::run` installs the broken-pipe
+        // hook, so install it here too (never reached for `pidash __run`).
+        pidash::util::broken_pipe::install();
         print!("{}", cli::agent_help());
         return Ok(());
     }
