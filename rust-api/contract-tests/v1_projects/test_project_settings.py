@@ -1,8 +1,9 @@
 """Contract tests: api-v1 project settings reads and PATCH (NEWPIDASH-278).
 
 Detail reads render the validated settings with defaults (DIFF-53:
-``{"issue_run_policy": "creator_and_assignees"}`` on Rust, the raw
-stored ``{}`` on Django). PATCH merges a nested
+every known key with its default on Rust — ``issue_run_policy`` and,
+since the lean agent workflow, ``agent_stages`` — the raw stored ``{}``
+on Django). PATCH merges a nested
 ``settings`` object. Django's v1 update serializer has no settings
 field (the key is ignored) and reads echo the raw stored blob, so the
 strict PATCH validation on Rust is the deliberate difference DIFF-51.
@@ -18,6 +19,15 @@ from _harness.diffs import expect, is_rust  # noqa: E402
 
 KEY = "settings"
 
+# Rust reads fill every known settings key with its default
+# (`project_settings::KNOWN_KEYS`); `agent_stages` defaults to Auto with
+# both optional stages on.
+AGENT_STAGES_DEFAULT = {"mode": "auto", "review": True, "test": True}
+RUST_DEFAULT_SETTINGS = {
+    "issue_run_policy": "creator_and_assignees",
+    "agent_stages": AGENT_STAGES_DEFAULT,
+}
+
 
 def base(seed):
     return f"/api/v1/workspaces/{seed['ws_a']['slug']}/projects"
@@ -29,7 +39,7 @@ def test_detail_read_includes_settings_with_defaults(seed):
     assert r.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -39,7 +49,7 @@ def test_patch_empty_settings_is_noop(seed):
     assert r.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust=RUST_DEFAULT_SETTINGS,
     )
 
 
@@ -83,7 +93,7 @@ def test_issue_run_policy_admin_can_change(seed):
     assert r.json()["settings"] == expect(
         "DIFF-51",
         django={},
-        rust={"issue_run_policy": "project_members"},
+        rust={**RUST_DEFAULT_SETTINGS, "issue_run_policy": "project_members"},
     )
 
 
