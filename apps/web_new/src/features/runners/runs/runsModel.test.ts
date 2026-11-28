@@ -99,6 +99,43 @@ describe("failure helpers", () => {
     expect(errorKindLabel("future_kind")).toBe("future_kind");
   });
 
+  it("maps the failure-taxonomy kinds (PDASHOSS01-183) to human labels", () => {
+    expect(errorKindLabel("agent_quota")).toBe("Provider quota");
+    expect(errorKindLabel("agent_rate_limit")).toBe("Provider rate limit");
+    expect(errorKindLabel("provider_server_error")).toBe("Provider server error");
+    expect(errorKindLabel("provider_network")).toBe("Provider network");
+    expect(errorKindLabel("runner_network")).toBe("Runner network");
+    expect(errorKindLabel("agent_context_overflow")).toBe("Context overflow");
+    expect(errorKindLabel("agent_missing_executable")).toBe("Agent CLI missing");
+    expect(errorKindLabel("agent_missing_config")).toBe("Agent config missing");
+    expect(errorKindLabel("agent_unsupported_version")).toBe("Agent version unsupported");
+    expect(errorKindLabel("agent_output")).toBe("Agent output unusable");
+    expect(errorKindLabel("agent_crash")).toBe("Agent crashed");
+    expect(errorKindLabel("workspace_setup")).toBe("Workspace setup");
+    expect(errorKindLabel("git_auth")).toBe("Git authentication");
+    expect(errorKindLabel("max_turns")).toBe("Turn limit");
+    expect(errorKindLabel("internal")).toBe("Internal");
+    // Taxonomy tokens must not leak verbatim
+    for (const k of [
+      "agent_quota",
+      "agent_rate_limit",
+      "provider_server_error",
+      "provider_network",
+      "runner_network",
+      "agent_context_overflow",
+      "agent_missing_executable",
+      "agent_missing_config",
+      "agent_unsupported_version",
+      "agent_output",
+      "agent_crash",
+      "workspace_setup",
+      "git_auth",
+      "max_turns",
+    ]) {
+      expect(errorKindLabel(k)).not.toBe(k);
+    }
+  });
+
   it("tones every error source", () => {
     const sources: RunErrorDiagnostic["source"][] = ["agent", "pidash_runner", "pidash_cloud", "unknown"];
     expect(sources.map(errorSourceTone)).toEqual(["warning", "accent", "accent", "neutral"]);

@@ -62,6 +62,21 @@ const ERROR_KIND_LABELS: Readonly<Record<string, string>> = {
   runner_lifecycle: "Runner state",
   agent_stalled: "Agent made no progress",
   unknown: "Unclassified",
+  agent_quota: "Provider quota",
+  agent_rate_limit: "Provider rate limit",
+  provider_server_error: "Provider server error",
+  provider_network: "Provider network",
+  runner_network: "Runner network",
+  agent_context_overflow: "Context overflow",
+  agent_missing_executable: "Agent CLI missing",
+  agent_missing_config: "Agent config missing",
+  agent_unsupported_version: "Agent version unsupported",
+  agent_output: "Agent output unusable",
+  agent_crash: "Agent crashed",
+  workspace_setup: "Workspace setup",
+  git_auth: "Git authentication",
+  max_turns: "Turn limit",
+  internal: "Internal",
 };
 
 /** Human label for a diagnostic kind; unknown tokens read verbatim. */
