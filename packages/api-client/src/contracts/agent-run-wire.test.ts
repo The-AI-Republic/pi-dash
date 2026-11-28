@@ -8,20 +8,29 @@
 // backend no longer sends, which is how the issue page and the Runs list
 // broke.
 //
-// Nothing below is a hand copy. Every payload and key list comes from
-// the serializers or from output captured off them:
-// - Django runs list: the DRF rows captured in fixture FX-RUN-08.
-// - Rust runs list: `RUN_WIRE_FIELDS` (runner_runs/shape.rs), which the
-//   Rust tests pin to the handler's output.
+// Every key list comes from the serializer sources, and every value from
+// output captured off them:
+// - Django runs list: `AgentRunSerializer.Meta.fields` (apps/api
+//   pi_dash/runner/serializers.py), valued from the DRF rows captured in
+//   fixture FX-RUN-08. A field the serializer drops leaves the row; a
+//   field it adds without a refreshed capture fails the suite.
+// - Rust runs list: the keys of `RUN_WIRE_FIELDS` (runner_runs/shape.rs),
+//   which the Rust tests pin to the handler's output. Its values are the
+//   Django capture's plus `capacity_wait: null`, not Rust handler output.
 // - Rust issue run: the bytes `agent_run_to_representation` must emit in
 //   serializers_detail.rs `run_replays_bytes_with_diagnostic_and_live_state`.
-// - Django issue run: the dict `_serialize_agent_run` returns
-//   (apps/api app/serializers/issue.py), with values from the captures above.
-// When a serializer changes, this file reads the new version.
+// - Django issue run: the keys of the dict `_serialize_agent_run` returns
+//   (apps/api app/serializers/issue.py), valued from the Django capture
+//   first and the Rust replay for keys only the issue run has.
+// The guard checks keys and value types as captured. Value-level drift
+// between the backends, and a Django type change in a key the capture
+// does not refresh, are out of its reach (contract tests cover values).
+// When a serializer's key list changes, this file reads the new version.
 import { describe, expect, it } from "vitest";
 import type { z } from "zod/mini";
 
 import djangoIssueSerializer from "../../../../apps/api/pi_dash/app/serializers/issue.py?raw";
+import djangoRunSerializer from "../../../../apps/api/pi_dash/runner/serializers.py?raw";
 import runsCapture from "../../../../rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json";
 import rustIssueSerializer from "../../../../rust-api/crates/services/src/app_issues/serializers_detail.rs?raw";
 import rustRunShape from "../../../../rust-api/crates/services/src/runner_runs/shape.rs?raw";
@@ -59,6 +68,20 @@ function pythonReturnedKeys(source: string, method: string): string[] {
   return [...body[2].matchAll(/^\s+"([a-z_]+)":/gm)].map((item) => item[1] ?? "");
 }
 
+/** The `Meta.fields` list of a DRF serializer class. */
+function pythonMetaFields(source: string, className: string): string[] {
+  const start = source.indexOf(`class ${className}(`);
+  if (start < 0) throw new Error(`${className} not found`);
+  const fields = /\n\s+class Meta:\n[^]*?\n\s+fields = \[\n([^]*?)\n\s+\]/.exec(source.slice(start));
+  if (!fields?.[1]) throw new Error(`${className} has no Meta.fields list`);
+  return [...fields[1].matchAll(/^\s+"([a-z_]+)",/gm)].map((item) => item[1] ?? "");
+}
+
+/** A Django runs-list row: the serializer's current fields, valued from a capture. */
+function djangoRunRow(serializerSource: string, capture: Payload): Payload {
+  return assemble(pythonMetaFields(serializerSource, "AgentRunSerializer"), capture);
+}
+
 /** A payload with exactly `keys`, each value taken from the first source that has it. */
 function assemble(keys: readonly string[], ...sources: Payload[]): Payload {
   return Object.fromEntries(
@@ -82,11 +105,13 @@ function unmodelledKeys(schema: Schema, payload: Payload): string[] {
   return Object.keys(payload).filter((key) => !(key in schema.shape));
 }
 
-const djangoListRows: Payload[] = [runsCapture.list.golden_row, runsCapture.detail.ok.body];
+const djangoRunFields = pythonMetaFields(djangoRunSerializer, "AgentRunSerializer");
+const capturedRows: Payload[] = [runsCapture.list.golden_row, runsCapture.detail.ok.body];
+const djangoListRows = capturedRows.map((row) => djangoRunRow(djangoRunSerializer, row));
 const [djangoListRow] = djangoListRows as [Payload];
 
 const rustListKeys = rustConstKeys(rustRunShape, "RUN_WIRE_FIELDS");
-const rustListRow = assemble(rustListKeys, djangoListRow, { capacity_wait: null });
+const rustListRow = assemble(rustListKeys, capturedRows[0] as Payload, { capacity_wait: null });
 
 const rustIssueKeys = rustConstKeys(rustIssueSerializer, "AGENT_RUN_FIELDS");
 // The Rust test uses synthetic ids (5555…) that are not RFC 4122 UUIDs;
@@ -100,10 +125,20 @@ const rustIssueRun: Payload = {
 };
 
 const djangoIssueKeys = pythonReturnedKeys(djangoIssueSerializer, "_serialize_agent_run");
-const djangoIssueRun = assemble(djangoIssueKeys, rustIssueRun, djangoListRow);
+const djangoIssueRun = assemble(djangoIssueKeys, djangoListRow, rustIssueRun);
 
 describe("run payloads as the serializers produce them", () => {
+  it("builds the Django runs-list row from AgentRunSerializer's current fields", () => {
+    const withoutPrompt = djangoRunSerializer.replace(/(class AgentRunSerializer\b[\s\S]*?)\n\s+"prompt",/, "$1");
+    expect(withoutPrompt).not.toBe(djangoRunSerializer);
+    const row = djangoRunRow(withoutPrompt, djangoListRow);
+    expect(row).not.toHaveProperty("prompt");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
   it("reads every serializer source", () => {
+    // The capture is current: it has exactly the serializer's fields.
+    for (const row of capturedRows) expect(Object.keys(row)).toEqual(djangoRunFields);
     expect(Object.keys(rustIssueRun)).toEqual(rustIssueKeys);
     expect(djangoIssueKeys).toContain("live_state");
     expect(djangoIssueKeys).not.toContain("queue_position");
