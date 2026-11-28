@@ -272,6 +272,21 @@ pub(crate) fn cli_install_dir(home: &Path, _local_app_data: Option<&Path>) -> Pa
     home.join(".local").join("bin")
 }
 
+/// The user's home directory and the directory a bundled install copies the
+/// CLI into, or `None` when the environment names no home directory.
+///
+/// `windows` and `env` are parameters rather than `cfg!` and `std::env` so the
+/// Windows layout is covered by tests on every host.
+pub(crate) fn bundle_install_dirs(
+    windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Option<(PathBuf, PathBuf)> {
+    let home = home_from_env(windows, &env)?;
+    let local_app_data = env("LOCALAPPDATA").map(PathBuf::from);
+    let dest_dir = cli_install_dir(&home, local_app_data.as_deref());
+    Some((home, dest_dir))
+}
+
 /// The line appended to a shell profile so `~/.local/bin` is on PATH.
 ///
 /// Guarded by its own `case` test so re-running is a no-op even if the user
@@ -432,11 +447,10 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
     let Some(bundled) = bundled_cli(app) else {
         return Ok(None);
     };
-    let Some(home) = dirs_home() else {
+    let Some((home, dest_dir)) = bundle_install_dirs(cfg!(windows), |key| std::env::var_os(key))
+    else {
         return Ok(None);
     };
-    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let dest_dir = cli_install_dir(&home, local_app_data.as_deref());
     let log = |line: String| {
         let _ = app.emit("pidash-install-log", serde_json::json!({ "line": line }));
     };
@@ -1062,6 +1076,40 @@ mod bundle_install_tests {
             cli_install_dir(&win_home, Some(&lad)),
             win_home.join(".local").join("bin")
         );
+    }
+
+    fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    /// A GUI process started from Explorer or the Start menu has USERPROFILE
+    /// and LOCALAPPDATA but no HOME; the bundled install must still happen.
+    #[test]
+    fn bundle_install_resolves_on_windows_without_home() {
+        let env = env_of(&[
+            ("USERPROFILE", "C:\\Users\\dev"),
+            ("LOCALAPPDATA", "C:\\Users\\dev\\AppData\\Local"),
+        ]);
+        let (home, dest_dir) = bundle_install_dirs(true, env)
+            .expect("Windows without HOME must still install from the bundle");
+        assert_eq!(home, PathBuf::from("C:\\Users\\dev"));
+        assert_eq!(
+            dest_dir,
+            PathBuf::from("C:\\Users\\dev").join(".local").join("bin")
+        );
+    }
+
+    #[test]
+    fn bundle_install_resolves_from_home_on_unix() {
+        let (home, dest_dir) = bundle_install_dirs(false, env_of(&[("HOME", "/home/dev")])).unwrap();
+        assert_eq!(home, PathBuf::from("/home/dev"));
+        assert_eq!(dest_dir, PathBuf::from("/home/dev/.local/bin"));
+        // USERPROFILE is not a home directory on Unix.
+        assert!(bundle_install_dirs(false, env_of(&[("USERPROFILE", "/home/dev")])).is_none());
     }
 
     #[test]
