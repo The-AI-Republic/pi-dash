@@ -164,6 +164,14 @@ class IssueSerializer(BaseSerializer):
     # payloads only (see ``get_dispatch_wait``).
     dispatch_wait = serializers.SerializerMethodField()
 
+    # The state's name and group next to the bare ``state`` UUID
+    # (PDASHOSS01-404), so list readers (``pidash issue list --fields
+    # state_detail``) can tell a done child from an open one without a
+    # second call to the states endpoint. ``state`` is ``select_related``
+    # on the list and detail querysets, so this adds no per-row query.
+    # ``null`` when the issue has no state.
+    state_detail = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
@@ -532,6 +540,12 @@ class IssueSerializer(BaseSerializer):
 
             runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
         return assigned_runner_detail(runner)
+
+    def get_state_detail(self, obj):
+        state = obj.state if obj.state_id else None
+        if state is None:
+            return None
+        return {"name": state.name, "group": state.group}
 
     def get_dispatch_wait(self, obj):
         if isinstance(self.parent, serializers.ListSerializer):

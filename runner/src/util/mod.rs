@@ -1,8 +1,10 @@
 pub mod backoff;
+pub mod broken_pipe;
 pub mod browser;
 pub mod confirm;
 pub mod containment;
 pub mod fs;
+pub mod group_ownership;
 pub mod hostname;
 pub mod logging;
 pub mod paths;
