@@ -92,13 +92,22 @@ def test_run_ai_queues_behind_busy_dedicated(admin_client, seeder, world, online
         "UPDATE runner SET status='busy', last_heartbeat_at=now() WHERE id=%s",
         (online_runner["id"],),
     )
+    # It is working on another issue right now.
+    seeder.create_daemon_run(
+        world["admin"]["id"], world["ws"]["id"], world["pod"]["id"], online_runner["id"], status="running"
+    )
     resp = admin_client.post(
         "/api/runners/runs/",
         json={"triggered_by": "run_ai", "work_item": world["issue1"]["id"]},
     )
-    assert resp.status_code in (200, 201), resp.text[:500]
-    body = resp.json()
-    assert body.get("reason") != "assigned_runner_offline"
+    assert resp.status_code == 201, resp.text[:500]
+    assert resp.json()["dispatch_wait"]["reason"] == "runner_busy"
+    run = seeder.db.fetchone(
+        "SELECT status, pinned_runner_id FROM agent_run WHERE id = %s",
+        (resp.json()["id"],),
+    )
+    assert run["status"] == "queued"
+    assert str(run["pinned_runner_id"]) == online_runner["id"]
 
 
 def test_release_pin_refused_for_dedicated(admin_client, world, dedicated_run, online_runner):

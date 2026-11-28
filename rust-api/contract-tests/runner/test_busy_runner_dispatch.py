@@ -124,3 +124,23 @@ def test_dedicated_pin_on_busy_runner_stays(seeder, daemon_world, machine_flow, 
     assert row["status"] == "queued"
     assert str(row["pinned_runner_id"]) == busy
     assert row["runner_id"] is None
+
+
+def test_borrowed_pin_beats_dedicated_after_a_dedicated_run(
+    seeder, daemon_world, machine_flow, machine_client
+):
+    # §10.2 alternation: after a dedicated run the runner owes shared work,
+    # and a borrowed locality pin is shared work, so it is served before the
+    # runner's next dedicated pin even though that one was queued first.
+    joining = machine_flow["runner_id"]
+    busy = _busy_runner(seeder, daemon_world)
+    served = _queued(seeder, daemon_world, busy, pinned_runner_id=joining, pin_kind="dedicated")
+    seeder.db.execute(
+        "UPDATE agent_run SET status = 'completed', runner_id = %s, assigned_at = now() WHERE id = %s",
+        (joining, served),
+    )
+    dedicated = _queued(seeder, daemon_world, busy, pinned_runner_id=joining, pin_kind="dedicated")
+    borrowable = _queued(seeder, daemon_world, busy, pinned_runner_id=busy, pin_kind="locality")
+    _join(machine_client, joining)
+    _assigned_to(seeder, borrowable, joining)
+    assert _row(seeder, dedicated)["status"] == "queued"

@@ -405,11 +405,19 @@ fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
 /// as the release-pin paths do — the new runner has no session of the
 /// parent's to resume against. Both are no-ops for a run that is unpinned
 /// or pinned to `runner_id`.
+/// Whether a selected run was taken from another runner's locality pin
+/// ([`borrowed_locality_condition`]), read off the locked run row: only
+/// then does the assignment need [`release_borrowed_pin_stmts`].
+pub fn is_borrowed_pin(pinned_runner_id: Option<Uuid>, pin_kind: &str, runner_id: Uuid) -> bool {
+    pin_kind == "locality" && pinned_runner_id.is_some_and(|pinned| pinned != runner_id)
+}
+
 pub fn release_borrowed_pin_stmts(run_id: Uuid, runner_id: Uuid) -> [UpdateStatement; 2] {
     let borrowed_parent = Query::select()
         .column("parent_run_id")
         .from(Alias::new("agent_run"))
         .and_where(Expr::col("id").eq(run_id))
+        .and_where(Expr::col("pin_kind").eq("locality"))
         .and_where(Expr::col("pinned_runner_id").is_not_null())
         .and_where(Expr::col("pinned_runner_id").ne(runner_id))
         .to_owned();
@@ -426,6 +434,7 @@ pub fn release_borrowed_pin_stmts(run_id: Uuid, runner_id: Uuid) -> [UpdateState
             SimpleExpr::Value(sea_query::Value::Uuid(None)),
         )
         .and_where(Expr::col("id").eq(run_id))
+        .and_where(Expr::col("pin_kind").eq("locality"))
         .and_where(Expr::col("pinned_runner_id").is_not_null())
         .and_where(Expr::col("pinned_runner_id").ne(runner_id))
         .to_owned();
@@ -433,9 +442,10 @@ pub fn release_borrowed_pin_stmts(run_id: Uuid, runner_id: Uuid) -> [UpdateState
 }
 
 /// The `_is_mine` rank (`matcher.py:181-192`): today pinned-to-me is
-/// 0 and shared is 1. Under §10.2 strict 1:1 alternation — after a
-/// dedicated run — locality pins stay 0, dedicated pins demote to 2,
-/// shared stays 1. Locality pins and `pod_once` runs count as shared
+/// 0, shared is 1 and another runner's (borrowed) locality pin is 3.
+/// Under §10.2 strict 1:1 alternation — after a dedicated run —
+/// locality pins stay 0, shared stays 1, borrowed pins are 2 and
+/// dedicated pins demote to 3. Locality pins and `pod_once` runs count as shared
 /// (a `pod_once` run has no pin, so it lands in the default arm).
 fn rank_expr(runner_id: Uuid, last_dedicated: bool) -> SimpleExpr {
     let pinned = col("agent_run", "pinned_runner_id");
@@ -456,9 +466,11 @@ fn rank_expr(runner_id: Uuid, last_dedicated: bool) -> SimpleExpr {
         Condition::all()
             .add(pinned.clone().eq(runner_id))
             .add(col("agent_run", "pin_kind").eq("dedicated")),
-        2,
+        3,
     )
-    .case(pinned.is_not_null(), 3)
+    // A borrowed locality pin is shared work the runner owes after a
+    // dedicated run: behind the unpinned queue, ahead of its dedicated pins.
+    .case(pinned.is_not_null(), 2)
     .finally(1)
     .into()
 }
@@ -1183,10 +1195,14 @@ mod tests {
             &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &alternating)
                 .expect("alternation"),
         );
+        // After a dedicated run the runner owes shared work: a borrowed
+        // pin (2) ranks behind the unpinned queue (1) but ahead of its
+        // own dedicated pins (3), so a steady dedicated queue cannot
+        // starve it (dedicated_runner_assignment design §10.2).
         assert!(
-            sql.contains(
-                "THEN 2 WHEN (\"agent_run\".\"pinned_runner_id\" IS NOT NULL) THEN 3 ELSE 1 END"
-            ),
+            sql.contains(&format!(
+                "CASE WHEN (\"agent_run\".\"pinned_runner_id\" = '{RUNNER_ID}' AND \"agent_run\".\"pin_kind\" = 'locality') THEN 0 WHEN (\"agent_run\".\"pinned_runner_id\" = '{RUNNER_ID}' AND \"agent_run\".\"pin_kind\" = 'dedicated') THEN 3 WHEN (\"agent_run\".\"pinned_runner_id\" IS NOT NULL) THEN 2 ELSE 1 END"
+            )),
             "{sql}"
         );
         // Runners that take no pod work never borrow.
@@ -1212,15 +1228,25 @@ mod tests {
         assert_eq!(
             parent.to_string(PostgresQueryBuilder),
             format!(
-                "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"thread_id\" <> '' AND \"id\" IN (SELECT \"parent_run_id\" FROM \"agent_run\" WHERE \"id\" = '{run}' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}')"
+                "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"thread_id\" <> '' AND \"id\" IN (SELECT \"parent_run_id\" FROM \"agent_run\" WHERE \"id\" = '{run}' AND \"pin_kind\" = 'locality' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}')"
             )
         );
         assert_eq!(
             pin.to_string(PostgresQueryBuilder),
             format!(
-                "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"id\" = '{run}' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}'"
+                "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"id\" = '{run}' AND \"pin_kind\" = 'locality' AND \"pinned_runner_id\" IS NOT NULL AND \"pinned_runner_id\" <> '{RUNNER_ID}'"
             )
         );
+    }
+
+    #[test]
+    fn is_borrowed_pin_only_for_another_runners_locality_pin() {
+        let other = Uuid::parse_str("0f6c3a43-4a77-4e0e-9c84-1f3a3c1f2b12").unwrap();
+        assert!(is_borrowed_pin(Some(other), "locality", runner()));
+        // Unpinned, pinned to the taker, or a dedicated pin: no release.
+        assert!(!is_borrowed_pin(None, "locality", runner()));
+        assert!(!is_borrowed_pin(Some(runner()), "locality", runner()));
+        assert!(!is_borrowed_pin(Some(other), "dedicated", runner()));
     }
 
     #[test]

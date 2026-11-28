@@ -346,7 +346,7 @@ pub(crate) async fn drain_pod_by_id(
             .await
             .map_err(map)?;
         pidash_services::runner_sessions::live_drains::release_borrowed_pin(
-            &txn, run_id, runner_id,
+            &txn, &run, run_id, runner_id,
         )
         .await
         .map_err(map)?;
