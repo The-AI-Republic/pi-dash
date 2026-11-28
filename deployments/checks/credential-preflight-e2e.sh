@@ -102,9 +102,11 @@ scenario mq-password-characters pass "$ACCEPTED" \
     "VOLUME_MQ_PASSWORD='a+b\\c'" \
     "AMQP_URL=amqp://pi-dash:a+b%5Cc@pi-dash-mq:5672/pi-dash"
 
-# A valid user with no permissions on the vhost.
-SETUP='for i in $(seq 1 60); do $dc exec -T pi-dash-mq rabbitmqctl -q await_startup && break; sleep 2; done
-$dc exec -T pi-dash-mq rabbitmqctl -q add_user nopriv nopriv' \
+# A valid user with no permissions on the vhost. The CLI runs as the
+# rabbitmq user: run as root during first boot, it writes the Erlang cookie
+# root-owned and the broker then fails to read it and exits.
+SETUP='for i in $(seq 1 60); do $dc exec -T -u rabbitmq pi-dash-mq rabbitmqctl -q await_startup && break; sleep 2; done
+$dc exec -T -u rabbitmq pi-dash-mq rabbitmqctl -q add_user nopriv nopriv' \
     scenario mq-no-permissions fail "RabbitMQ: .*(NOT_ALLOWED|refused)" \
     "AMQP_URL=amqp://nopriv:nopriv@pi-dash-mq:5672/pi-dash"
 
