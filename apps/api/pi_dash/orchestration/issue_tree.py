@@ -127,10 +127,13 @@ def issue_tree(issue: Issue, visible, *, recursive: bool = False) -> Dict[str, A
     nodes: List[tuple] = []  # (issue, parent identifier, depth)
     children_of: Dict[Any, List[Issue]] = {}
     # ``rows`` is in (depth, sequence_id, id) order, so each sibling list
-    # comes out by sequence_id.
+    # comes out by sequence_id. A row that left ``visible`` after the
+    # traversal (archived, deleted, access lost) is skipped like a hidden
+    # child: the walk below never reaches its subtree.
     for row_id in rows:
-        row = by_id[row_id]
-        children_of.setdefault(row.parent_id, []).append(row)
+        row = by_id.get(row_id)
+        if row is not None:
+            children_of.setdefault(row.parent_id, []).append(row)
 
     # Depth-first pre-order with siblings by sequence_id. An explicit stack,
     # not recursion: a chain near NODE_LIMIT deep would exceed Python's

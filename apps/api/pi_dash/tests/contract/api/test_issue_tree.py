@@ -294,3 +294,45 @@ class TestIssueTree:
         body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
         assert [(c["name"], c["depth"]) for c in body["children"]] == [("a", 1), ("b", 2)]
         assert body["truncated"] is False
+
+    def test_chain_one_past_the_limit_is_truncated(self, api_key_client, workspace, make_issue, monkeypatch):
+        # The depth cap lets the row at depth NODE_LIMIT + 1 through, so a
+        # chain one deeper than the limit still reports the cut.
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        parent = epic
+        for name in ("c1", "c2", "c3"):
+            parent = make_issue(name, parent=parent)
+        at_limit = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert at_limit["truncated"] is False
+        make_issue("c4", parent=parent)
+        past = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert past["truncated"] is True
+        assert [c["name"] for c in past["children"]] == ["c1", "c2", "c3"]
+
+    def test_child_gone_between_queries_is_left_out(self, api_key_client, workspace, make_issue, monkeypatch):
+        # The traversal and the row fetch are separate reads: a child
+        # archived in between is dropped (with its subtree), not a 500.
+        from django.utils import timezone
+
+        from pi_dash.orchestration import issue_tree
+
+        epic = make_issue("Epic")
+        gone = make_issue("gone", parent=epic)
+        make_issue("gone child", parent=gone)
+        make_issue("kept", parent=epic)
+        real = issue_tree._descendants
+
+        def racing(issue, visible, *, recursive):
+            result = real(issue, visible, recursive=recursive)
+            Issue.objects.filter(pk=gone.pk).update(archived_at=timezone.now())
+            return result
+
+        monkeypatch.setattr(issue_tree, "_descendants", racing)
+        resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
+        assert resp.status_code == http_status.HTTP_200_OK, resp.content
+        body = resp.json()
+        assert [c["name"] for c in body["children"]] == ["kept"]
+        assert body["rollup"]["total"] == 1
