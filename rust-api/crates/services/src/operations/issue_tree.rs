@@ -9,9 +9,9 @@
 //!   `{id, identifier, name, state, state_group, priority}`; each child adds
 //!   `parent` (identifier), `depth`, `assignees: [{id, display_name}]` and
 //!   `active_run: {id, status} | null`.
-//! * Levels are fetched breadth-first from the caller's visible pool
-//!   (`member_project_issues`), siblings by `(sequence_id, id)`, then listed
-//!   depth-first pre-order. Each item is visited once; at most
+//! * Descendants come from one recursive query over the caller's visible
+//!   pool (`member_project_issues`), ranked `(depth, sequence_id, id)`,
+//!   then listed depth-first pre-order. Each item is visited once; at most
 //!   [`NODE_LIMIT`] children, past that `truncated`.
 //! * `rollup.done` counts the closed groups (`completed`, `cancelled`);
 //!   `open = total - done`; `by_state_group` carries every group in
@@ -21,11 +21,11 @@
 //!   DESC`) run in `ACTIVE_RUN_STATUSES` (Django's matcher
 //!   `NON_TERMINAL_STATUSES`; not the `jobs` set of that name).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use sea_orm::{
-    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait, RelationTrait,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -185,43 +185,13 @@ pub async fn issue_tree(
     let db = pidash_db::pool::sea_orm_connection(pool);
     let source = fetch_header(&db, slug, project_id, issue_id).await?;
 
-    let mut seen: HashSet<Uuid> = HashSet::from([source.id]);
+    let (rows, truncated) = fetch_descendants(&db, slug, user_id, source.id, recursive).await?;
+    // `rows` is in (depth, sequence_id, id) order, so each sibling list
+    // comes out by sequence_id.
     let mut children_of: HashMap<Uuid, Vec<NodeRow>> = HashMap::new();
-    let mut frontier = vec![source.id];
-    let mut truncated = false;
-    while !frontier.is_empty() && !truncated {
-        // Only the remaining budget plus one row (to detect truncation),
-        // distinct and excluding visited ids, so a wide level stays bounded.
-        let remaining = NODE_LIMIT + 1 - seen.len();
-        let level = node_select(visible_pool_query(slug, user_id))
-            .distinct()
-            .filter(issues::Column::ParentId.is_in(frontier.clone()))
-            .filter(issues::Column::Id.is_not_in(seen.iter().copied()))
-            .order_by_asc(issues::Column::SequenceId)
-            .order_by_asc(issues::Column::Id)
-            .limit(remaining as u64 + 1)
-            .into_model::<NodeRow>()
-            .all(&db)
-            .await
-            .map_err(|error| db_error(error, "tree-level"))?;
-        frontier = Vec::new();
-        for row in level {
-            if seen.contains(&row.id) {
-                continue;
-            }
-            // `len(seen) - 1 >= NODE_LIMIT`: `seen` also holds the source.
-            if seen.len() > NODE_LIMIT {
-                truncated = true;
-                break;
-            }
-            seen.insert(row.id);
-            frontier.push(row.id);
-            if let Some(parent) = row.parent_id {
-                children_of.entry(parent).or_default().push(row);
-            }
-        }
-        if !recursive {
-            break;
+    for row in rows {
+        if let Some(parent) = row.parent_id {
+            children_of.entry(parent).or_default().push(row);
         }
     }
 
@@ -261,6 +231,105 @@ pub async fn issue_tree(
     out.insert("children".to_owned(), Value::Array(children));
     out.insert("truncated".to_owned(), Value::Bool(truncated));
     Ok(out)
+}
+
+/// `_descendants` (`issue_tree.py`): the listed children in
+/// `(depth, sequence_id, id)` order, and whether [`NODE_LIMIT`] cut them
+/// short, from one `WITH RECURSIVE` query instead of one per level.
+///
+/// Only rows in the caller's visible pool are followed (a hidden child
+/// stops the walk below it); the source is never re-entered, which is the
+/// only way a parent cycle can be reached from it; depth is capped at
+/// `NODE_LIMIT + 1`, since a deeper row cannot rank inside the first
+/// `NODE_LIMIT + 1` rows.
+async fn fetch_descendants(
+    db: &sea_orm::DatabaseConnection,
+    slug: &str,
+    user_id: &Uuid,
+    source_id: Uuid,
+    recursive: bool,
+) -> Result<(Vec<NodeRow>, bool), Error> {
+    let stmt = descendants_query(slug, user_id, source_id, recursive);
+    let mut rows = db
+        .query_all(db.get_database_backend().build(&stmt))
+        .await
+        .map_err(|error| db_error(error, "tree-descendants"))?
+        .iter()
+        .map(|row| NodeRow::from_query_result(row, ""))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| db_error(error, "tree-descendants"))?;
+    let truncated = rows.len() > NODE_LIMIT;
+    rows.truncate(NODE_LIMIT);
+    Ok((rows, truncated))
+}
+
+/// The statement behind [`fetch_descendants`].
+fn descendants_query(
+    slug: &str,
+    user_id: &Uuid,
+    source_id: Uuid,
+    recursive: bool,
+) -> sea_query::WithQuery {
+    use sea_query::{Alias, CommonTableExpression, Expr, Query, UnionType, WithClause};
+
+    let tree = Alias::new("tree");
+    let depth = Alias::new("depth");
+    let pool = || {
+        visible_pool_query(slug, user_id)
+            .select_only()
+            .column(issues::Column::Id)
+            .into_query()
+    };
+    let id = (issues::Entity, issues::Column::Id);
+
+    let mut seed = Query::select();
+    seed.column(id)
+        .expr_as(Expr::val(1i32), depth.clone())
+        .from(issues::Entity)
+        .and_where(Expr::col((issues::Entity, issues::Column::ParentId)).eq(source_id))
+        .and_where(Expr::col(id).ne(source_id))
+        .and_where(Expr::col(id).in_subquery(pool()));
+    let mut step = Query::select();
+    step.column(id)
+        .expr(Expr::col((tree.clone(), depth.clone())).add(1i32))
+        .from(issues::Entity)
+        .inner_join(
+            tree.clone(),
+            Expr::col((issues::Entity, issues::Column::ParentId))
+                .equals((tree.clone(), Alias::new("id"))),
+        )
+        .and_where(Expr::val(recursive).into())
+        .and_where(Expr::col((tree.clone(), depth.clone())).lte(NODE_LIMIT as i32))
+        .and_where(Expr::col(id).ne(source_id))
+        .and_where(Expr::col(id).in_subquery(pool()));
+    seed.union(UnionType::All, step);
+
+    let mut cte = CommonTableExpression::new();
+    cte.table_name(tree.clone())
+        .columns([Alias::new("id"), depth.clone()])
+        .query(seed);
+    let mut with = WithClause::new();
+    with.recursive(true).cte(cte);
+
+    node_select(
+        issues::Entity::find()
+            .join(JoinType::LeftJoin, issues::Relation::States.def())
+            .join(JoinType::InnerJoin, issues::Relation::Projects.def()),
+    )
+    .into_query()
+    .inner_join(
+        tree.clone(),
+        Expr::col(id).equals((tree.clone(), Alias::new("id"))),
+    )
+    .order_by((tree, depth), sea_query::Order::Asc)
+    .order_by(
+        (issues::Entity, issues::Column::SequenceId),
+        sea_query::Order::Asc,
+    )
+    .order_by(id, sea_query::Order::Asc)
+    .limit(NODE_LIMIT as u64 + 1)
+    .to_owned()
+    .with(with)
 }
 
 /// Depth-first pre-order over `children_of` with an explicit stack (a
@@ -428,6 +497,39 @@ mod tests {
         walk(&children_of, root.id, &root.identifier(), 1, &mut nodes);
         assert_eq!(nodes.len(), NODE_LIMIT);
         assert_eq!(nodes.last().unwrap().2, NODE_LIMIT as u64);
+    }
+
+    #[test]
+    fn descendants_are_one_recursive_statement() {
+        let source = Uuid::nil();
+        let sql = descendants_query("ws", &Uuid::nil(), source, true)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.starts_with(r#"WITH RECURSIVE "tree" ("id", "depth") AS "#),
+            "{sql}"
+        );
+        assert!(sql.contains("UNION ALL"), "{sql}");
+        // The visible pool gates both the seed and the step.
+        assert_eq!(
+            sql.matches(r#""project_members"."is_active" = TRUE"#)
+                .count(),
+            2,
+            "{sql}"
+        );
+        // The source is never re-entered, depth is capped.
+        assert_eq!(
+            sql.matches(r#""issues"."id" <> '00000000-0000-0000-0000-000000000000'"#)
+                .count(),
+            2,
+            "{sql}"
+        );
+        assert!(sql.contains(r#""tree"."depth" <= 1000"#), "{sql}");
+        assert!(
+            sql.ends_with(
+                r#"ORDER BY "tree"."depth" ASC, "issues"."sequence_id" ASC, "issues"."id" ASC LIMIT 1001"#
+            ),
+            "{sql}"
+        );
     }
 
     #[test]
