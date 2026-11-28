@@ -188,14 +188,15 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
       ``managed_runner`` runs pinned to it. No new run has that kind.
 
     A pod member also takes a locality pin held by another runner that is
-    working right now (PDASHOSS01-419); it ranks last (3), after the
-    runner's own pins and the shared queue, and its pin is dropped when it
-    is taken (:func:`_assign`).
+    working right now (PDASHOSS01-419); it ranks after the runner's own
+    pins and the shared queue, and its pin is dropped when it is taken
+    (:func:`_assign`).
 
     Tier order follows §10.2: locality pins always first (0); unpinned
     shared work second (1); dedicated pins first (0) when the runner's
-    last run was not dedicated, demoted to last (2) when it was. Locality
-    pins and ``pod_once`` runs count as shared work.
+    last run was not dedicated, demoted to last (3) when it was. Locality
+    pins, borrowed locality pins and ``pod_once`` runs count as shared
+    work: a borrowed pin is 3 normally and 2 after a dedicated run.
 
     All of it must also pass the usage rule
     (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
@@ -245,8 +246,11 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     if last_dedicated:
         rank = models.Case(
             models.When(pinned_runner=runner, pin_kind=PinKind.LOCALITY, then=models.Value(0)),
-            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(2)),
-            models.When(pinned_runner__isnull=False, then=models.Value(3)),
+            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(3)),
+            # A borrowed locality pin is shared work the runner owes after a
+            # dedicated run: behind the unpinned queue, ahead of its
+            # dedicated pins, so a steady dedicated queue cannot starve it.
+            models.When(pinned_runner__isnull=False, then=models.Value(2)),
             default=models.Value(1),
             output_field=models.IntegerField(),
         )
@@ -271,8 +275,10 @@ def _assign(run: AgentRun, runner: Runner) -> None:
     as the release-pin paths do: the new runner has no session of the
     parent's to resume against.
     """
+    from pi_dash.runner.models import PinKind
+
     fields = ["runner", "owner", "status", "assigned_at"]
-    if run.pinned_runner_id is not None and run.pinned_runner_id != runner.pk:
+    if run.pin_kind == PinKind.LOCALITY and run.pinned_runner_id is not None and run.pinned_runner_id != runner.pk:
         run.pinned_runner = None
         fields.append("pinned_runner")
         parent = run.parent_run if run.parent_run_id else None

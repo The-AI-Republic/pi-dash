@@ -25,6 +25,7 @@ from pi_dash.runner.models import (
     PinKind,
     Pod,
     Runner,
+    RunnerPodDispatch,
     RunnerStatus,
 )
 from pi_dash.runner.services.issue_assignment import (
@@ -234,3 +235,82 @@ def test_busy_status_with_stale_heartbeat_is_offline(db, workspace, project, cre
     )
     runner.refresh_from_db()
     assert runner_is_offline(runner) is True
+
+
+def _queue_locality(issue, user, pod, pinned):
+    return AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=user,
+        pod=pod,
+        work_item=issue,
+        pinned_runner=pinned,
+        pin_kind=PinKind.LOCALITY,
+        status=AgentRunStatus.QUEUED,
+        prompt="continue",
+    )
+
+
+@pytest.mark.unit
+def test_borrowed_pin_ranks_ahead_of_dedicated_after_a_dedicated_run(db, workspace, project, create_user, pod, state):
+    """§10.2 alternation: after a dedicated run the runner owes shared work,
+    and a borrowed locality pin is shared work, so it beats the next
+    dedicated pin even when that one was queued first."""
+    first = _make_runner(create_user, workspace, pod, "first")
+    second = _make_runner(create_user, workspace, pod, "second")
+    dedicated_issue = _make_issue(workspace, project, state, create_user, runner=second, name="dedicated")
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        work_item=dedicated_issue,
+        runner=second,
+        owner=create_user,
+        pinned_runner=second,
+        pin_kind=PinKind.DEDICATED,
+        status=AgentRunStatus.COMPLETED,
+        assigned_at=timezone.now(),
+        prompt="served dedicated",
+    )
+    next_dedicated = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        work_item=dedicated_issue,
+        pinned_runner=second,
+        pin_kind=PinKind.DEDICATED,
+        status=AgentRunStatus.QUEUED,
+        prompt="next dedicated",
+    )
+    _occupy(first, _make_issue(workspace, project, state, create_user, name="busy"), create_user, pod)
+    borrowable = _queue_locality(_make_issue(workspace, project, state, create_user), create_user, pod, first)
+
+    assert drain_for_runner_by_id(second.pk) is True
+    borrowable.refresh_from_db()
+    next_dedicated.refresh_from_db()
+    assert borrowable.runner_id == second.pk
+    assert next_dedicated.status == AgentRunStatus.QUEUED
+
+
+@pytest.mark.unit
+def test_locality_pin_on_idle_runner_is_not_borrowed(db, workspace, project, create_user, pod, state):
+    first = _make_runner(create_user, workspace, pod, "first")
+    queued = _queue_locality(_make_issue(workspace, project, state, create_user), create_user, pod, first)
+    second = _make_runner(create_user, workspace, pod, "second")
+    # ``first`` is idle (no busy-status run): its own drain will serve it.
+    assert drain_for_runner_by_id(second.pk) is False
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.QUEUED
+    assert queued.pinned_runner_id == first.pk
+
+
+@pytest.mark.unit
+def test_pinned_only_runner_does_not_borrow(db, workspace, project, create_user, pod, state):
+    first = _make_runner(create_user, workspace, pod, "first")
+    _occupy(first, _make_issue(workspace, project, state, create_user, name="busy"), create_user, pod)
+    queued = _queue_locality(_make_issue(workspace, project, state, create_user), create_user, pod, first)
+    second = _make_runner(create_user, workspace, pod, "second")
+    Runner.objects.filter(pk=second.pk).update(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
+    assert drain_for_runner_by_id(second.pk) is False
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.QUEUED
+    assert queued.pinned_runner_id == first.pk
