@@ -142,12 +142,14 @@ function updateEnvFile() {
             # "&", "\\" and the delimiter are special: the value is kept
             # byte for byte. Writing back through the same file keeps its
             # owner and mode.
-            # The original is only replaced once the full copy is written.
+            # The original is only replaced, by a rename, once a complete
+            # copy is written beside it with the same mode.
             local tmp line
-            if ! tmp=$(mktemp) || [ -z "$tmp" ]; then
+            if ! tmp=$(mktemp "$(dirname "$file")/.pi_dash.env.XXXXXX") || [ -z "$tmp" ]; then
                 echo "Could not update $key in $file: no temporary file" >&2
                 return 1
             fi
+            cp -p "$file" "$tmp" 2>/dev/null
             if ! { while IFS= read -r line || [ -n "$line" ]; do
                 if [[ $line == "$key="* ]]; then
                     printf '%s=%s\n' "$key" "$value"
@@ -159,12 +161,11 @@ function updateEnvFile() {
                 echo "Could not update $key in $file: writing a temporary copy failed" >&2
                 return 1
             fi
-            if ! cat "$tmp" > "$file"; then
+            if ! mv -f "$tmp" "$file"; then
                 rm -f "$tmp"
                 echo "Could not update $key in $file" >&2
                 return 1
             fi
-            rm -f "$tmp"
         fi
     else
         echo "File not found: $file"
@@ -223,7 +224,7 @@ function syncEnvFile(){
         
         # READ keys of pi_dash.env and update the values from pi_dash.env.bak.
         # Read a snapshot: updateEnvFile rewrites pi_dash.env in place.
-        local current
+        local current failed=""
         current=$(cat "$DOCKER_ENV_PATH")
         while IFS= read -r line
         do
@@ -234,9 +235,13 @@ function syncEnvFile(){
             key=$(echo "$line" | cut -d'=' -f1)
             value=$(getEnvValue "$key" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
             if [ -n "$value" ]; then
-                updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
+                updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH" || failed+=" $key"
             fi
         done <<< "$current"
+        if [ -n "$failed" ]; then
+            echo "Could not carry over:$failed. Copy them from $PI_DASH_INSTALL_DIR/pi_dash.env.bak into $DOCKER_ENV_PATH ❌" >&2
+            return 1
+        fi
     fi
     echo "Environment variables synced successfully" >&2
 }
@@ -359,7 +364,7 @@ function download() {
 
     mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
-    syncEnvFile
+    syncEnvFile || exit 1
 
     # Generate fresh per-install values for any blank secrets. On upgrades
     # syncEnvFile will already have pulled forward the user's existing values,
@@ -474,6 +479,28 @@ def postgres_refusal(text):
     return POSTGRES_REFUSAL.search(text) is not None
 
 
+def django_connection_params(cfg):
+    """libpq parameters as Django 4.2's PostgreSQL backend builds them:
+    OPTIONS override the database name; USER, PASSWORD, HOST and PORT
+    override OPTIONS. Django-only options are dropped."""
+    options = {k: v for k, v in (cfg.get("OPTIONS") or {}).items() if isinstance(v, (str, int))}
+    name = cfg.get("NAME")
+    if name:
+        params = {"dbname": name, **options}
+    elif name is None:
+        options.pop("service", None)
+        params = {"dbname": "postgres", **options}
+    else:
+        params = dict(options)
+    for key in ("assume_role", "isolation_level", "server_side_binding", "prepare_threshold", "pool", "cursor_factory"):
+        params.pop(key, None)
+    params["client_encoding"] = "UTF8"
+    for setting, key in (("USER", "user"), ("PASSWORD", "password"), ("HOST", "host"), ("PORT", "port")):
+        if cfg.get(setting):
+            params[key] = str(cfg[setting])
+    return params
+
+
 def check_postgres():
     import dj_database_url
     import psycopg
@@ -489,19 +516,15 @@ def check_postgres():
             "HOST": os.environ.get("POSTGRES_HOST"),
             "PORT": os.environ.get("POSTGRES_PORT", "5432"),
         }
-    host = cfg.get("HOST") or ""
+    params = django_connection_params(cfg)
+    host = str(params.get("host") or "")
+    if not host:
+        say("SKIP", "PostgreSQL", "no host set")
+        return
     if host != "pi-dash-db":
         say("SKIP", "PostgreSQL", f"external host {host}")
         return
-    params = {k: v for k, v in (cfg.get("OPTIONS") or {}).items() if isinstance(v, (str, int))}
-    params.update(
-        dbname=cfg.get("NAME") or "",
-        user=cfg.get("USER") or "",
-        password=cfg.get("PASSWORD") or "",
-        host=host,
-        port=str(cfg.get("PORT") or 5432),
-        connect_timeout=TIMEOUT,
-    )
+    params["connect_timeout"] = TIMEOUT
 
     def attempt():
         try:
@@ -559,18 +582,24 @@ def check_rabbitmq():
     retry("RabbitMQ", attempt)
 
 
-def guarded(service, check):
-    """A crash in one check must not hide another's result."""
+def guarded(service, variable, check):
+    """A crash in one check must not hide another's result. Its message is
+    not printed: URL parsers quote their input, which holds the password."""
     try:
         check()
     except Exception as error:
-        say("ERROR", service, f"{type(error).__name__}: {error}")
+        say(
+            "ERROR",
+            service,
+            f"{type(error).__name__} while reading {variable}; check its format and"
+            " percent-encode special characters in the user and password",
+        )
 
 
 if "db" in SERVICES:
-    guarded("PostgreSQL", check_postgres)
+    guarded("PostgreSQL", "DATABASE_URL", check_postgres)
 if "mq" in SERVICES:
-    guarded("RabbitMQ", check_rabbitmq)
+    guarded("RabbitMQ", "AMQP_URL", check_rabbitmq)
 PROBE
 
 function credentialMismatch() {

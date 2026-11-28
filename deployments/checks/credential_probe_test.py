@@ -343,6 +343,37 @@ class ProbeTest(unittest.TestCase):
         statuses = {line[2]: line[1] for line in lines}
         self.assertEqual(statuses, {"PostgreSQL": "NOTREADY", "RabbitMQ": "OK"}, result.stdout + result.stderr)
 
+    def test_postgres_query_dbname_overrides_the_path_as_django_does(self):
+        # Django: {"dbname": NAME, **OPTIONS}; USER/PASSWORD/HOST/PORT win
+        # over OPTIONS.
+        pg = FakePostgres({"pi-dash": "pi-dash"}, {"other"})
+        url = self.pg_url(pg) + "?dbname=other&user=ignored&host=ignored.invalid"
+        results, out = self.run_probe({"DATABASE_URL": url}, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "OK", out)
+        self.assertIn(("pi-dash", "other"), pg.seen)
+
+    def test_an_unparsable_url_is_reported_without_its_contents(self):
+        # An unescaped "/" in the password makes its first part the "port":
+        # the parser's message would print it.
+        env = {
+            "DATABASE_URL": "postgresql://pi-dash:topsecret/rest@pi-dash-db/pi-dash",
+            "AMQP_URL": "amqp://pi-dash:mqsecret/rest@pi-dash-mq:5672/pi-dash",
+        }
+        results, out = self.run_probe(env)
+        self.assertEqual(results["PostgreSQL"][0], "ERROR", out)
+        self.assertEqual(results["RabbitMQ"][0], "ERROR", out)
+        self.assertNotIn("topsecret", out)
+        self.assertNotIn("mqsecret", out)
+        self.assertIn("DATABASE_URL", results["PostgreSQL"][1])
+        self.assertIn("AMQP_URL", results["RabbitMQ"][1])
+        self.assertIn("percent-encode", results["PostgreSQL"][1])
+
+    def test_postgres_with_no_host_says_so(self):
+        env = {"DATABASE_URL": "", "POSTGRES_DB": "pi-dash", "POSTGRES_USER": "pi-dash", "POSTGRES_PASSWORD": "x"}
+        results, out = self.run_probe(env, services="db")
+        self.assertEqual(results["PostgreSQL"][0], "SKIP", out)
+        self.assertIn("no host", results["PostgreSQL"][1])
+
     def test_postgres_external_host_is_skipped(self):
         results, out = self.run_probe({"DATABASE_URL": "postgresql://app:secret@external-db/app"}, services="db")
         self.assertEqual(results["PostgreSQL"][0], "SKIP", out)

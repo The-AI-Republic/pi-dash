@@ -17,7 +17,7 @@
 // Run: node --test deployments/checks/*.test.mjs
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -222,7 +222,14 @@ describe("install.sh env file values", () => {
       body,
     ].join("\n");
     const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: dir } });
-    return { status: result.status, out: `${result.stdout}${result.stderr}`, file: readFileSync(envFile, "utf8") };
+    return {
+      status: result.status,
+      out: `${result.stdout}${result.stderr}`,
+      file: readFileSync(envFile, "utf8"),
+      mode: statSync(envFile).mode & 0o777,
+      // Temporary copies updateEnvFile would leave beside the env file.
+      leftovers: readdirSync(dir).filter((name) => name.startsWith(".pi_dash.env.")),
+    };
   }
 
   it("reads a value that contains '='", () => {
@@ -261,6 +268,42 @@ updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
     );
     assert.equal(file, env, out);
     assert.match(out, /status=[1-9]/);
+  });
+
+  it("replaces the env file only by renaming a complete copy", () => {
+    // A failed rename (or a full disk before it) must leave the original.
+    const env = "A=1\nDATABASE_URL=old\nB=2\n";
+    const { file, out, leftovers } = runEnv(
+      `mv() { return 1; }
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
+      { env }
+    );
+    assert.equal(file, env, out);
+    assert.match(out, /status=[1-9]/);
+    assert.deepEqual(leftovers, [], "temporary copy left behind");
+  });
+
+  it("keeps the env file's mode across a rewrite and leaves no temporary file", () => {
+    const { file, mode, out, leftovers } = runEnv(
+      `chmod 640 "$DOCKER_ENV_PATH"
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"`,
+      { env: "A=1\nDATABASE_URL=old\n" }
+    );
+    assert.equal(file, "A=1\nDATABASE_URL=new\n", out);
+    assert.equal(mode, 0o640);
+    assert.deepEqual(leftovers, []);
+  });
+
+  it("reports a failed sync instead of a successful one", () => {
+    const { status, out } = runEnv(
+      `updateEnvFile() { return 1; }
+syncEnvFile; echo "status=$?"`,
+      { env: "DATABASE_URL=\n", backup: "DATABASE_URL=postgresql://u:p@pi-dash-db/db\n" }
+    );
+    assert.equal(status, 0, out);
+    assert.match(out, /status=[1-9]/);
+    assert.doesNotMatch(out, /synced successfully/);
+    assert.match(out, /DATABASE_URL/);
   });
 
   it("carries a connection URL from the backup into the new env file on upgrade", () => {
