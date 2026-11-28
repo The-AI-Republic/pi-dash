@@ -1115,6 +1115,7 @@ async fn by_identifier_inner(
             expand: &expand_refs,
             is_list: false,
             viewer: Some(pre.actor.id),
+            run_viewer: Some(pre.actor.id),
             web_base: web_base.as_deref(),
         },
     )
@@ -1285,6 +1286,7 @@ async fn issue_list_inner(
                 expand: &expand_refs,
                 is_list: false,
                 viewer: None,
+                run_viewer: Some(pre.actor.id),
                 web_base: web_base.as_deref(),
             },
         )
@@ -1343,6 +1345,7 @@ async fn issue_list_inner(
                     expand: &expand_refs,
                     is_list: true,
                     viewer: None,
+                    run_viewer: None,
                     web_base: web_base.as_deref(),
                 },
             )
@@ -1433,6 +1436,7 @@ async fn issue_detail_inner(
             expand: &expand_refs,
             is_list: false,
             viewer: Some(pre.actor.id),
+            run_viewer: Some(pre.actor.id),
             web_base: web_base.as_deref(),
         },
     )

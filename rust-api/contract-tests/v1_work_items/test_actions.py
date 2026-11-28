@@ -5,6 +5,8 @@ machine-readable ``reason`` when no runner can take the run (the bare
 contract environment has none); that 409 shape is itself the contract.
 """
 
+import uuid
+
 import pytest
 
 from _harness.diffs import is_rust
@@ -165,6 +167,99 @@ def test_issue_detail_active_run_names_its_branch(api, world, seeder):
     assert block["id"] == run["id"]
     assert block["status"] == "running"
     assert block["branch"] == "pi-dash/eng-7"
+
+
+def test_issue_detail_idle_active_run_is_null(api, world):
+    """An idle issue reads as ``"active_run": null`` on every single-issue
+    GET (PDASHOSS01-407), so a client can tell it from a server without
+    the block; ``?fields=`` narrowing and list rows still omit it."""
+    url = issue_url(world, world["issue"]["id"])
+    patched = api.patch(url, json={"external_id": "ext-407", "external_source": "github"})
+    assert patched.status_code == 200, patched.text
+    external = (
+        issue_url(world, "").rstrip("/")
+        + "/?external_id=ext-407&external_source=github"
+    )
+    for read in (url, by_identifier_url(world), external):
+        response = api.get(read)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "active_run" in body, read
+        assert body["active_run"] is None
+    assert "active_run" not in api.get(url + "?fields=id,name").json()
+
+
+def test_issue_detail_unstarted_run_reports_its_dispatch_pin(api, world, seeder):
+    """Before the run starts, the branch pinned at dispatch is the one the
+    runner checks out, even if the issue's branch changed since; once it
+    runs, the issue's branch wins (PDASHOSS01-407)."""
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    url = issue_url(world, world["issue"]["id"])
+    patched = api.patch(url, json={"git_work_branch": "pi-dash/edited-later"})
+    assert patched.status_code == 200, patched.text
+    for run_status in ("queued", "assigned", "waiting_for_worktree", "running"):
+        run = seeder.create_agent_run(
+            world["workspace"]["id"], world["owner"]["id"], pod["id"],
+            world["issue"]["id"], status=run_status,
+        )
+        seeder.db.execute(
+            "UPDATE agent_run SET run_config = %s WHERE id = %s",
+            ('{"git_work_branch": "feat/a"}', run["id"]),
+        )
+        block = api.get(url).json()["active_run"]
+        assert block["id"] == run["id"]
+        expected = "pi-dash/edited-later" if run_status == "running" else "feat/a"
+        assert block["branch"] == expected, run_status
+        seeder.db.execute(
+            "UPDATE agent_run SET status = 'completed' WHERE id = %s", (run["id"],)
+        )
+
+
+def test_issue_detail_hides_runner_metadata_from_non_owners(api, world, seeder):
+    """Only the runner's owner sees which runner holds the run and its
+    heartbeat (``can_view_runner``); everyone sees the run itself."""
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    other = seeder.create_user()
+    seeder.create_workspace_member(world["workspace"]["id"], other["id"], role=20)
+    url = issue_url(world, world["issue"]["id"])
+    for owner_id, visible in ((other["id"], False), (world["owner"]["id"], True)):
+        runner = {"id": str(uuid.uuid4())}
+        seeder.db.execute(
+            """INSERT INTO runner
+               (id, owner_id, workspace_id, pod_id, name, host_label,
+                provisioning, visibility, status, capabilities,
+                os, arch, runner_version,
+                refresh_token_hash, refresh_token_fingerprint,
+                refresh_token_generation, previous_refresh_token_hash,
+                access_token_signing_key_version,
+                enrollment_token_hash, enrollment_token_fingerprint,
+                revoked_reason, dev_metadata, protocol_version, last_heartbeat_at,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'', 'manual',0,'online','[]',
+                       '','','', '','',0,'',1, '','', '', '{}',1,
+                       '2026-11-27T16:59:30+00:00', now(), now())""",
+            (runner["id"], owner_id, world["workspace"]["id"], pod["id"],
+             f"runner-{seeder.tag}-407-{int(visible)}"),
+        )
+        seeder._put("runner", runner["id"])
+        run = seeder.create_agent_run(
+            world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+        )
+        seeder.db.execute(
+            "UPDATE agent_run SET runner_id = %s WHERE id = %s", (runner["id"], run["id"])
+        )
+        block = api.get(url).json()["active_run"]
+        assert list(block) == ACTIVE_RUN_KEYS
+        assert block["id"] == run["id"]
+        if visible:
+            assert block["runner_id"] == runner["id"]
+            assert block["runner_last_heartbeat_at"] == "2026-11-27T16:59:30+00:00"
+        else:
+            assert block["runner_id"] is None
+            assert block["runner_last_heartbeat_at"] is None
+        seeder.db.execute(
+            "UPDATE agent_run SET status = 'completed' WHERE id = %s", (run["id"],)
+        )
 
 
 def test_run_ai_unknown_issue_is_404(api, world):

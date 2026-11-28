@@ -1240,6 +1240,8 @@ pub struct CodeReviewItem {
 /// The issue-detail `active_run` key (NEWPIDASH-251): the newest run
 /// occupying the one-active-run slot, with the assigned runner's last
 /// heartbeat, so coordinators can tell "really running" from "stuck".
+/// `runner_id` and `runner_last_heartbeat_at` are `null` unless the reader
+/// may view that runner (`can_view_runner`, PDASHOSS01-407).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActiveRunSummary {
     pub id: String,
@@ -1250,10 +1252,11 @@ pub struct ActiveRunSummary {
     pub started_at: Option<String>,
     pub age_seconds: i64,
     pub runner_last_heartbeat_at: Option<String>,
-    /// The run's working branch (PDASHOSS01-407): the issue's
-    /// `git_work_branch` when set, else the branch pinned in the run's
-    /// `run_config` at dispatch, else `null`. Lets an outside agent see
-    /// the branch is owned before pushing to it.
+    /// The run's working branch (PDASHOSS01-407), `null` when unknown:
+    /// before the run starts, the branch pinned in its `run_config` at
+    /// dispatch (else the issue's `git_work_branch`); once running, the
+    /// issue's `git_work_branch` (else the pin). Lets an outside agent
+    /// see the branch is owned before pushing to it.
     pub branch: Option<String>,
 }
 
@@ -1419,10 +1422,11 @@ pub struct RepresentationInput<'a> {
     pub code_reviews: Option<&'a [CodeReviewItem]>,
     /// Newest active run (NEWPIDASH-251): rendered as `active_run`
     /// on single payloads when `?fields=` requests it (or no `fields=`
-    /// given) and a run occupies the one-active-run slot. Only the
-    /// read service fetches it; write paths and idle issues pass
-    /// `None` (key omitted — absence means no active run).
-    pub active_run: Option<&'a ActiveRunSummary>,
+    /// given). `Some(Some(run))` renders the block, `Some(None)` renders
+    /// `null` (fetched, idle — PDASHOSS01-407: lets a client tell an idle
+    /// issue from a server without the block), `None` (not fetched)
+    /// omits the key.
+    pub active_run: Option<Option<&'a ActiveRunSummary>>,
     /// Rendered values for map-hit `expand` names (`state`, `project`,
     /// `workspace`, `created_by`, `updated_by`, `parent`, `estimate_point`
     /// among this serializer's fields): `Some(value)` renders the object,
@@ -1697,8 +1701,8 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
     }
 
     // Newest active run (NEWPIDASH-251): single payloads,
-    // `?fields=`-gated like the blocker summary above. `None` (write
-    // paths; idle issues) omits the key — absence means no active run.
+    // `?fields=`-gated like the blocker summary above. Fetched and idle
+    // renders `null` (PDASHOSS01-407); not fetched omits the key.
     if let Some(run) = input.active_run {
         if !input.is_list && (requested.is_empty() || requested.contains(&"active_run")) {
             out.insert(
@@ -2943,7 +2947,7 @@ mod tests {
                 blockers: Some(&blockers),
                 relations: None,
                 code_reviews: None,
-                active_run: Some(&run),
+                active_run: Some(Some(&run)),
                 expansions: no_expansions,
             })
             .expect("render succeeds")
@@ -2972,6 +2976,24 @@ mod tests {
         // Lists never carry it (like the blocker keys).
         let list = render(None, true);
         assert!(!list.contains_key("active_run"));
+        // PDASHOSS01-407: fetched and idle renders `null`, not absence.
+        let idle = render_issue(&RepresentationInput {
+            row: &row,
+            fields: None,
+            expand: &[],
+            is_list: false,
+            assignee_ids: &[],
+            assignee_rows: no_rows,
+            label_ids: &[],
+            expanded_labels: &[],
+            blockers: Some(&blockers),
+            relations: None,
+            code_reviews: None,
+            active_run: Some(None),
+            expansions: no_expansions,
+        })
+        .expect("render succeeds");
+        assert_eq!(idle.get("active_run"), Some(&Value::Null));
     }
 
     #[test]
