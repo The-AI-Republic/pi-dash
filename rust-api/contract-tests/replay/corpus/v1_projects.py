@@ -14,6 +14,7 @@ project-members aliases), test_states.py (states), test_invites.py
 from psycopg.rows import dict_row
 
 from ..session import Request, Session
+from ._settings import SETTINGS_DEFAULTS_JOB_PINS, SETTINGS_DEFAULTS_PIN
 
 # Fixed ids seeded by _seed_extras (addressed via static_context).
 NEWCOMER_ID = "dddddddd-0000-4000-8000-000000000001"
@@ -120,6 +121,9 @@ SESSIONS = (
         # a capture collision, not a product divergence. Blanking the
         # column covers every roll (a cell pin cannot: its dj/rs
         # values would have to differ).
+        # Rust renders the settings defaults into the project webhook's
+        # before-image too (DIFF-51; see _settings.py).
+        payload_value_diffs=SETTINGS_DEFAULTS_JOB_PINS,
         generated_columns={"projects": ["logo_props"],
                            "django_content_type": ["model"]},
         # NOTE (rebase): PIDASHCONV-870/892/893/894/895/896 all landed;
@@ -144,6 +148,7 @@ SESSIONS = (
                          "logo_name": "logo_props/icon/name",
                          "logo_color": "logo_props/icon/color"},
                 expect_status=201,
+                known_body_diffs=[SETTINGS_DEFAULTS_PIN],
             ),
             Request(
                 "POST", _V1P + "/",
@@ -174,6 +179,7 @@ SESSIONS = (
                 route="/api/v1/workspaces/{slug}/projects/{pk}/",
                 json={"description": "patched via replay"},
                 auth="api_key", expect_status=200,
+                known_body_diffs=[SETTINGS_DEFAULTS_PIN],
             ),
             Request(
                 "POST", _V1P + "/{proj_a}/archive/",
