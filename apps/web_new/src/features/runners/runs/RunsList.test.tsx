@@ -127,6 +127,13 @@ describe("RunsList", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the retry button out of the alert so its label changes are not announced", () => {
+    renderList(undefined, 1, false, true, true);
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe(RUNS_LOAD_FAILED_TEXT);
+    expect(alert).not.toContainElement(screen.getByRole("button", { name: "Retrying…" }));
+  });
+
   it("holds Try again while a retry is in flight", async () => {
     const { onRetry } = renderList(undefined, 1, false, true, true);
     const retry = screen.getByRole("button", { name: "Retrying…" });

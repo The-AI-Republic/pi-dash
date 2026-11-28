@@ -93,8 +93,10 @@ export function RunsList({
               {runs.length === 0 && failed ? (
                 <tr>
                   <td colSpan={3} className="px-(--space-3) py-(--space-8) text-center">
-                    <div role="alert" data-testid="runs-error" className="flex flex-col items-center gap-(--space-2)">
-                      <span className="text-(--danger)">{RUNS_LOAD_FAILED_TEXT}</span>
+                    <div data-testid="runs-error" className="flex flex-col items-center gap-(--space-2)">
+                      <span role="alert" className="text-(--danger)">
+                        {RUNS_LOAD_FAILED_TEXT}
+                      </span>
                       {onRetry === undefined ? null : (
                         <Button size="small" disabled={retrying} onClick={onRetry}>
                           {retrying ? "Retrying…" : "Try again"}

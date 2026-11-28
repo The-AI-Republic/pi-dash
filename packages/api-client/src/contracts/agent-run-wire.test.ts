@@ -34,6 +34,10 @@ import djangoRunSerializer from "../../../../apps/api/pi_dash/runner/serializers
 import runsCapture from "../../../../rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json";
 import rustIssueSerializer from "../../../../rust-api/crates/services/src/app_issues/serializers_detail.rs?raw";
 import rustRunShape from "../../../../rust-api/crates/services/src/runner_runs/shape.rs?raw";
+import apiClientTurbo from "../../turbo.json";
+// `?raw` yields this file's text; the rule reads the module's exports instead.
+// oxlint-disable-next-line import/default
+import guardSource from "./agent-run-wire.test.ts?raw";
 import { AgentRunSummary } from "./issue-agent.js";
 import { AgentRun } from "./runs.js";
 
@@ -128,7 +132,7 @@ const djangoIssueKeys = pythonReturnedKeys(djangoIssueSerializer, "_serialize_ag
 const djangoIssueRun = assemble(djangoIssueKeys, djangoListRow, rustIssueRun);
 
 describe("run payloads as the serializers produce them", () => {
-  it("builds the Django runs-list row from AgentRunSerializer's current fields", () => {
+  it("drops a field from the Django runs-list row when AgentRunSerializer drops it", () => {
     const withoutPrompt = djangoRunSerializer.replace(/(class AgentRunSerializer\b[\s\S]*?)\n\s+"prompt",/, "$1");
     expect(withoutPrompt).not.toBe(djangoRunSerializer);
     const row = djangoRunRow(withoutPrompt, djangoListRow);
@@ -138,7 +142,8 @@ describe("run payloads as the serializers produce them", () => {
 
   it("reads every serializer source", () => {
     // The capture is current: it has exactly the serializer's fields.
-    for (const row of capturedRows) expect(Object.keys(row)).toEqual(djangoRunFields);
+    // Field order is not part of the wire, so compare sorted keys.
+    for (const row of capturedRows) expect(Object.keys(row).sort()).toEqual([...djangoRunFields].sort());
     expect(Object.keys(rustIssueRun)).toEqual(rustIssueKeys);
     expect(djangoIssueKeys).toContain("live_state");
     expect(djangoIssueKeys).not.toContain("queue_position");
@@ -176,6 +181,16 @@ describe("run payloads as the serializers produce them", () => {
     expect(unmodelledKeys(AgentRunSummary, djangoIssueRun)).toEqual(ignored);
     expect(unmodelledKeys(AgentRunSummary, rustIssueRun)).toEqual(ignored);
     for (const row of [...djangoListRows, rustListRow]) expect(unmodelledKeys(AgentRun, row)).toEqual(ignored);
+  });
+
+  it("makes Turbo re-run the test when a backend source it reads changes", () => {
+    // The files above live outside this package, so Turbo's default
+    // inputs would replay a cached pass after a backend-only edit.
+    const outside = [...guardSource.matchAll(/from "\.\.\/\.\.\/\.\.\/\.\.\/([^"?]+)(?:\?raw)?";/g)].map(
+      (item) => `$TURBO_ROOT$/${item[1] ?? ""}`
+    );
+    expect(outside).toHaveLength(5);
+    expect(apiClientTurbo.tasks.test.inputs).toEqual(expect.arrayContaining(["$TURBO_DEFAULT$", ...outside]));
   });
 
   it("does not require queue_position but still accepts it from older servers", () => {

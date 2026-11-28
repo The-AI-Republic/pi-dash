@@ -212,11 +212,14 @@ describe("list load failure", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("does not restart a fetch already in flight when Try again is pressed", async () => {
+  it("does not restart a fetch already in flight when Try again is pressed", () => {
     const refetch = vi.fn();
     stubQueries({ list: { data: undefined, isPending: false, isError: true, isFetching: true, refetch } });
     renderScreen(1);
-    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    const retry = screen.getByRole("button", { name: "Retrying…" });
+    expect(retry).toBeDisabled();
+    retry.click();
+    expect(refetch).not.toHaveBeenCalled();
   });
 
   it("lets a retry finish the current request rather than cancel it", () => {
