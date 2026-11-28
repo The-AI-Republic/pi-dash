@@ -134,10 +134,10 @@ impl Supervisor {
         // PDASHOSS01-417 part 3: process groups a dead daemon left (macOS)
         // are recovered from their records, then this daemon records its own.
         #[cfg(unix)]
-        {
+        let recovery_hold =
             crate::util::group_recovery::recover_orphaned_groups(&paths.data_dir).await;
-            crate::util::group_recovery::install(&paths.data_dir);
-        }
+        #[cfg(unix)]
+        crate::util::group_recovery::install(&paths.data_dir);
         for runner_cfg in &config.runners {
             containment::run_end_hook(&runner_cfg.workspace.working_dir).await;
         }
@@ -168,6 +168,17 @@ impl Supervisor {
             .await?;
             instances.push(inst);
         }
+        // A group whose recovery is unresolved may still have the old run's
+        // processes in a runner's working copy: keep that runner reserved
+        // until a re-check resolves it (review of #3501 at 1524d8e).
+        #[cfg(unix)]
+        hold_runners_for_recovery(
+            recovery_hold,
+            instances
+                .iter()
+                .map(|i| (i.runner_id, i.state.clone()))
+                .collect(),
+        );
 
         let mailboxes = Arc::new(RwLock::new(
             instances
@@ -2057,6 +2068,73 @@ async fn replay_drain_journal_once(
     delivered
 }
 
+/// Reserve every runner a held recovery group may belong to, and re-check
+/// the held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
+/// releasing each runner once nothing held affects it. While reserved, a
+/// runner refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+#[cfg(unix)]
+fn hold_runners_for_recovery(
+    mut hold: crate::util::group_recovery::RecoveryHold,
+    runners: Vec<(uuid::Uuid, StateHandle)>,
+) {
+    if hold.is_empty() {
+        return;
+    }
+    let held = apply_recovery_hold(&hold, &runners, Vec::new());
+    tracing::warn!(
+        runners = held.len(),
+        "process groups of a crashed daemon could not be emptied; their runners stay reserved"
+    );
+    tokio::spawn(async move {
+        let mut held = held;
+        while !held.is_empty() {
+            tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK).await;
+            hold.recheck().await;
+            held = apply_recovery_hold(&hold, &runners, held);
+        }
+        tracing::info!("crashed daemon's process groups resolved; runners released");
+    });
+}
+
+/// Reserve the runners `hold` affects and release the ones in `held` (the
+/// runners it reserved before) it no longer affects. Returns the runners it
+/// now reserves.
+#[cfg(unix)]
+fn apply_recovery_hold(
+    hold: &crate::util::group_recovery::RecoveryHold,
+    runners: &[(uuid::Uuid, StateHandle)],
+    held: Vec<uuid::Uuid>,
+) -> Vec<uuid::Uuid> {
+    let mut now = Vec::new();
+    for (id, state) in runners {
+        if hold.affects(*id) {
+            state.set_cleanup_reserved(true);
+            now.push(*id);
+        } else if held.contains(id) {
+            state.set_cleanup_reserved(false);
+        }
+    }
+    now
+}
+
+/// Release a finished run's machine-queue slot. Once the shutdown drain
+/// took the run's report it owns the run's terminal outbox record (review
+/// of #3501 at 1524d8e): the slot is freed but the record stays until the
+/// drain's send succeeds, so a timed-out drain send is replayed on the
+/// next start. Otherwise the worker delivered the report and the record
+/// goes with the slot.
+fn release_finished_slot(
+    coord: &crate::daemon::run_queue::Coordinator,
+    state: &StateHandle,
+    run_id: uuid::Uuid,
+) {
+    if state.terminal_drained() {
+        let _ = coord.release_slot(run_id);
+    } else {
+        let _ = coord.complete(run_id);
+    }
+}
+
 /// Retry SQLite terminal-outbox records once at startup: managed queue
 /// attempts redeliver their exact persisted payload (same bytes/key),
 /// never re-executing. Records for removed runners are cleared (the
@@ -2951,7 +3029,7 @@ impl RunnerLoop {
                         if let Some(finished) = self.current_run.take()
                             && let Some(coord) = self.coordinator.as_ref()
                         {
-                            let _ = coord.complete(finished.run_id);
+                            release_finished_slot(coord, &self.state, finished.run_id);
                         }
                         continue;
                     }
@@ -3118,6 +3196,20 @@ impl RunnerLoop {
                                 "assign rejected: run {} is still in flight on this runner",
                                 current.run_id
                             ),
+                        );
+                        continue;
+                    }
+                    // Processes of an earlier run (or of a crashed daemon's
+                    // run) may still use the working copy.
+                    if self.state.cleanup_reserved() {
+                        tracing::warn!(
+                            %run_id,
+                            "assign received while an earlier run's processes are unresolved; rejecting"
+                        );
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: an earlier run's processes on this runner are not yet accounted for"
+                                .to_string(),
                         );
                         continue;
                     }
@@ -3292,8 +3384,9 @@ impl RunnerLoop {
                     model,
                 } => {
                     // One working dir per runner: chat cannot run during an issue
-                    // run. A concurrent chat means a second runner.
-                    if self.current_run.is_some() {
+                    // run (or while an earlier run's processes are unresolved).
+                    // A concurrent chat means a second runner.
+                    if self.current_run.is_some() || self.state.cleanup_reserved() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatFailed {
@@ -3379,8 +3472,9 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    // One working dir per runner: skip warm during an issue run.
-                    if self.current_run.is_some() {
+                    // One working dir per runner: skip warm during an issue run
+                    // (or while an earlier run's processes are unresolved).
+                    if self.current_run.is_some() || self.state.cleanup_reserved() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatEvent {
@@ -4999,7 +5093,8 @@ impl AssignWorker {
         // spawn below is contained. The guard empties the unit on drop,
         // covering every exit path — normal end, failure, cancellation,
         // daemon shutdown and task abort alike.
-        let mut guard = containment::create_run_group(run_id);
+        let mut guard =
+            containment::create_run_group_for(run_id, Some(self.runner_config.runner_id));
         // The run's terminal report is held while the run executes and
         // sent only after cleanup, so the cloud never sees the run finished
         // (and offers the runner new work) while its processes or its
@@ -6234,7 +6329,7 @@ impl AssignWorker {
             if let Some(now) = self.state.hold_terminal_msg(msg) {
                 self.deliver(now).await;
             } else if let Some(payload) = payload
-                && self.state.holding_terminal()
+                && self.state.holding_first_terminal()
             {
                 self.persist_held_terminal(run_id, &payload);
             }
@@ -6259,7 +6354,10 @@ impl AssignWorker {
     /// result lives only in memory, and a daemon that is killed (no
     /// graceful drain) would lose it, so the cloud would later reap a
     /// finished run as failed. The next daemon start replays the outbox
-    /// verbatim. Delivery and the slot release still wait for cleanup; a
+    /// verbatim. Only the first held report is persisted: delivery sends it
+    /// first, so a later one (say a history-write failure after an agent
+    /// failure) must not replace it. Delivery and the slot release still
+    /// wait for cleanup; a
     /// normal release ends with `complete`, which deletes the record.
     fn persist_held_terminal(&self, run_id: uuid::Uuid, payload: &[u8]) {
         let Some(coord) = self.coordinator.as_ref() else {
@@ -8725,6 +8823,230 @@ mod tests {
             serde_json::to_value(&replayed).unwrap(),
             serde_json::to_value(&result).unwrap()
         );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 5): when a second terminal report is
+    /// held for the same run (an agent failure, then a history-write
+    /// failure), the outbox keeps the first one, the result live delivery
+    /// sends first, so a crash during cleanup replays the real outcome.
+    #[tokio::test]
+    async fn the_first_held_result_is_the_one_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        let agent_failure = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::AgentCrash,
+            detail: Some("agent exited".into()),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        worker.send(agent_failure.clone()).await;
+        worker
+            .stage_internal_failure(run_id, Err(anyhow::anyhow!("history write failed")))
+            .await
+            .unwrap();
+        drop(worker);
+        drop(coord);
+        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let pending = after_crash.terminal_pending();
+        assert_eq!(pending.len(), 1);
+        let replayed: ClientMsg =
+            serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&agent_failure).unwrap(),
+            "a later held report replaced the first in the outbox"
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 2): a runner a crashed daemon's
+    /// unresolved group may belong to stays reserved (so Assign and chat are
+    /// refused) until a re-check resolves the group; other runners are free.
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolved_recovery_reserves_its_runner_until_resolved() {
+        let cfg = || crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        };
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let runners = vec![(a, StateHandle::new(cfg())), (b, StateHandle::new(cfg()))];
+        let hold = crate::util::group_recovery::RecoveryHold::for_tests(vec![Some(a)]);
+        let held = apply_recovery_hold(&hold, &runners, Vec::new());
+        assert_eq!(held, vec![a]);
+        assert!(
+            runners[0].1.cleanup_reserved(),
+            "the affected runner was not reserved"
+        );
+        assert!(!runners[1].1.cleanup_reserved());
+        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(apply_recovery_hold(&resolved, &runners, held).is_empty());
+        assert!(
+            !runners[0].1.cleanup_reserved(),
+            "the reservation outlived recovery"
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 4): once the shutdown drain has
+    /// taken a run's held result and persisted it for replay, the worker
+    /// finishing cleanup releases the queue slot but must not delete that
+    /// outbox record: the drain's send may still time out, and the next
+    /// daemon start must find the result to replay.
+    #[test]
+    fn a_drain_owned_terminal_record_survives_the_slot_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        state.hold_terminal();
+        // The drain takes the held report and persists it before sending.
+        let _ = state.take_terminal_for_drain();
+        assert!(coord.persist_terminal(run_id, b"{}", "drain").unwrap());
+
+        release_finished_slot(&coord, &state, run_id);
+
+        assert!(!coord.holds_run(run_id), "the slot was not released");
+        drop(coord);
+        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        assert_eq!(
+            after.terminal_pending().len(),
+            1,
+            "the drain's terminal record was deleted"
+        );
+    }
+
+    /// A drained runner's later run, which the drain never reported, has no
+    /// terminal record: its row goes with the slot.
+    #[test]
+    fn a_drained_runner_without_a_terminal_record_deletes_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        assert!(coord.release_slot(run_id).unwrap());
+        assert!(!coord.holds_run(run_id));
+        assert!(coord.store_has_row(run_id).is_some_and(|has| !has));
+    }
+
+    /// A normal release (no drain) deletes the record as before.
+    #[test]
+    fn a_normal_slot_release_deletes_the_terminal_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        assert!(coord.persist_terminal(run_id, b"{}", "held").unwrap());
+
+        release_finished_slot(&coord, &state, run_id);
+
+        assert!(!coord.holds_run(run_id));
+        drop(coord);
+        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        assert!(after.terminal_pending().is_empty());
     }
 
     /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup
