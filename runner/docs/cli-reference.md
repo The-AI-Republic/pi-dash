@@ -89,7 +89,7 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
     paging the whole project and calling `pidash issue get <identifier>` on each item.
     `--parent` is also how a later run finds the children an earlier run
     already created, so a split never files duplicates.
-- `pidash issue create --project <PROJ-or-UUID> --title <title> [--description <md>] [--description-file <path>] [--priority <priority>] [--state <state-name-or-UUID>] [--parent <PROJ-123-or-UUID>] [--label <name-or-UUID>]` —
+- `pidash issue create --project <PROJ-or-UUID> --title <title> [--description <md>] [--description-file <path>] [--priority <priority>] [--state <state-name-or-UUID>] [--parent <PROJ-123-or-UUID>] [--label <name-or-UUID>] [--output <json|id>]` —
   file a new work item under the named project. Use this for capturing
   **discovered scope that does not belong on the current issue** (a
   follow-up bug, a separated task, a missing prerequisite), or — with
@@ -104,7 +104,16 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
   and task lists, code blocks, tables). For a long or multi-line body,
   write it to a file or pipe it with `--description-file -` instead of
   quoting it inline, since shell quoting of long markdown is error-prone.
-  Empty input is an error.
+  Empty input is an error. It prints the created work item as JSON: the
+  server payload (`id`, `project`, `sequence_id`, `name`, `state`, …, plus
+  an absolute `url` when the deployment has a web base URL) and an
+  `identifier` (`PROJ-123`) — the key to use in comments and as the
+  identifier argument of later issue commands. `--output id` prints only
+  the identifier and a newline, for scripts. The identifier comes from the
+  created item's `url`, or, without one, from reading its project after the
+  create; if neither works, the JSON omits `identifier` and `--output id`
+  exits 5 naming the created item (do not retry it). An unknown project
+  exits 4 and creates nothing.
 - `pidash issue patch <identifier> --state <state-name>` — move another
   issue to a different state. The name is case-insensitive; the CLI
   resolves it to a UUID for you. You can also pass a state UUID directly.

@@ -11,16 +11,21 @@ use uuid::Uuid;
 use pidash::util::containment::{BackendKind, create_run_group};
 use pidash::util::shell::{RUN_ENV, RunEnv, login_shell_command};
 
-/// Spawn the agent stand-in: a bash that backgrounds a detached sleep.
-/// Returns the shell's child pid. Both sleeps must end up in the run's
+/// Spawn the agent stand-in: a bash that backgrounds a detached sleep, in
+/// the run's process group when it has one. Returns the shell's child pid. Both sleeps must end up in the run's
 /// containment unit; the shell itself exits immediately (normal end),
 /// or stays in the foreground sleep (failure / cancel case).
-async fn spawn_leaky_agent(backend: BackendKind, script: &str) -> (u32, tokio::process::Child) {
+async fn spawn_leaky_agent(
+    backend: BackendKind,
+    process_group: Option<i32>,
+    script: &str,
+) -> (u32, tokio::process::Child) {
     let mut cmd = RUN_ENV
         .scope(
             RunEnv {
                 run_id: Uuid::new_v4(),
                 backend,
+                process_group,
                 runner_bin_dir: None,
                 config_dir: None,
                 data_dir: None,
@@ -73,7 +78,7 @@ async fn cleanup_kills_backgrounded_and_setsid_processes() {
         bg_pid_file.display(),
         ss_pid_file.display(),
     );
-    let (pid, child) = spawn_leaky_agent(BackendKind::Cgroup, &script).await;
+    let (pid, child) = spawn_leaky_agent(BackendKind::Cgroup, None, &script).await;
     group.move_pid(Some(pid));
     let mut child = child;
     let _ = child.wait().await;
@@ -106,6 +111,7 @@ async fn cleanup_kills_processes_of_live_agent() {
     }
     let (pid, mut child) = spawn_leaky_agent(
         BackendKind::Cgroup,
+        None,
         "sleep 3600 & setsid nohup sleep 3600 >/dev/null 2>&1 & sleep 3600",
     )
     .await;
@@ -132,6 +138,7 @@ async fn dropped_guard_empties_unit() {
     }
     let (pid, _child) = spawn_leaky_agent(
         BackendKind::Cgroup,
+        None,
         "sleep 3600 & setsid nohup sleep 3600 >/dev/null 2>&1 & sleep 3600",
     )
     .await;
@@ -167,7 +174,7 @@ async fn process_group_cleanup_kills_backgrounded_child() {
     let pid_dir = tempfile::tempdir().expect("tempdir for pid file");
     let bg_pid_file = pid_dir.path().join("bg.pid");
     let script = format!("sleep 3600 & echo $! > {} ; exit 0", bg_pid_file.display());
-    let (pid, mut child) = spawn_leaky_agent(backend, &script).await;
+    let (pid, mut child) = spawn_leaky_agent(backend, group.agent_pgid(), &script).await;
     group.move_pid(Some(pid));
     let _ = child.wait().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
