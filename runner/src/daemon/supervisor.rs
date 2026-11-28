@@ -1766,7 +1766,7 @@ async fn drain_in_flight_runs(
                         ended_at: now,
                         tokens: None,
                         model: None,
-                    });
+                    })?;
                 Some((*rid, run_id, msg, out.clone(), managed))
             })
             .collect()
@@ -2131,20 +2131,55 @@ fn take_drain_report(
     coord: Option<&crate::daemon::run_queue::Coordinator>,
     run_id: uuid::Uuid,
     fallback: impl FnOnce() -> ClientMsg,
-) -> (ClientMsg, bool) {
+) -> Option<(ClientMsg, bool)> {
     state.take_terminal_for_drain_then(|msgs| {
-        let msg = msgs
-            .into_iter()
-            .find(|m| terminal_run_id(m) == Some(run_id))
-            .unwrap_or_else(fallback);
-        let managed = coord.is_some_and(|c| c.holds_run(run_id));
-        if let Some(c) = coord.filter(|_| managed) {
-            let payload = serde_json::to_vec(&msg).unwrap_or_default();
-            if let Err(e) = c.persist_terminal(run_id, &payload, &format!("drain-{run_id}")) {
-                tracing::warn!(%run_id, "drain: failed to persist terminal report: {e}");
-            }
+        // Revalidated under the hold lock: a worker that finished releasing
+        // cleared the run first, and it then owns the run's report (and its
+        // outbox record). Nothing is sent or written for it here.
+        if *state.rx_in_flight.borrow() != Some(run_id) {
+            return None;
         }
-        (msg, managed)
+        // Finished, its report undelivered: the outbox record holds the
+        // real result and the next start replays it.
+        if coord.is_some() && state.report_pending() == Some(run_id) {
+            return None;
+        }
+        let held = msgs
+            .into_iter()
+            .find(|m| terminal_run_id(m) == Some(run_id));
+        let managed = coord.is_some_and(|c| c.holds_run(run_id));
+        let msg = match (held, coord.filter(|_| managed)) {
+            (Some(msg), Some(c)) => {
+                let payload = serde_json::to_vec(&msg).unwrap_or_default();
+                if let Err(e) = c.persist_terminal(run_id, &payload, &format!("drain-{run_id}")) {
+                    tracing::warn!(%run_id, "drain: failed to persist terminal report: {e}");
+                }
+                msg
+            }
+            (Some(msg), None) => msg,
+            // No held result: a terminal payload already in the outbox is
+            // the run's real result and is never replaced by the fallback.
+            (None, Some(c)) => {
+                let msg = fallback();
+                let payload = serde_json::to_vec(&msg).unwrap_or_default();
+                match c.persist_terminal_if_absent(run_id, &payload, &format!("drain-{run_id}")) {
+                    Ok(true) => msg,
+                    Ok(false) => c
+                        .terminal_pending()
+                        .into_iter()
+                        .find(|e| e.run_id == run_id)
+                        .and_then(|e| e.pending_terminal_payload)
+                        .and_then(|p| serde_json::from_slice(&p).ok())
+                        .unwrap_or(msg),
+                    Err(e) => {
+                        tracing::warn!(%run_id, "drain: failed to persist terminal report: {e}");
+                        msg
+                    }
+                }
+            }
+            (None, None) => fallback(),
+        };
+        Some((msg, managed))
     })
 }
 
@@ -2200,12 +2235,15 @@ async fn replay_terminal_outbox_once(
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         };
-        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+        if *state.rx_in_flight.borrow() == Some(entry.run_id)
+            && state.report_pending() != Some(entry.run_id)
+        {
             tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         }
         let out = out.clone();
+        let state = state.clone();
         sends.push(async move {
             let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
             match msg {
@@ -2213,11 +2251,13 @@ async fn replay_terminal_outbox_once(
                     RunFailedSend::Delivered => {
                         tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         true
                     }
                     RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
                         tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         false
                     }
                     RunFailedSend::Failed(e) => {
@@ -5128,6 +5168,14 @@ impl AssignWorker {
         if self.queue_blocked {
             anyhow::bail!("run queue storage_blocked: durable queue unavailable");
         }
+        // A run restored from the durable queue reaches here without the
+        // Assign arm's checks: while the runner is reserved (a crashed
+        // daemon's unresolved processes, or an earlier cleanup), it waits
+        // here, before admission and any workspace preparation.
+        if !self.wait_while_reserved().await {
+            tracing::info!(%run_id, "run stopped while the runner was reserved; not started");
+            return Ok(());
+        }
         if let Some(coord) = self.coordinator.as_ref() {
             match coord.admit_blocking(run_id, &self.cancel).await {
                 Ok(true) => {}
@@ -5142,6 +5190,31 @@ impl AssignWorker {
         }
         self.handle_assign(run_id, prompt, repo_url, expected_codex_model, context)
             .await
+    }
+
+    /// Wait until the runner's cleanup reservation clears. `false` when the
+    /// run is cancelled or the daemon shuts down first: the run must not
+    /// start (a restored entry stays queued for the next start).
+    async fn wait_while_reserved(&self) -> bool {
+        const POLL: Duration = Duration::from_secs(1);
+        let mut logged = false;
+        while self.state.cleanup_reserved() {
+            if !logged {
+                tracing::warn!(
+                    runner = %self.runner_config.name,
+                    "runner reserved by unresolved processes; run waits before preparing the workspace"
+                );
+                logged = true;
+            }
+            if self.state.shutdown_reason().is_some() {
+                return false;
+            }
+            tokio::select! {
+                _ = self.cancel.cancelled() => return false,
+                _ = tokio::time::sleep(POLL) => {}
+            }
+        }
+        !self.cancel.is_cancelled()
     }
 
     async fn handle_assign(
@@ -5267,16 +5340,29 @@ impl AssignWorker {
     /// the same payload, which the cloud's first-writer-wins finalize
     /// acknowledges as a no-op.
     async fn release_terminal(&self) {
+        let mut undelivered = None;
         for msg in self.state.begin_release() {
             if !self.state.releasing() {
                 break;
             }
+            let run_id = terminal_run_id(&msg);
             if !self.deliver(msg).await {
                 self.state.note_terminal_undelivered();
+                undelivered = undelivered.or(run_id);
             }
         }
         if self.state.release_clears_current_run() {
-            self.state.set_current_run(None).await;
+            // Only a managed run has an outbox record the retry delivers.
+            let kept = undelivered
+                .filter(|_| self.coordinator.is_some() && !self.state.terminal_drained());
+            match kept {
+                // Still reported in flight until the outbox retry delivers
+                // the report: a run the runner stops reporting would be
+                // failed by the cloud's heartbeat reaper, and the real
+                // result could no longer replace that failure.
+                Some(run_id) => self.state.set_report_pending(run_id),
+                None => self.state.set_current_run(None).await,
+            }
         }
         self.state.finish_release();
     }
@@ -9119,6 +9205,101 @@ mod tests {
         );
     }
 
+    /// Review of #3502 at 968b972 (MUST 6): the drain reads the in-flight
+    /// run before it locks the terminal hold. A worker whose send failed can
+    /// clear the run and end its release in between; its real result is
+    /// already in the outbox. The drain must then leave the run alone, and
+    /// never write its `DaemonRestart` fallback over a recorded result.
+    #[tokio::test]
+    async fn the_drain_never_overwrites_a_recorded_result_with_its_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let completed = ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        let real = serde_json::to_vec(&completed).unwrap();
+        assert!(coord.persist_terminal(run_id, &real, "held").unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        let restart = || ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::DaemonRestart,
+            detail: None,
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        let recorded = |coord: &crate::daemon::run_queue::Coordinator| {
+            coord
+                .terminal_pending()
+                .into_iter()
+                .find(|e| e.run_id == run_id)
+                .and_then(|e| e.pending_terminal_payload)
+        };
+
+        // The worker already cleared the run and ended its release.
+        let stale = take_drain_report(&state, Some(&coord), run_id, restart);
+        assert!(
+            stale.is_none(),
+            "the drain reported a run no longer in flight"
+        );
+        assert_eq!(recorded(&coord).as_deref(), Some(&real[..]));
+
+        // Still in flight with nothing held: the recorded result is reported.
+        state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let (msg, managed) =
+            take_drain_report(&state, Some(&coord), run_id, restart).expect("the run is in flight");
+        assert!(managed);
+        assert!(
+            matches!(msg, ClientMsg::RunCompleted { .. }),
+            "the drain replaced the recorded result: {msg:?}"
+        );
+        assert_eq!(
+            recorded(&coord).as_deref(),
+            Some(&real[..]),
+            "the fallback overwrote the recorded result"
+        );
+    }
+
     /// Review of #3501 at ba9c1c3 (MUST 4): the shutdown drain must record
     /// a held result in the terminal outbox in the same step that takes it.
     /// A worker that finishes cleanup right after the take (it sees the hold
@@ -9159,6 +9340,15 @@ mod tests {
             runners: vec![],
             cli: None,
         });
+        state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
         state.hold_terminal();
         let completed = ClientMsg::RunCompleted {
             run_id,
@@ -9180,7 +9370,8 @@ mod tests {
             })
         };
 
-        let (msg, managed) = take_drain_report(&state, Some(&coord), run_id, || unreachable!());
+        let (msg, managed) = take_drain_report(&state, Some(&coord), run_id, || unreachable!())
+            .expect("the run is in flight");
         worker.join().unwrap();
 
         assert!(matches!(msg, ClientMsg::RunCompleted { .. }));
@@ -9245,6 +9436,141 @@ mod tests {
             1,
             "an undelivered RunCompleted lost its terminal record"
         );
+    }
+
+    /// Review of #3502 at 968b972 (MUST 3): a run restored from the durable
+    /// queue skips the Assign arm's checks, so the worker itself must not
+    /// admit it or prepare the workspace while the runner is reserved by a
+    /// crashed daemon's unresolved processes; it starts once that clears.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_run_waits_while_the_runner_is_reserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        worker.coordinator = Some(coord.clone());
+        let state = worker.state.clone();
+        let cancel = worker.cancel.clone();
+        state.set_cleanup_reserved(true).await;
+        let task = tokio::spawn(async move {
+            worker
+                .run(run_id, "p".into(), None, None, AssignContext::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let admitted_while_reserved = coord.is_admitted(run_id);
+        // Cancelled while reserved: the run never starts.
+        cancel.cancel();
+        let ended = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(
+            !admitted_while_reserved,
+            "a restored run was admitted while the runner was reserved"
+        );
+        assert!(ended.is_ok(), "the waiting run ignored its cancellation");
+        assert!(coord.holds_run(run_id) && !coord.is_admitted(run_id));
+    }
+
+    /// Review of #3502 at 968b972 (MUST 2): a released run whose report
+    /// could not be sent stays reported in flight, so the cloud's heartbeat
+    /// reaper cannot fail it before the outbox retry delivers the real
+    /// result; once delivered, the runner stops reporting it.
+    #[tokio::test]
+    async fn an_undelivered_run_stays_in_flight_until_the_retry_delivers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("pending", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.state = inst.state.clone();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: inst.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        // The terminal POST fails when cleanup ends; polling still works.
+        drop(rx);
+        worker.release_terminal().await;
+        release_finished_slot(&coord, &inst.state, run_id);
+
+        assert_eq!(
+            *inst.state.rx_in_flight.borrow(),
+            Some(run_id),
+            "an undelivered run stopped being reported, so the reaper can fail it"
+        );
+
+        let delivered = replay_terminal_outbox_once(&coord, &hello_map(&inst), true).await;
+        assert_eq!(delivered, 1, "the retry dropped the run's own report");
+        assert!(matches!(
+            out_rx.try_recv().unwrap().body,
+            ClientMsg::RunCompleted { .. }
+        ));
+        assert!(
+            inst.state.rx_in_flight.borrow().is_none(),
+            "the delivered run is still reported in flight"
+        );
+        assert!(coord.terminal_pending().is_empty());
     }
 
     /// The in-process outbox retry delivers a released run's kept record,
