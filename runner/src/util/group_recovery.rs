@@ -525,6 +525,40 @@ fn after_forced_cleanup(
     })
 }
 
+/// Keep a live daemon's group provable after a forced cleanup that left it
+/// unresolved: `live` are the members a fresh proven scan still found. The
+/// group's SIGKILL also ends its anchor, and once the anchor is gone the
+/// record can only prove the group through those members, so they are
+/// written into it (as [`stop_adopted`] does during recovery). While the
+/// anchor is still alive the record is left as it is.
+pub(crate) fn keep_survivors(owner: &GroupOwner, live: &[ProcInfo]) {
+    let (Some(path), Some(anchor)) = (owner.record_path(), owner.anchor_identity()) else {
+        return;
+    };
+    if live.is_empty() {
+        return;
+    }
+    let anchor_alive = procinfo::info(anchor.pid)
+        .is_some_and(|p| ProcId::from(&p) == anchor && p.pgid == owner.pgid() && !p.zombie);
+    if anchor_alive {
+        return;
+    }
+    let Some(record) = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<GroupRecord>(&b).ok())
+    else {
+        return;
+    };
+    let kept = GroupRecord {
+        survivors: live.iter().map(|p| (p.pid, p.start)).collect(),
+        ..record
+    };
+    if let Err(e) = write_record_at(path, &kept) {
+        tracing::warn!(run_id = %kept.run_id, error = %e,
+            "survivors of the forced cleanup not recorded");
+    }
+}
+
 /// Stop an orphaned group judged [`Verdict::Orphaned`]. Every signal
 /// re-proves the group from a fresh snapshot (`stop_owned_group`), so an
 /// anchor that changed after the judgement stops everything.
@@ -1113,6 +1147,71 @@ mod process_tests {
             still.is_some_and(|p| ProcId::from(&p) == anchor),
             "the anchor was reaped, freeing the group id"
         );
+    }
+
+    /// Review of #3502 at bf9a2ba (MUST 2): a live daemon's forced cleanup
+    /// SIGKILLs the whole group, anchor included. If a member is still
+    /// alive afterwards, the record must name it: otherwise, once the
+    /// daemon is gone and the dead anchor is reaped, the next daemon finds
+    /// the anchor gone, discards the record and admits work while the
+    /// member still runs.
+    #[test]
+    fn a_forced_cleanup_that_ends_the_anchor_records_its_survivors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = GroupOwner::new_anchored().expect("anchored group");
+        let run_id = Uuid::new_v4();
+        record_in(dir.path(), run_id, None, &mut owner);
+        let path = record_path(dir.path(), run_id);
+        let anchor = owner.anchor_identity().unwrap();
+        let mut member = spawn_member(owner.pgid());
+        let live = match owner.observe() {
+            crate::util::group_ownership::Proof::Ours(live) => live,
+            other => panic!("the run's group was not proven: {other:?}"),
+        };
+        // The group's SIGKILL ends the anchor; the member is what survived.
+        let pid = nix::unistd::Pid::from_raw(anchor.pid);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        while !procinfo::info(anchor.pid).is_some_and(|p| p.zombie) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        keep_survivors(&owner, &live);
+        // The daemon goes away: its owner is dropped unresolved and the
+        // dead anchor is reaped, as init would after a crash.
+        drop(owner);
+        let _ = nix::sys::wait::waitpid(pid, None);
+
+        let record: GroupRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let verdict = judge_read(&record, procinfo::read_with_parent);
+        reap(&mut member);
+        assert_eq!(
+            verdict,
+            Verdict::Survivors,
+            "the next daemon could no longer prove the group its survivor holds"
+        );
+    }
+
+    /// While the anchor is alive the record already proves the group;
+    /// survivors would only stop recovery from signalling it.
+    #[test]
+    fn survivors_are_not_recorded_while_the_anchor_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = GroupOwner::new_anchored().expect("anchored group");
+        let run_id = Uuid::new_v4();
+        record_in(dir.path(), run_id, None, &mut owner);
+        let path = record_path(dir.path(), run_id);
+        let before = std::fs::read(&path).unwrap();
+        let mut member = spawn_member(owner.pgid());
+        let live = match owner.observe() {
+            crate::util::group_ownership::Proof::Ours(live) => live,
+            other => panic!("the run's group was not proven: {other:?}"),
+        };
+        keep_survivors(&owner, &live);
+        let after = std::fs::read(&path).unwrap();
+        reap(&mut member);
+        owner.confirm_empty();
+        drop(owner);
+        assert_eq!(before, after);
     }
 
     #[tokio::test]

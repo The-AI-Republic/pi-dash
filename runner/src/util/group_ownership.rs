@@ -274,6 +274,11 @@ impl GroupOwner {
         }
     }
 
+    /// Path of the group's crash-recovery record, while it has one.
+    pub fn record_path(&self) -> Option<&std::path::Path> {
+        self.anchor.as_ref().and_then(|a| a.record.as_deref())
+    }
+
     /// A cleanup found the group empty from a fresh, settled snapshot:
     /// dropping the owner may now reap the anchor and retire its record.
     pub fn confirm_empty(&mut self) {
