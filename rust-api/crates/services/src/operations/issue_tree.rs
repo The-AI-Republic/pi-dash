@@ -141,7 +141,7 @@ pub fn rollup<'a>(groups: impl IntoIterator<Item = Option<&'a str>>) -> Map<Stri
 /// (the 400).
 pub fn parse_recursive(raw: Option<&str>) -> Option<bool> {
     let raw = raw.filter(|text| !text.is_empty()).unwrap_or("false");
-    match raw.trim().to_lowercase().as_str() {
+    match pidash_compat::py::py_strip(raw).to_lowercase().as_str() {
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
         _ => None,
@@ -567,5 +567,7 @@ mod tests {
         assert_eq!(parse_recursive(Some("False")), Some(false));
         assert_eq!(parse_recursive(Some("maybe")), None);
         assert_eq!(parse_recursive(Some("yes")), None);
+        // Python's str.strip() also drops the information separators.
+        assert_eq!(parse_recursive(Some("\u{1f}true\u{1c}")), Some(true));
     }
 }
