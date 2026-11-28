@@ -1,0 +1,301 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Run payloads as the backends produce them. Migration runner/0032
+// dropped AgentRun.queue_position, so neither the issue detail's embedded
+// run nor a runs-list item carries it; the contracts keep it optional for
+// older servers. The guard fails when a contract requires a key either
+// backend no longer sends, which is how the issue page and the Runs list
+// broke.
+//
+// Every key list comes from the serializer sources, and every value from
+// output captured off them:
+// - Django runs list: `AgentRunSerializer.Meta.fields` (apps/api
+//   pi_dash/runner/serializers.py), valued from the DRF rows captured in
+//   fixture FX-RUN-08. A field the serializer drops leaves the row; a
+//   field it adds without a refreshed capture fails the suite. The nested
+//   `pod_detail` is keyed by `PodMiniSerializer.Meta.fields`.
+// - Rust runs list: the keys of `RUN_WIRE_FIELDS` (runner_runs/shape.rs),
+//   which the Rust tests pin to the handler's output, with `pod_detail`
+//   keyed by `POD_MINI_WIRE_FIELDS` (runner_enroll/serializers/shapes.rs).
+//   Its values are the Django capture's plus `capacity_wait: null`, not
+//   Rust handler output.
+// The parsers read the source formatting black and rustfmt produce today;
+// a reformat that hides a key throws "could not read every key/field"
+// instead of passing silently.
+// - Rust issue run: the bytes `agent_run_to_representation` must emit in
+//   serializers_detail.rs `run_replays_bytes_with_diagnostic_and_live_state`.
+// - Django issue run: the keys of the dict `_serialize_agent_run` returns
+//   (apps/api app/serializers/issue.py), valued from the Django capture
+//   first and the Rust replay for keys only the issue run has; its
+//   `live_state` keys come from `_serialize_agent_live_state`, valued
+//   from the Rust replay.
+// The guard checks keys and value types as captured. Value-level drift
+// between the backends, and a Django type change in a key the capture
+// does not refresh, are out of its reach (contract tests cover values).
+// When a serializer's key list changes, this file reads the new version.
+import { describe, expect, it } from "vitest";
+import type { z } from "zod/mini";
+
+import webNewWorkflow from "../../../../.github/workflows/web-new.yml?raw";
+import djangoIssueSerializer from "../../../../apps/api/pi_dash/app/serializers/issue.py?raw";
+import djangoRunSerializer from "../../../../apps/api/pi_dash/runner/serializers.py?raw";
+import runsCapture from "../../../../rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json";
+import rustIssueSerializer from "../../../../rust-api/crates/services/src/app_issues/serializers_detail.rs?raw";
+import rustPodShape from "../../../../rust-api/crates/services/src/runner_enroll/serializers/shapes.rs?raw";
+import rustRunShape from "../../../../rust-api/crates/services/src/runner_runs/shape.rs?raw";
+import apiClientTurbo from "../../turbo.json";
+// `?raw` yields this file's text; the rule reads the module's exports instead.
+// oxlint-disable-next-line import/default
+import guardSource from "./agent-run-wire.test.ts?raw";
+import { AgentRunSummary } from "./issue-agent.js";
+import { AgentRun } from "./runs.js";
+
+type Payload = Record<string, unknown>;
+type Schema = { shape: Record<string, z.ZodMiniType> };
+
+/** The string items of `pub const <name>: [&str; N] = [...]`, checked against N. */
+function rustConstKeys(source: string, name: string): string[] {
+  const match = new RegExp(`pub const ${name}: \\[&str; (\\d+)\\] =\\s*\\[([^\\]]*)\\];`).exec(source);
+  if (!match?.[1] || match[2] === undefined) throw new Error(`${name} not found`);
+  const keys = [...match[2].matchAll(/"([a-z_]+)"/g)].map((item) => item[1] ?? "");
+  expect(keys).toHaveLength(Number(match[1]));
+  return keys;
+}
+
+/** The JSON a Rust test asserts `serde_json::to_string(...)` produces. */
+function rustReplayedJson(source: string, testName: string): Payload {
+  const start = source.indexOf(`fn ${testName}()`);
+  if (start < 0) throw new Error(`${testName} not found`);
+  const literal = /"(\{\\"id\\".*?\})",\n/s.exec(source.slice(start));
+  if (!literal?.[1]) throw new Error(`${testName} has no replayed JSON`);
+  const text = literal[1].replaceAll(/\\\n\s*/g, "").replaceAll(/\\(["\\])/g, "$1");
+  return JSON.parse(text) as Payload;
+}
+
+/** The keys of the dict literal a Python method returns, in order. */
+function pythonReturnedKeys(source: string, method: string): string[] {
+  const start = source.indexOf(`def ${method}(`);
+  if (start < 0) throw new Error(`${method} not found`);
+  const body = /\n(\s+)return \{\n(.*?)\n\1\}/s.exec(source.slice(start));
+  if (!body?.[2]) throw new Error(`${method} returns no dict literal`);
+  return keysOrThrow(method, body[2], /^\s+"(\w+)":/gm);
+}
+
+/** The `Meta.fields` list of a DRF serializer class, on one line or many. */
+function pythonMetaFields(source: string, className: string): string[] {
+  const start = source.indexOf(`class ${className}(`);
+  if (start < 0) throw new Error(`${className} not found`);
+  const fields = /\n\s+class Meta:\n[^]*?\n\s+fields = \[([^\]]*)\]/.exec(source.slice(start));
+  if (!fields?.[1]) throw new Error(`${className} has no Meta.fields list`);
+  const items = fields[1]
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const keys = items.map((item) => /^"(\w+)"$/.exec(item)?.[1]);
+  if (keys.length === 0 || keys.some((key) => key === undefined))
+    throw new Error(`${className}: could not read every field`);
+  return keys as string[];
+}
+
+/** The keys `pattern` finds in `body`; any other non-blank line is a parse miss. */
+function keysOrThrow(owner: string, body: string, pattern: RegExp): string[] {
+  const keys = [...body.matchAll(pattern)].map((item) => item[1] ?? "");
+  const lines = body.split("\n").filter((line) => /^\s+"[^"]+"[:,]/.test(line));
+  if (keys.length === 0 || keys.length !== lines.length) throw new Error(`${owner}: could not read every key`);
+  return keys;
+}
+
+/** A Django runs-list row: the serializers' current fields, valued from a capture. */
+function djangoRunRow(serializerSource: string, capture: Payload): Payload {
+  const row = assemble(pythonMetaFields(serializerSource, "AgentRunSerializer"), capture);
+  // pod_detail is PodMiniSerializer's own row: its keys come from that
+  // class, only its values from the capture.
+  const podFields = pythonMetaFields(serializerSource, "PodMiniSerializer");
+  return { ...row, pod_detail: assemble(podFields, capture.pod_detail as Payload) };
+}
+
+/** A payload with exactly `keys`, each value taken from the first source that has it. */
+function assemble(keys: readonly string[], ...sources: Payload[]): Payload {
+  return Object.fromEntries(
+    keys.map((key) => {
+      const source = sources.find((candidate) => key in candidate);
+      if (!source) throw new Error(`no captured value for ${key}`);
+      return [key, source[key]];
+    })
+  );
+}
+
+/** Keys the schema rejects when absent. */
+function requiredKeys(schema: Schema): string[] {
+  return Object.entries(schema.shape)
+    .filter(([, field]) => !field.safeParse(undefined).success)
+    .map(([key]) => key);
+}
+
+/** Wire keys the schema does not model (parsing drops them). */
+function unmodelledKeys(schema: Schema, payload: Payload): string[] {
+  return Object.keys(payload).filter((key) => !(key in schema.shape));
+}
+
+const djangoRunFields = pythonMetaFields(djangoRunSerializer, "AgentRunSerializer");
+const capturedRows: Payload[] = [runsCapture.list.golden_row, runsCapture.detail.ok.body];
+const djangoListRows = capturedRows.map((row) => djangoRunRow(djangoRunSerializer, row));
+const [djangoListRow] = djangoListRows as [Payload];
+
+const rustListKeys = rustConstKeys(rustRunShape, "RUN_WIRE_FIELDS");
+
+/** A Rust runs-list row: `RUN_WIRE_FIELDS`, with `pod_detail` keyed by `POD_MINI_WIRE_FIELDS`. */
+function rustRunRow(podShapeSource: string): Payload {
+  const row = assemble(rustListKeys, capturedRows[0] as Payload, { capacity_wait: null });
+  const podFields = rustConstKeys(podShapeSource, "POD_MINI_WIRE_FIELDS");
+  return { ...row, pod_detail: assemble(podFields, row.pod_detail as Payload) };
+}
+
+const rustListRow = rustRunRow(rustPodShape);
+
+const rustIssueKeys = rustConstKeys(rustIssueSerializer, "AGENT_RUN_FIELDS");
+// The Rust test uses synthetic ids (5555…) that are not RFC 4122 UUIDs;
+// swap in the captured Django ids so only the shape is under test.
+const replayedIssueRun = rustReplayedJson(rustIssueSerializer, "run_replays_bytes_with_diagnostic_and_live_state");
+const rustIssueRun: Payload = {
+  ...replayedIssueRun,
+  id: djangoListRow.id,
+  runner: djangoListRow.pod,
+  live_state: { ...(replayedIssueRun.live_state as Payload), observed_run_id: djangoListRow.id },
+};
+
+/** A Django issue-detail run, keyed by the serializer's returned dicts. */
+function djangoIssueRunFrom(serializerSource: string): Payload {
+  const run = assemble(pythonReturnedKeys(serializerSource, "_serialize_agent_run"), djangoListRow, rustIssueRun);
+  // live_state is its own Django dict: take its keys from that method and
+  // only its values from the Rust replay.
+  const liveStateKeys = pythonReturnedKeys(serializerSource, "_serialize_agent_live_state");
+  return { ...run, live_state: assemble(liveStateKeys, rustIssueRun.live_state as Payload) };
+}
+
+const djangoIssueKeys = pythonReturnedKeys(djangoIssueSerializer, "_serialize_agent_run");
+const djangoIssueRun = djangoIssueRunFrom(djangoIssueSerializer);
+
+describe("run payloads as the serializers produce them", () => {
+  it("drops a field from the Django runs-list row when AgentRunSerializer drops it", () => {
+    const withoutPrompt = djangoRunSerializer.replace(/(class AgentRunSerializer\b[\s\S]*?)\n\s+"prompt",/, "$1");
+    expect(withoutPrompt).not.toBe(djangoRunSerializer);
+    const row = djangoRunRow(withoutPrompt, djangoListRow);
+    expect(row).not.toHaveProperty("prompt");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
+  it("drops a pod_detail field from the Django runs-list row when PodMiniSerializer drops it", () => {
+    const withoutIdentifier = djangoRunSerializer.replace(
+      /(class PodMiniSerializer\b[\s\S]*?fields = \[[^\]]*?), "project_identifier"/,
+      "$1"
+    );
+    expect(withoutIdentifier).not.toBe(djangoRunSerializer);
+    const row = djangoRunRow(withoutIdentifier, djangoListRow);
+    expect(row.pod_detail).not.toHaveProperty("project_identifier");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
+  it("drops a pod_detail field from the Rust runs-list row when POD_MINI_WIRE_FIELDS drops it", () => {
+    const withoutIdentifier = rustPodShape.replace(
+      /(pub const POD_MINI_WIRE_FIELDS: \[&str; )5(\] =\s*\[[^\]]*?), "project_identifier"/,
+      (_, head: string, list: string) => `${head}4${list}`
+    );
+    expect(withoutIdentifier).not.toBe(rustPodShape);
+    const row = rustRunRow(withoutIdentifier);
+    expect(row.pod_detail).not.toHaveProperty("project_identifier");
+    expect(AgentRun.safeParse(row).success).toBe(false);
+  });
+
+  it("drops a live-state key from the Django issue run when its serializer drops it", () => {
+    const withoutSummary = djangoIssueSerializer.replace(
+      /(def _serialize_agent_live_state\b[\s\S]*?)\n\s+"last_event_summary": [^\n]*/,
+      "$1"
+    );
+    expect(withoutSummary).not.toBe(djangoIssueSerializer);
+    const run = djangoIssueRunFrom(withoutSummary);
+    expect(run.live_state).not.toHaveProperty("last_event_summary");
+    expect(AgentRunSummary.safeParse(run).success).toBe(false);
+  });
+
+  it("reads every serializer source", () => {
+    // The capture is current: it has exactly the serializer's fields.
+    // Field order is not part of the wire, so compare sorted keys.
+    for (const row of capturedRows) expect(Object.keys(row).sort()).toEqual([...djangoRunFields].sort());
+    expect(Object.keys(rustIssueRun)).toEqual(rustIssueKeys);
+    expect(djangoIssueKeys).toContain("live_state");
+    expect(Object.keys(djangoIssueRun.live_state as Payload).sort()).toEqual(
+      Object.keys(rustIssueRun.live_state as Payload).sort()
+    );
+    expect(djangoIssueKeys).not.toContain("queue_position");
+    for (const row of djangoListRows) expect(row).not.toHaveProperty("queue_position");
+    expect(rustListKeys).not.toContain("queue_position");
+    expect(rustIssueKeys).not.toContain("queue_position");
+  });
+
+  it("parses the issue detail's embedded run from both backends", () => {
+    for (const run of [djangoIssueRun, rustIssueRun]) {
+      const parsed = AgentRunSummary.safeParse(run);
+      expect(parsed.error?.issues).toBeUndefined();
+    }
+  });
+
+  it("parses a runs-list item from both backends", () => {
+    for (const row of [...djangoListRows, rustListRow]) {
+      const parsed = AgentRun.safeParse(row);
+      expect(parsed.error?.issues).toBeUndefined();
+    }
+  });
+
+  it("requires no key either backend does not send", () => {
+    const missing = (schema: Schema, payload: Payload) => requiredKeys(schema).filter((key) => !(key in payload));
+    expect(missing(AgentRunSummary, djangoIssueRun)).toEqual([]);
+    expect(missing(AgentRunSummary, rustIssueRun)).toEqual([]);
+    for (const row of [...djangoListRows, rustListRow]) expect(missing(AgentRun, row)).toEqual([]);
+  });
+
+  it("models every key the backends send except the known ones it ignores", () => {
+    // failure_reason drives the server's error_diagnostic; the client
+    // reads the diagnostic. A new key in this list must be modelled or
+    // listed here on purpose.
+    const ignored = ["failure_reason"];
+    expect(unmodelledKeys(AgentRunSummary, djangoIssueRun)).toEqual(ignored);
+    expect(unmodelledKeys(AgentRunSummary, rustIssueRun)).toEqual(ignored);
+    for (const row of [...djangoListRows, rustListRow]) expect(unmodelledKeys(AgentRun, row)).toEqual(ignored);
+  });
+
+  // The files this guard imports from outside the package, repo-relative.
+  const outside = [...guardSource.matchAll(/from "\.\.\/\.\.\/\.\.\/\.\.\/([^"?]+)(?:\?raw)?";/g)].map(
+    (item) => item[1] ?? ""
+  );
+
+  it("makes Turbo re-run the test when a source it reads changes", () => {
+    // These files live outside this package, so Turbo's default inputs
+    // would replay a cached pass after a backend-only edit.
+    expect(outside).toHaveLength(7);
+    expect(apiClientTurbo.tasks.test.inputs).toEqual(
+      expect.arrayContaining(["$TURBO_DEFAULT$", ...outside.map((path) => `$TURBO_ROOT$/${path}`)])
+    );
+  });
+
+  it("makes web-new CI run the guard when a source it reads changes", () => {
+    const pushPaths = [...webNewWorkflow.matchAll(/^ {6}- "([^"]+)"$/gm)].map((item) => item[1]);
+    const prPattern = /pattern='([^']+)'/.exec(webNewWorkflow)?.[1];
+    if (!prPattern) throw new Error("web-new.yml has no pull_request path pattern");
+    const prFilter = new RegExp(prPattern);
+    // The workflow file itself is matched by its own web-new*.yml entry.
+    for (const path of outside.filter((item) => !item.startsWith(".github/"))) {
+      expect(pushPaths).toContain(path);
+      expect(prFilter.test(path), path).toBe(true);
+    }
+    expect(prFilter.test(".github/workflows/web-new.yml")).toBe(true);
+  });
+
+  it("does not require queue_position but still accepts it from older servers", () => {
+    expect(requiredKeys(AgentRunSummary)).not.toContain("queue_position");
+    expect(requiredKeys(AgentRun)).not.toContain("queue_position");
+    expect(AgentRunSummary.safeParse({ ...djangoIssueRun, queue_position: 3 }).success).toBe(true);
+    expect(AgentRun.safeParse({ ...djangoListRow, queue_position: null }).success).toBe(true);
+  });
+});

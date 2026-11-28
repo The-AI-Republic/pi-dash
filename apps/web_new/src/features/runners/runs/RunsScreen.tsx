@@ -65,7 +65,23 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <RunsList data={list.data} loading={list.isPending} page={page} onPage={goToPage} onSelect={selectRun} />
+      <RunsList
+        data={list.data}
+        loading={list.isPending}
+        // A failed read or refetch: RunsList shows it only when it has no
+        // rows to keep, so a cached empty page does not read as "No runs yet".
+        // A page that has never loaded goes back to pending (isError false)
+        // when a retry or poll starts; its last error still stands until a
+        // read succeeds.
+        failed={list.isError || (list.data === undefined && list.errorUpdatedAt > 0)}
+        page={page}
+        onPage={goToPage}
+        onSelect={selectRun}
+        // Hold the button while a retry or the poll is in flight, and
+        // never cancel a request that may be about to recover the list.
+        retrying={list.isFetching}
+        onRetry={() => void list.refetch({ cancelRefetch: false })}
+      />
       <div className="min-h-0 flex-1 overflow-auto border-t border-(--border) p-(--space-6)">
         <RunDetail
           state={state}
