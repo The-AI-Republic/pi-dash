@@ -99,6 +99,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   const [query, setQuery] = React.useState("");
   const rootRef = React.useRef<HTMLDivElement>(null);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const searchRef = React.useRef<HTMLInputElement>(null);
   const visible = React.useMemo(() => filterProjects(projects, query), [projects, query]);
   const visibleIds = visible.map((project) => project.id);
   const visibleEligible = visibleIds.filter((id) => !selection.installed.includes(id));
@@ -113,29 +114,46 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
     return () => document.removeEventListener("mousedown", onPointer);
   }, [open]);
 
-  // Escape inside the open popup closes the popup only: stopping the event
-  // here keeps the enclosing dialog from treating it as its own dismissal,
-  // and focus returns to the trigger so a second Escape closes the dialog.
+  // Opening the popup moves focus into it, so its Escape handling holds even
+  // where a click leaves the trigger unfocused (Safari).
+  React.useEffect(() => {
+    if (open) searchRef.current?.focus();
+  }, [open]);
+
+  // Escape while the popup is open closes the popup only: stopping the event
+  // keeps the enclosing dialog from treating it as its own dismissal, and
+  // focus returns to the trigger so a second Escape closes the dialog. The
+  // document-level capture also covers an open popup that has lost focus to
+  // the dialog itself, such as after a click on its non-focusable content.
   // An Escape that cancels an input method's composition is kept from the
   // dialog too, but otherwise left to the input method: the popup stays open.
-  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
-    if (!open || event.key !== "Escape") return;
-    event.stopPropagation();
-    if (event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
+  React.useEffect(() => {
+    if (!open) return;
+    function onEscape(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      if (event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+    document.addEventListener("keydown", onEscape, true);
+    return () => document.removeEventListener("keydown", onEscape, true);
+  }, [open]);
 
   // Focus moving to another control outside the picker closes the popup, so
   // Escape from there belongs to the dialog without dropping a hidden popup.
+  // Focus falling back to an enclosing container (a click on non-focusable
+  // popup content) is not a move to another control: the popup stays open.
   function onBlur(event: React.FocusEvent<HTMLDivElement>): void {
     const next = event.relatedTarget;
-    if (open && next !== null && !event.currentTarget.contains(next)) setOpen(false);
+    if (!open || next === null) return;
+    if (event.currentTarget.contains(next) || next.contains(event.currentTarget)) return;
+    setOpen(false);
   }
 
   return (
-    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onKeyDown={onKeyDown} onBlur={onBlur}>
+    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onBlur={onBlur}>
       <span className="text-body font-medium text-(--text)">Projects</span>
       <button
         ref={triggerRef}
@@ -153,6 +171,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
           className="shadow-popover absolute top-full left-0 z-10 mt-(--space-1) flex max-h-80 w-full flex-col gap-(--space-2) overflow-hidden rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-3)"
         >
           <Input
+            inputRef={searchRef}
             label="Search projects"
             placeholder="Search projects…"
             aria-label="Search projects"

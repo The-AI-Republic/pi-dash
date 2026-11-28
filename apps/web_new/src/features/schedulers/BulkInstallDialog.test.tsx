@@ -547,6 +547,66 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["key Process", { key: "Process", keyCode: 229 }],
+    ["key Escape with keyCode 229", { key: "Escape", keyCode: 229 }],
+  ])("keeps a composition-cancel Escape reported as %s from the picker and the dialog", async (_label, init) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("moves focus into the picker's search field when it opens", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await openPicker(user);
+
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+  });
+
+  it("closes only the picker on Escape when the open picker does not hold focus", async () => {
+    // Safari leaves a clicked button unfocused, so the picker can be open
+    // with focus on the dialog itself.
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    const popup = screen.getByRole("dialog");
+    popup.focus();
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveFocus();
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+  });
+
+  it("keeps the picker open after a click on its non-focusable content, and Escape closes only it", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await user.type(screen.getByLabelText("Search projects"), "zzz");
+    await user.click(within(listbox).getByText("No projects match your search."));
+
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("closes the picker when focus leaves it, so a later Escape is the dialog's", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
     const { user } = renderDialog();
