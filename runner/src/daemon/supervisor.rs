@@ -5476,9 +5476,7 @@ impl AssignWorker {
                     } else {
                         self.crash_reason()
                     };
-                    let base = auth
-                        .map(|a| a.detail())
-                        .unwrap_or_else(|| format!("{e:#}"));
+                    let base = auth.map(|a| a.detail()).unwrap_or_else(|| format!("{e:#}"));
                     let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
@@ -8505,6 +8503,20 @@ mod tests {
         );
     }
 
+    /// Reopen a queue store the test dropped. A subprocess another test
+    /// forks can hold the old lock's file description until it execs, so
+    /// the lock may stay taken for a moment after the drop.
+    fn reopen_queue(dir: std::path::PathBuf) -> crate::daemon::run_queue::Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match crate::daemon::run_queue::Coordinator::new(dir.clone(), 1) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     fn hello_map(inst: &RunnerInstance) -> Arc<RwLock<HelloRunnerMap>> {
         Arc::new(RwLock::new(
             std::iter::once(inst)
@@ -8672,7 +8684,7 @@ mod tests {
         // store finds the exact result to replay.
         drop(worker);
         drop(coord);
-        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after_crash = reopen_queue(queue_dir);
         let pending = after_crash.terminal_pending();
         assert_eq!(pending.len(), 1, "the held result was not persisted");
         let replayed: ClientMsg =
@@ -8830,7 +8842,7 @@ mod tests {
 
         assert!(!coord.holds_run(run_id), "the slot was not released");
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert_eq!(
             after.terminal_pending().len(),
             1,
@@ -9421,7 +9433,7 @@ mod tests {
 
         assert!(!coord.holds_run(run_id));
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert!(after.terminal_pending().is_empty());
     }
 
