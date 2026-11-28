@@ -1003,6 +1003,8 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/tree/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/",
         owned: &["GET", "PATCH"], proxied: &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/",

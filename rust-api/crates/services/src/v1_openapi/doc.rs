@@ -237,7 +237,7 @@ fn component_schemas() -> Value {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 209 golden operations, pretty JSON
+/// parameters, responses}}}` for all 210 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -15718,6 +15718,86 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/tree/": {
+    "get": {
+      "operationId": "get_work_item_tree",
+      "tags": [
+        "Work Items"
+      ],
+      "summary": "Get a work item's children with a progress rollup",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "issue_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "description": "Issue ID",
+          "required": true,
+          "examples": {
+            "ExampleIssueID": {
+              "value": "550e8400-e29b-41d4-a716-446655440000",
+              "summary": "Example issue ID",
+              "description": "A typical issue UUID"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "required": true,
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Workspace slug",
+          "required": true,
+          "examples": {
+            "ExampleWorkspace": {
+              "value": "my-workspace",
+              "summary": "Example workspace",
+              "description": "A typical workspace slug"
+            }
+          }
+        }
+      ],
+      "responses": {
+        "401": {
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "description": "Issue not found"
+        },
+        "200": {
+          "description": "Work item tree with rollup"
+        },
+        "400": {
+          "description": "Invalid request data provided"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/": {
     "get": {
       "operationId": "workspaces_projects_work_items_workpad_retrieve",
@@ -17286,7 +17366,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 209);
+        assert_eq!(ops, 210);
     }
 
     #[test]
