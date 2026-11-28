@@ -14,9 +14,16 @@
 //!   period, then SIGKILLs what remains. The start-up sweep finds
 //!   `pidash-run-*` children the previous daemon left behind.
 //! * **process group** (elsewhere Unix): the agent gets its own process
-//!   group (`process_group(0)`) and cleanup signals the group. A child
-//!   that calls `setsid` escapes it — a documented limit of this
-//!   backend. Cleanup cannot sweep after a crash (a dead PGID can be
+//!   group (`process_group(0)`) and cleanup signals the group — but only
+//!   while a fresh snapshot proves the group is still the run's (see
+//!   [`crate::util::group_ownership`]): a pgid whose members all exited
+//!   can be handed to an unrelated group, and an unproven group is left
+//!   running rather than risk killing a stranger. Members are learned by
+//!   a periodic observer while the run is live, so proof outlives the
+//!   leader. A child that calls `setsid` escapes the group — a documented
+//!   limit of this backend. Platforms without process inspection (not
+//!   Linux or macOS) can never prove ownership, so nothing is signalled
+//!   there. Cleanup cannot sweep after a crash (a dead PGID can be
 //!   reused by the OS), so swept recovery only exists on the cgroup
 //!   backend.
 //! * **none**: `PIDASH_CONTAINMENT=off` (diagnosis escape hatch) or
@@ -42,13 +49,22 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
+
+#[cfg(unix)]
+use crate::util::group_ownership::{GroupOwner, GroupSignal, Proof};
 
 /// Grace between SIGTERM and SIGKILL at run end (issue default).
 pub const CLEANUP_GRACE: Duration = Duration::from_secs(10);
 /// How long a run-end hook may run before the runner stops it.
 pub const HOOK_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a live run's process group is re-observed, so members are
+/// remembered (and keep proving the group) after the leader exits.
+#[cfg(unix)]
+const OBSERVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Prefix of the cgroups the sweep looks for under the daemon's cgroup.
 const CGROUP_PREFIX: &str = "pidash-run-";
 
@@ -102,8 +118,16 @@ pub struct RunGroup {
     run_id: Uuid,
     backend: BackendKind,
     cgroup_dir: Option<PathBuf>,
+    /// Process-group backend: the run's claim on its agent's group. `None`
+    /// until the agent is spawned, and forever when the leader could not
+    /// be read right after spawn (then nothing is ever signalled).
     #[cfg(unix)]
-    pgid: Option<i32>,
+    owner: Option<Arc<Mutex<GroupOwner>>>,
+    /// Background task re-observing `owner` while the run is live.
+    #[cfg(unix)]
+    observer: Option<tokio::task::JoinHandle<()>>,
+    /// TERM → KILL grace ([`CLEANUP_GRACE`]; shorter in tests).
+    grace: Duration,
     workspace: Option<PathBuf>,
     /// Set once the normal cleanup path has emptied the unit; the
     /// [`Drop`] fallback only stops processes on the abort path (the
@@ -129,8 +153,9 @@ impl RunGroup {
     /// a user's `bashrc` already backgrounded in the bash-init window
     /// can race past the move.
     ///
-    /// On the process-group backend there is nothing to do: the child
-    /// already got its own process group from `login_shell_command`.
+    /// On the process-group backend the child already got its own process
+    /// group from `login_shell_command`; this claims it (leader pid plus
+    /// exact start time) and starts the observer that remembers members.
     pub fn move_pid(&mut self, pid: Option<u32>) {
         let Some(pid) = pid else { return };
         match self.backend {
@@ -153,11 +178,31 @@ impl RunGroup {
             BackendKind::ProcessGroup => {
                 #[cfg(unix)]
                 {
-                    self.pgid = Some(pid as i32);
+                    let Ok(pid) = i32::try_from(pid) else { return };
+                    match GroupOwner::claim_pid(pid) {
+                        Some(owner) => self.set_owner(owner),
+                        None => tracing::warn!(
+                            run_id = %self.run_id, pid,
+                            "agent process group cannot be proven; its processes will not be signalled at run end"
+                        ),
+                    }
                 }
             }
             BackendKind::None => {}
         }
+    }
+
+    /// Install the group claim and start observing it.
+    #[cfg(unix)]
+    fn set_owner(&mut self, owner: GroupOwner) {
+        let owner = Arc::new(Mutex::new(owner));
+        if let Some(old) = self.observer.take() {
+            old.abort();
+        }
+        self.observer = tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|h| h.spawn(observe_loop(owner.clone())));
+        self.owner = Some(owner);
     }
 
     /// Empty the unit: SIGTERM everything, wait [`CLEANUP_GRACE`], then
@@ -207,23 +252,16 @@ impl RunGroup {
             BackendKind::ProcessGroup => {
                 #[cfg(unix)]
                 {
-                    let pgid = self.pgid;
-                    tokio::task::spawn_blocking(move || {
-                        let members = process_group_members(pgid);
-                        stop_members(
-                            members,
-                            |_| {
-                                group_signal(pgid, Signal::Term);
-                            },
-                            || process_group_members(pgid),
-                            |_| {
-                                group_signal(pgid, Signal::Kill);
-                            },
-                            CLEANUP_GRACE,
-                        )
-                    })
-                    .await
-                    .unwrap_or_default()
+                    if let Some(observer) = &self.observer {
+                        observer.abort();
+                    }
+                    let Some(owner) = self.owner.clone() else {
+                        return Vec::new();
+                    };
+                    let (run_id, grace) = (self.run_id, self.grace);
+                    tokio::task::spawn_blocking(move || stop_owned_group(run_id, &owner, grace))
+                        .await
+                        .unwrap_or_default()
                 }
                 #[cfg(not(unix))]
                 {
@@ -313,18 +351,85 @@ fn send_signal(pid: u32, sig: Signal) {
     }
 }
 
-/// Send one signal to a whole process group.
+/// Lock a group claim; a poisoned lock still holds a valid claim.
 #[cfg(unix)]
-fn group_signal(pgid: Option<i32>, sig: Signal) {
-    let Some(pgid) = pgid else { return };
-    if pgid <= 0 {
-        return;
+fn lock_owner(owner: &Mutex<GroupOwner>) -> std::sync::MutexGuard<'_, GroupOwner> {
+    owner.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Re-observe a live run's group every [`OBSERVE_INTERVAL`] so members are
+/// remembered while it is still provably the run's. Stops once the group
+/// is empty or can no longer be proven: neither ever becomes ours again.
+#[cfg(unix)]
+async fn observe_loop(owner: Arc<Mutex<GroupOwner>>) {
+    loop {
+        tokio::time::sleep(OBSERVE_INTERVAL).await;
+        let o = owner.clone();
+        match tokio::task::spawn_blocking(move || lock_owner(&o).observe()).await {
+            Ok(Proof::Ours(_)) => {}
+            _ => return,
+        }
     }
-    let sig = match sig {
-        Signal::Term => nix::sys::signal::Signal::SIGTERM,
-        Signal::Kill => nix::sys::signal::Signal::SIGKILL,
+}
+
+/// TERM → grace → KILL for a claimed process group. Every signal is sent
+/// by [`GroupOwner::signal`], which re-proves the group from a fresh
+/// snapshot first; a group that stops being provable is left alone (and
+/// reported), never signalled.
+#[cfg(unix)]
+fn stop_owned_group(
+    run_id: Uuid,
+    owner: &Mutex<GroupOwner>,
+    grace: Duration,
+) -> Vec<(u32, String)> {
+    let names = |live: Vec<crate::util::procinfo::ProcInfo>| -> Vec<(u32, String)> {
+        live.into_iter().map(|p| (p.pid as u32, p.name)).collect()
     };
-    let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), sig);
+    let unproven = |live: &[crate::util::procinfo::ProcInfo], pgid: i32| {
+        let names: Vec<&str> = live.iter().map(|p| p.name.as_str()).collect();
+        tracing::warn!(
+            run_id = %run_id, pgid,
+            processes = live.len(),
+            names = %names.join(", "),
+            "run process group cannot be proven to belong to this run; left running"
+        );
+    };
+    let first = {
+        let mut o = lock_owner(owner);
+        let pgid = o.pgid();
+        match o.observe() {
+            Proof::Ours(live) => names(live),
+            Proof::Empty => return Vec::new(),
+            Proof::Unproven(live) => {
+                unproven(&live, pgid);
+                return Vec::new();
+            }
+        }
+    };
+    stop_members(
+        first,
+        |_| {
+            let mut o = lock_owner(owner);
+            let pgid = o.pgid();
+            if let Proof::Unproven(live) = o.signal(GroupSignal::Term) {
+                unproven(&live, pgid);
+            }
+        },
+        || match lock_owner(owner).observe() {
+            Proof::Ours(live) => names(live),
+            // Gone, or no longer provable (reported when signalling):
+            // nothing this run may still touch.
+            Proof::Empty | Proof::Unproven(_) => Vec::new(),
+        },
+        |_| {
+            let mut o = lock_owner(owner);
+            let pgid = o.pgid();
+            if let Proof::Unproven(live) = o.signal(GroupSignal::Kill) {
+                unproven(&live, pgid);
+            }
+        },
+        grace,
+    )
 }
 
 /// (pid, comm) for every process in a cgroup, from `cgroup.procs`.
@@ -341,60 +446,6 @@ fn cgroup_members(dir: &Path) -> Vec<(u32, String)> {
             (pid, name)
         })
         .collect()
-}
-
-/// (pid, comm) for every process in a process group, via /proc on
-/// Linux. Other Unix platforms have no /proc; the group is still
-/// signalled by [`group_signal`], only the member listing (used for
-/// the log line) is unavailable there.
-fn process_group_members(pgid: Option<i32>) -> Vec<(u32, String)> {
-    #[cfg(target_os = "linux")]
-    {
-        let Some(pgid) = pgid else { return Vec::new() };
-        if pgid <= 0 {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return out;
-        };
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let Some(pid) = file_name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                continue;
-            };
-            if parse_proc_pgrp(&stat) == Some(pgid as u32) {
-                let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                    .map(|s| s.trim_end().to_string())
-                    .unwrap_or_default();
-                out.push((pid, name));
-            }
-        }
-        out
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        out_unused(pgid);
-        Vec::new()
-    }
-}
-
-/// Silence unused warnings on the non-Linux path.
-#[allow(dead_code)]
-fn out_unused(_pgid: Option<i32>) {}
-
-/// Extract the process-group id from `/proc/<pid>/stat` contents.
-/// Format: `pid (comm) state ppid pgrp …`; comm may contain parens and
-/// spaces, so parse from after the last `)`.
-fn parse_proc_pgrp(stat: &str) -> Option<u32> {
-    let close = stat.rfind(')')?;
-    let mut fields = stat[close + 1..].split_whitespace();
-    let _state = fields.next()?;
-    let _ppid = fields.next()?;
-    fields.next()?.parse::<u32>().ok()
 }
 
 /// One log line per run with the count and names of stopped processes.
@@ -426,7 +477,10 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
         backend: chosen,
         cgroup_dir: None,
         #[cfg(unix)]
-        pgid: None,
+        owner: None,
+        #[cfg(unix)]
+        observer: None,
+        grace: CLEANUP_GRACE,
         workspace: None,
         cleaned: false,
     };
@@ -663,12 +717,19 @@ impl Drop for RunGroup {
         if self.cleaned || self.backend == BackendKind::None {
             return;
         }
+        #[cfg(unix)]
+        if let Some(observer) = self.observer.take() {
+            observer.abort();
+        }
         let detached = RunGroup {
             run_id: self.run_id,
             backend: self.backend,
             cgroup_dir: std::mem::take(&mut self.cgroup_dir),
             #[cfg(unix)]
-            pgid: self.pgid.take(),
+            owner: self.owner.take(),
+            #[cfg(unix)]
+            observer: None,
+            grace: self.grace,
             workspace: None,
             cleaned: true,
         };
@@ -695,18 +756,6 @@ impl Drop for RunGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_proc_pgrp_reads_third_field_after_paren() {
-        // pid (comm) state ppid pgrp ...
-        assert_eq!(parse_proc_pgrp("123 (sleep) S 1 123 0 0"), Some(123));
-        assert_eq!(
-            parse_proc_pgrp("456 (weird (comm) name) R 7 456 0"),
-            Some(456)
-        );
-        assert_eq!(parse_proc_pgrp("garbage"), None);
-        assert_eq!(parse_proc_pgrp("1 (init) S 0 1"), Some(1));
-    }
 
     #[test]
     fn hook_path_is_workspace_pidash_dir() {
@@ -777,8 +826,101 @@ mod tests {
         assert!(cgroup_members(Path::new("/nonexistent-pidash-test-dir")).is_empty());
     }
 
-    #[test]
-    fn process_group_members_none_is_empty() {
-        assert!(process_group_members(None).is_empty());
+    /// A run group on the process-group backend with a short grace.
+    #[cfg(unix)]
+    fn process_group_run() -> RunGroup {
+        let mut group = create_run_group(Uuid::new_v4());
+        group.backend = BackendKind::ProcessGroup;
+        group.cgroup_dir = None;
+        group.grace = Duration::from_millis(300);
+        group
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn alive(pid: i32) -> bool {
+        crate::util::procinfo::info(pid).is_some_and(|p| !p.zombie)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_group_cleanup_leaves_an_unproven_group_running() {
+        use std::os::unix::process::CommandExt;
+        // An unrelated group now holds the pgid the run recorded: its
+        // leader has the recorded pid but not the recorded start time.
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let stranger = crate::util::procinfo::info(pid).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: stranger.start - 1,
+            ..stranger
+        };
+        let mut group = process_group_run();
+        group.set_owner(GroupOwner::claim(&recorded).unwrap());
+        group.cleanup().await;
+        group.mark_cleaned();
+        let survived = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(survived, "an unproven process group was signalled");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_group_cleanup_stops_members_that_outlive_the_leader() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        // The leader starts a background child in its group, then dies and
+        // is reaped; the observer must have learned the child for cleanup
+        // to prove (and stop) the group without its leader.
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 300 & echo $!; wait"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let orphan: i32 = line.trim().parse().unwrap();
+        let mut group = process_group_run();
+        group.move_pid(Some(leader.id()));
+        let owner = group.owner.clone().expect("leader claimed");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !lock_owner(&owner).knows_pid(orphan) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "observer never learned the child"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        assert!(alive(orphan));
+        group.cleanup().await;
+        group.mark_cleaned();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(orphan) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(orphan),
+            "member outliving the leader was left running"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_without_a_claim_signals_nothing() {
+        let mut group = process_group_run();
+        // The leader exited before it could be read: no claim, no signal.
+        group.move_pid(Some(u32::MAX));
+        assert!(group.owner.is_none());
+        assert!(group.stop_all().await.is_empty());
+        group.mark_cleaned();
     }
 }
