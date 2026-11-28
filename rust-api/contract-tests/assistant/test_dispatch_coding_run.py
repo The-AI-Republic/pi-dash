@@ -406,7 +406,9 @@ def test_dispatch_coding_run_prompt_failure_commits_failed_run(db_conn):
             timeout=180,
         )
         stripped = comment["comment_stripped"]
-        assert stripped.startswith("Run failed.")
+        # A prompt-build failure is stored as agent_error.unknown, so the
+        # header carries its label (PDASHOSS01-183, both backends).
+        assert stripped.startswith("Run failed — Unclassified agent error.")
         assert "prompt build failed" in stripped
         assert "default-posture" in stripped
     finally:
