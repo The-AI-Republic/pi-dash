@@ -4941,6 +4941,14 @@ impl AssignWorker {
         if self.queue_blocked {
             anyhow::bail!("run queue storage_blocked: durable queue unavailable");
         }
+        // A run restored from the durable queue reaches here without the
+        // Assign arm's checks: while the runner is reserved (a crashed
+        // daemon's unresolved processes, or an earlier cleanup), it waits
+        // here, before admission and any workspace preparation.
+        if !self.wait_while_reserved().await {
+            tracing::info!(%run_id, "run stopped while the runner was reserved; not started");
+            return Ok(());
+        }
         if let Some(coord) = self.coordinator.as_ref() {
             match coord.admit_blocking(run_id, &self.cancel).await {
                 Ok(true) => {}
@@ -4955,6 +4963,31 @@ impl AssignWorker {
         }
         self.handle_assign(run_id, prompt, repo_url, expected_codex_model, context)
             .await
+    }
+
+    /// Wait until the runner's cleanup reservation clears. `false` when the
+    /// run is cancelled or the daemon shuts down first: the run must not
+    /// start (a restored entry stays queued for the next start).
+    async fn wait_while_reserved(&self) -> bool {
+        const POLL: Duration = Duration::from_secs(1);
+        let mut logged = false;
+        while self.state.cleanup_reserved() {
+            if !logged {
+                tracing::warn!(
+                    runner = %self.runner_config.name,
+                    "runner reserved by unresolved processes; run waits before preparing the workspace"
+                );
+                logged = true;
+            }
+            if self.state.shutdown_reason().is_some() {
+                return false;
+            }
+            tokio::select! {
+                _ = self.cancel.cancelled() => return false,
+                _ = tokio::time::sleep(POLL) => {}
+            }
+        }
+        !self.cancel.is_cancelled()
     }
 
     async fn handle_assign(
@@ -8993,6 +9026,57 @@ mod tests {
             1,
             "an undelivered RunCompleted lost its terminal record"
         );
+    }
+
+    /// Review of #3502 at 968b972 (MUST 3): a run restored from the durable
+    /// queue skips the Assign arm's checks, so the worker itself must not
+    /// admit it or prepare the workspace while the runner is reserved by a
+    /// crashed daemon's unresolved processes; it starts once that clears.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_run_waits_while_the_runner_is_reserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        worker.coordinator = Some(coord.clone());
+        let state = worker.state.clone();
+        let cancel = worker.cancel.clone();
+        state.set_cleanup_reserved(true).await;
+        let task = tokio::spawn(async move {
+            worker
+                .run(run_id, "p".into(), None, None, AssignContext::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let admitted_while_reserved = coord.is_admitted(run_id);
+        // Cancelled while reserved: the run never starts.
+        cancel.cancel();
+        let ended = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(
+            !admitted_while_reserved,
+            "a restored run was admitted while the runner was reserved"
+        );
+        assert!(ended.is_ok(), "the waiting run ignored its cancellation");
+        assert!(coord.holds_run(run_id) && !coord.is_admitted(run_id));
     }
 
     /// Review of #3502 at 968b972 (MUST 2): a released run whose report

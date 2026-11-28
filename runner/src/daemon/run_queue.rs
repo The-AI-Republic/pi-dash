@@ -421,6 +421,14 @@ impl Coordinator {
         Ok(removed)
     }
 
+    /// Whether `run_id` holds an execution slot.
+    #[cfg(test)]
+    pub fn is_admitted(&self, run_id: Uuid) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|inner| inner.active.contains_key(&run_id))
+    }
+
     /// Whether the store still has a row for `run_id` (`None`: unreadable).
     #[cfg(test)]
     pub fn store_has_row(&self, run_id: Uuid) -> Option<bool> {

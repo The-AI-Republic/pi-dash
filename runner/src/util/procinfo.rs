@@ -93,10 +93,17 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
 /// recovery (part 3, `group_recovery`) uses it to tell an anchor whose
 /// daemon died (it was reparented) from one a live daemon still owns.
 pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
+    read_with_parent(pid).ok().flatten()
+}
+
+/// [`info_with_parent`], telling a process that is gone (`Ok(None)`) from
+/// one that could not be inspected (`Err`): callers must treat an error as
+/// "unknown", never as proof the process is gone.
+pub fn read_with_parent(pid: i32) -> std::io::Result<Option<(ProcInfo, i32)>> {
     if pid <= 0 {
-        return None;
+        return Ok(None);
     }
-    imp::info_with_parent(pid)
+    imp::read_with_parent(pid)
 }
 
 /// Every process currently in group `pgid`, zombies included.
@@ -381,10 +388,19 @@ mod imp {
         read_info(pid).ok().flatten()
     }
 
-    pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
-        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-        let (state, pgid, start, name) = parse_linux_stat(&stat)?;
-        let ppid = super::parse_linux_ppid(&stat)?;
+    pub fn read_with_parent(pid: i32) -> std::io::Result<Option<(ProcInfo, i32)>> {
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if linux_entry_gone(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parsed = parse_linux_stat(&stat).zip(super::parse_linux_ppid(&stat));
+        let Some(((state, pgid, start, name), ppid)) = parsed else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unparseable /proc/{pid}/stat"),
+            ));
+        };
         let info = ProcInfo {
             pid,
             pgid,
@@ -392,7 +408,7 @@ mod imp {
             zombie: exited(state) && !has_live_thread(pid),
             name,
         };
-        Some((info, ppid))
+        Ok(Some((info, ppid)))
     }
 
     /// `Ok(None)` when the process is gone; `Err` when it exists but its
@@ -627,14 +643,15 @@ mod imp {
     }
 
     pub fn info(pid: i32) -> Option<ProcInfo> {
-        info_with_parent(pid).map(|(p, _)| p)
+        read_with_parent(pid).ok().flatten().map(|(p, _)| p)
     }
 
-    pub fn info_with_parent(pid: i32) -> Option<(ProcInfo, i32)> {
-        query(libc::KERN_PROC_PID, pid)
-            .ok()?
-            .into_iter()
-            .find(|(p, _)| p.pid == pid)
+    pub fn read_with_parent(pid: i32) -> std::io::Result<Option<(ProcInfo, i32)>> {
+        match query(libc::KERN_PROC_PID, pid) {
+            Ok(found) => Ok(found.into_iter().find(|(p, _)| p.pid == pid)),
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn group_members(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
@@ -664,8 +681,11 @@ mod imp {
         None
     }
 
-    pub fn info_with_parent(_pid: i32) -> Option<(ProcInfo, i32)> {
-        None
+    pub fn read_with_parent(_pid: i32) -> std::io::Result<Option<(ProcInfo, i32)>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "process inspection is not available on this platform",
+        ))
     }
 
     pub fn group_members(_pgid: i32) -> std::io::Result<Vec<ProcInfo>> {

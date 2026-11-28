@@ -193,23 +193,49 @@ enum Verdict {
     /// is still the run's and not empty, but nothing pins it through
     /// delivery, so it is only tracked, never signalled.
     Survivors,
+    /// A process the record names could not be inspected: nothing is
+    /// proven either way, so the record is kept and nothing is signalled.
+    Unknown(&'static str),
+}
+
+/// [`judge_read`] over a reader that cannot fail (tests).
+#[cfg(test)]
+fn judge(record: &GroupRecord, read: impl Fn(i32) -> Option<(ProcInfo, i32)>) -> Verdict {
+    judge_read(record, |pid| Ok(read(pid)))
 }
 
 /// Judge `record` from one read of its anchor (`read`: process info and
-/// parent pid from the same kernel record).
-fn judge(record: &GroupRecord, read: impl Fn(i32) -> Option<(ProcInfo, i32)>) -> Verdict {
+/// parent pid from the same kernel record; `Ok(None)`: the process is gone,
+/// `Err`: it could not be inspected).
+fn judge_read(
+    record: &GroupRecord,
+    read: impl Fn(i32) -> std::io::Result<Option<(ProcInfo, i32)>>,
+) -> Verdict {
     if !record.survivors.is_empty() {
-        let held = record.survivors.iter().any(|&(pid, start)| {
-            read(pid).is_some_and(|(p, _)| p.start == start && p.pgid == record.pgid && !p.zombie)
-        });
+        let mut unknown = false;
+        let held = record
+            .survivors
+            .iter()
+            .any(|&(pid, start)| match read(pid) {
+                Ok(found) => found
+                    .is_some_and(|(p, _)| p.start == start && p.pgid == record.pgid && !p.zombie),
+                Err(_) => {
+                    unknown = true;
+                    false
+                }
+            });
         return if held {
             Verdict::Survivors
+        } else if unknown {
+            Verdict::Unknown("a survivor of its forced cleanup could not be inspected")
         } else {
             Verdict::Unproven("the survivors of its forced cleanup are gone")
         };
     }
-    let Some((anchor, parent)) = read(record.anchor_pid) else {
-        return Verdict::Unproven("anchor is gone");
+    let (anchor, parent) = match read(record.anchor_pid) {
+        Ok(Some(found)) => found,
+        Ok(None) => return Verdict::Unproven("anchor is gone"),
+        Err(_) => return Verdict::Unknown("anchor could not be inspected"),
     };
     if ProcId::from(&anchor) != record.anchor()
         || anchor.pgid != record.pgid
@@ -439,7 +465,17 @@ fn recovery_lock(dir: &Path) -> Lock {
 }
 
 fn recover_record(path: &Path, record: &GroupRecord, grace: Duration) -> Recovery {
-    match judge(record, procinfo::info_with_parent) {
+    recover_record_with(path, record, grace, procinfo::read_with_parent)
+}
+
+/// [`recover_record`] judging the record through `read`.
+fn recover_record_with(
+    path: &Path,
+    record: &GroupRecord,
+    grace: Duration,
+    read: impl Fn(i32) -> std::io::Result<Option<(ProcInfo, i32)>>,
+) -> Recovery {
+    match judge_read(record, read) {
         Verdict::OwnerAlive => {
             tracing::debug!(run_id = %record.run_id, owner_pid = record.owner_pid,
                 "run group belongs to a live daemon; left alone");
@@ -450,6 +486,11 @@ fn recover_record(path: &Path, record: &GroupRecord, grace: Duration) -> Recover
                 "orphaned run group cannot be proven to belong to the run; left running");
             let _ = std::fs::remove_file(path);
             Recovery::LeftRunning
+        }
+        Verdict::Unknown(why) => {
+            tracing::warn!(run_id = %record.run_id, pgid = record.pgid, reason = why,
+                "orphaned run group cannot be judged; record kept, nothing signalled");
+            Recovery::Stopped(CleanupOutcome::Unresolved)
         }
         Verdict::Orphaned => Recovery::Stopped(stop_adopted(path, record, grace)),
         Verdict::Survivors => {
@@ -472,7 +513,7 @@ fn after_forced_cleanup(
     verdict: Verdict,
     survivors: Vec<(i32, u64)>,
 ) -> Option<GroupRecord> {
-    if verdict == Verdict::Orphaned {
+    if matches!(verdict, Verdict::Orphaned | Verdict::Unknown(_)) {
         return Some(record.clone());
     }
     if survivors.is_empty() {
@@ -499,7 +540,7 @@ fn stop_adopted(path: &Path, record: &GroupRecord, grace: Duration) -> CleanupOu
             }
             _ => Vec::new(),
         };
-        let verdict = judge(record, procinfo::info_with_parent);
+        let verdict = judge_read(record, procinfo::read_with_parent);
         match after_forced_cleanup(record, verdict, survivors) {
             Some(kept) => {
                 if kept != *record
@@ -522,8 +563,11 @@ fn stop_adopted(path: &Path, record: &GroupRecord, grace: Duration) -> CleanupOu
     // The group is empty but the lingering anchor may still hold it. Stop
     // it only while it is still the recorded, orphaned anchor; it ends only
     // by SIGKILL, so it cannot be replaced between this read and the kill.
-    if judge(record, procinfo::info_with_parent) == Verdict::Orphaned {
-        send_kill(record.anchor_pid);
+    match judge_read(record, procinfo::read_with_parent) {
+        Verdict::Orphaned => send_kill(record.anchor_pid),
+        // The anchor cannot be judged: keep the record for the next check.
+        Verdict::Unknown(_) => return outcome,
+        _ => {}
     }
     let _ = std::fs::remove_file(path);
     outcome
@@ -942,6 +986,36 @@ mod process_tests {
         assert!(!path.exists(), "an unprovable record is dropped");
         reap(&mut member);
         reap_anchor(&mut anchor);
+    }
+
+    /// Review of #3502 at 968b972 (MUST 7): a record whose anchor (or
+    /// survivor) cannot be inspected is not proof the group is gone. The
+    /// record and its runner's reservation are kept, nothing is signalled.
+    #[test]
+    fn a_failed_inspection_keeps_the_record_and_the_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let record = record_for(&a, dead_pid());
+        let path = write_record(dir.path(), &record).unwrap();
+        let failing = |_: i32| Err(std::io::Error::other("sysctl failed"));
+
+        let anchored = recover_record_with(&path, &record, GRACE, failing);
+        let kept = path.exists();
+        let survivors = GroupRecord {
+            survivors: vec![(a.pid, a.start)],
+            ..record.clone()
+        };
+        let judged = judge_read(&survivors, failing);
+
+        let alive = running(&mut anchor);
+        reap_anchor(&mut anchor);
+        assert!(
+            anchored.is_unresolved(),
+            "a failed read released the runner: {anchored:?}"
+        );
+        assert!(kept, "a failed read deleted the group's record");
+        assert!(alive, "a group that could not be judged was signalled");
+        assert!(matches!(judged, Verdict::Unknown(_)), "{judged:?}");
     }
 
     #[test]
