@@ -2089,7 +2089,9 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 78, "worker-owned count drifted");
+        // 81 -> 78 with the retired execute plane (f77224102), then -> 75
+        // with the three github_sync_task names (#3041).
+        assert_eq!(expected_rust.len(), 75, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
