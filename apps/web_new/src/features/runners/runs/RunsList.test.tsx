@@ -32,7 +32,7 @@ const page = (overrides: Partial<AgentRunPage> = {}): AgentRunPage => ({
   ...overrides,
 });
 
-function renderList(data: AgentRunPage | undefined, pageNo = 2, loading = false, failed = false) {
+function renderList(data: AgentRunPage | undefined, pageNo = 2, loading = false, failed = false, retrying = false) {
   const onPage = vi.fn();
   const onSelect = vi.fn();
   const onRetry = vi.fn();
@@ -41,6 +41,7 @@ function renderList(data: AgentRunPage | undefined, pageNo = 2, loading = false,
       data={data}
       loading={loading}
       failed={failed}
+      retrying={retrying}
       page={pageNo}
       onPage={onPage}
       onSelect={onSelect}
@@ -124,5 +125,13 @@ describe("RunsList", () => {
     expect(screen.queryByTestId("runs-pager")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds Try again while a retry is in flight", async () => {
+    const { onRetry } = renderList(undefined, 1, false, true, true);
+    const retry = screen.getByRole("button", { name: "Retrying…" });
+    expect(retry).toBeDisabled();
+    await userEvent.click(retry);
+    expect(onRetry).not.toHaveBeenCalled();
   });
 });

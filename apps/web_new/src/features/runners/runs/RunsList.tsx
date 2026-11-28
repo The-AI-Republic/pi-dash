@@ -23,6 +23,8 @@ export interface RunsListProps {
   onPage: (page: number) => void;
   onSelect: (runId: string) => void;
   onRetry?: () => void;
+  /** A retry is in flight; Try again waits for it. */
+  retrying?: boolean;
 }
 
 export const RUNS_EMPTY_TEXT = "No runs yet.";
@@ -36,6 +38,7 @@ export function RunsList({
   onPage,
   onSelect,
   onRetry,
+  retrying = false,
 }: RunsListProps): React.ReactElement {
   const runs = data?.results ?? [];
   const totalCount = data?.total_count ?? 0;
@@ -93,8 +96,8 @@ export function RunsList({
                     <div role="alert" data-testid="runs-error" className="flex flex-col items-center gap-(--space-2)">
                       <span className="text-(--danger)">{RUNS_LOAD_FAILED_TEXT}</span>
                       {onRetry === undefined ? null : (
-                        <Button size="small" onClick={onRetry}>
-                          Try again
+                        <Button size="small" disabled={retrying} onClick={onRetry}>
+                          {retrying ? "Retrying…" : "Try again"}
                         </Button>
                       )}
                     </div>

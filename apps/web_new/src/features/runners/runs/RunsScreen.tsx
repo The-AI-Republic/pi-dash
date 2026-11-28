@@ -74,7 +74,10 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
         page={page}
         onPage={goToPage}
         onSelect={selectRun}
-        onRetry={() => void list.refetch()}
+        // Hold the button while a retry or the poll is in flight, and
+        // never cancel a request that may be about to recover the list.
+        retrying={list.isFetching}
+        onRetry={() => void list.refetch({ cancelRefetch: false })}
       />
       <div className="min-h-0 flex-1 overflow-auto border-t border-(--border) p-(--space-6)">
         <RunDetail

@@ -1,249 +1,152 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Run payloads as the backends send them today. Migration runner/0032
+// Run payloads as the backends produce them. Migration runner/0032
 // dropped AgentRun.queue_position, so neither the issue detail's embedded
 // run nor a runs-list item carries it; the contracts keep it optional for
 // older servers. The guard fails when a contract requires a key either
 // backend no longer sends, which is how the issue page and the Runs list
 // broke.
 //
-// The wire key lists below are hand copies of the serializers they name.
-// Nothing here re-reads those serializers, so a backend change must be
-// copied in by hand; the live contract suites (src/contract/, skipped
-// without PIDASH_CONTRACT_BASE_URL) are what compare against a real server.
+// Nothing below is a hand copy. Every payload and key list comes from
+// the serializers or from output captured off them:
+// - Django runs list: the DRF rows captured in fixture FX-RUN-08.
+// - Rust runs list: `RUN_WIRE_FIELDS` (runner_runs/shape.rs), which the
+//   Rust tests pin to the handler's output.
+// - Rust issue run: the bytes `agent_run_to_representation` must emit in
+//   serializers_detail.rs `run_replays_bytes_with_diagnostic_and_live_state`.
+// - Django issue run: the dict `_serialize_agent_run` returns
+//   (apps/api app/serializers/issue.py), with values from the captures above.
+// When a serializer changes, this file reads the new version.
 import { describe, expect, it } from "vitest";
 import type { z } from "zod/mini";
 
+import djangoIssueSerializer from "../../../../apps/api/pi_dash/app/serializers/issue.py?raw";
+import runsCapture from "../../../../rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json";
+import rustIssueSerializer from "../../../../rust-api/crates/services/src/app_issues/serializers_detail.rs?raw";
+import rustRunShape from "../../../../rust-api/crates/services/src/runner_runs/shape.rs?raw";
 import { AgentRunSummary } from "./issue-agent.js";
 import { AgentRun } from "./runs.js";
 
-const UUID = "123e4567-e89b-12d3-a456-426614174000";
-const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
+type Payload = Record<string, unknown>;
+type Schema = { shape: Record<string, z.ZodMiniType> };
 
-/**
- * `_serialize_agent_run` keys (apps/api app/serializers/issue.py), as the
- * Django issue detail's agent_status.latest_run returns them.
- */
-const ISSUE_RUN_WIRE_KEYS = [
-  "id",
-  "status",
-  "executor_kind",
-  "runner",
-  "runner_name",
-  "pinned_runner",
-  "pinned_runner_name",
-  "pin_kind",
-  "dispatch_wait",
-  "created_at",
-  "assigned_at",
-  "started_at",
-  "ended_at",
-  "cancel_requested_at",
-  "cancel_reason",
-  "done_payload",
-  "error",
-  "error_code",
-  "failure_reason",
-  "error_diagnostic",
-  "llm_model",
-  "input_tokens",
-  "output_tokens",
-  "total_tokens",
-  "live_state",
-] as const;
+/** The string items of `pub const <name>: [&str; N] = [...]`, checked against N. */
+function rustConstKeys(source: string, name: string): string[] {
+  const match = new RegExp(`pub const ${name}: \\[&str; (\\d+)\\] = \\[([^\\]]*)\\];`).exec(source);
+  if (!match?.[1] || match[2] === undefined) throw new Error(`${name} not found`);
+  const keys = [...match[2].matchAll(/"([a-z_]+)"/g)].map((item) => item[1] ?? "");
+  expect(keys).toHaveLength(Number(match[1]));
+  return keys;
+}
 
-/** rust-api serializers_detail.rs AGENT_RUN_FIELDS. */
-const RUST_ISSUE_RUN_WIRE_KEYS = [
-  "id",
-  "status",
-  "executor_kind",
-  "runner",
-  "runner_name",
-  "created_at",
-  "assigned_at",
-  "started_at",
-  "ended_at",
-  "cancel_requested_at",
-  "cancel_reason",
-  "done_payload",
-  "error",
-  "error_code",
-  "failure_reason",
-  "error_diagnostic",
-  "llm_model",
-  "input_tokens",
-  "output_tokens",
-  "total_tokens",
-  "live_state",
-] as const;
+/** The JSON a Rust test asserts `serde_json::to_string(...)` produces. */
+function rustReplayedJson(source: string, testName: string): Payload {
+  const start = source.indexOf(`fn ${testName}()`);
+  if (start < 0) throw new Error(`${testName} not found`);
+  const literal = /"(\{\\"id\\".*?\})",\n/s.exec(source.slice(start));
+  if (!literal?.[1]) throw new Error(`${testName} has no replayed JSON`);
+  const text = literal[1].replaceAll(/\\\n\s*/g, "").replaceAll(/\\(["\\])/g, "$1");
+  return JSON.parse(text) as Payload;
+}
 
-/**
- * AgentRunSerializer.Meta.fields (apps/api runner/serializers.py), as each
- * Django GET /api/runners/runs/ item returns them.
- */
-const RUN_LIST_WIRE_KEYS = [
-  "id",
-  "status",
-  "executor_kind",
-  "dispatch_attempts",
-  "cancel_requested_at",
-  "cancel_reason",
-  "prompt",
-  "thread_id",
-  "agent_metadata",
-  "runner",
-  "pinned_runner",
-  "pinned_runner_name",
-  "pin_kind",
-  "dispatch_wait",
-  "work_item",
-  "scheduler_binding",
-  "scheduler_binding_detail",
-  "pod",
-  "pod_detail",
-  "created_by",
-  "owner",
-  "created_at",
-  "assigned_at",
-  "started_at",
-  "ended_at",
-  "done_payload",
-  "error",
-  "error_code",
-  "failure_reason",
-  "error_diagnostic",
-  "refusal_category",
-  "llm_model",
-  "input_tokens",
-  "output_tokens",
-  "total_tokens",
-  "usage",
-  "tool_plan",
-  "tool_calls",
-] as const;
+/** The keys of the dict literal a Python method returns, in order. */
+function pythonReturnedKeys(source: string, method: string): string[] {
+  const start = source.indexOf(`def ${method}(`);
+  if (start < 0) throw new Error(`${method} not found`);
+  const body = /\n(\s+)return \{\n(.*?)\n\1\}/s.exec(source.slice(start));
+  if (!body?.[2]) throw new Error(`${method} returns no dict literal`);
+  return [...body[2].matchAll(/^\s+"([a-z_]+)":/gm)].map((item) => item[1] ?? "");
+}
 
-/** rust-api runner_runs/shape.rs run fields (adds capacity_wait). */
-const RUST_RUN_LIST_WIRE_KEYS = [
-  ...RUN_LIST_WIRE_KEYS.slice(0, 14),
-  "capacity_wait",
-  ...RUN_LIST_WIRE_KEYS.slice(14),
-] as const;
-
-const issueRun = {
-  id: UUID,
-  status: "completed",
-  executor_kind: "local_runner",
-  runner: UUID2,
-  runner_name: "probe-runner",
-  pinned_runner: null,
-  pinned_runner_name: null,
-  pin_kind: "locality",
-  dispatch_wait: null,
-  created_at: "2026-11-03T10:00:00Z",
-  assigned_at: "2026-11-03T10:00:01Z",
-  started_at: "2026-11-03T10:00:02Z",
-  ended_at: "2026-11-03T10:05:00Z",
-  cancel_requested_at: null,
-  cancel_reason: "",
-  done_payload: { outcome: "done" },
-  error: "",
-  error_code: "",
-  failure_reason: "",
-  error_diagnostic: null,
-  llm_model: "probe-model",
-  input_tokens: 10,
-  output_tokens: 20,
-  total_tokens: 30,
-  live_state: null,
-};
-
-const listRun = {
-  id: UUID,
-  status: "completed",
-  executor_kind: "local_runner",
-  dispatch_attempts: 1,
-  cancel_requested_at: null,
-  cancel_reason: "",
-  prompt: "Probe prompt",
-  thread_id: "thread-probe",
-  agent_metadata: {},
-  runner: UUID2,
-  pinned_runner: null,
-  pinned_runner_name: null,
-  pin_kind: "locality",
-  dispatch_wait: null,
-  work_item: UUID2,
-  scheduler_binding: null,
-  scheduler_binding_detail: null,
-  pod: UUID,
-  pod_detail: { id: UUID, name: "CT_pod_1", is_default: true, project: UUID2, project_identifier: "CT" },
-  created_by: UUID2,
-  owner: UUID2,
-  created_at: "2026-11-03T10:00:00Z",
-  assigned_at: "2026-11-03T10:00:01Z",
-  started_at: "2026-11-03T10:00:02Z",
-  ended_at: "2026-11-03T10:05:00Z",
-  done_payload: null,
-  error: "",
-  error_code: "",
-  failure_reason: "",
-  error_diagnostic: null,
-  refusal_category: "",
-  llm_model: "probe-model",
-  input_tokens: 10,
-  output_tokens: 20,
-  total_tokens: 30,
-  usage: {},
-  tool_plan: {},
-  tool_calls: [],
-};
+/** A payload with exactly `keys`, each value taken from the first source that has it. */
+function assemble(keys: readonly string[], ...sources: Payload[]): Payload {
+  return Object.fromEntries(
+    keys.map((key) => {
+      const source = sources.find((candidate) => key in candidate);
+      if (!source) throw new Error(`no captured value for ${key}`);
+      return [key, source[key]];
+    })
+  );
+}
 
 /** Keys the schema rejects when absent. */
-function requiredKeys(schema: { shape: Record<string, z.ZodMiniType> }): string[] {
+function requiredKeys(schema: Schema): string[] {
   return Object.entries(schema.shape)
     .filter(([, field]) => !field.safeParse(undefined).success)
     .map(([key]) => key);
 }
 
-describe("run payloads without queue_position", () => {
-  it("fixtures carry exactly the wire keys", () => {
-    expect(Object.keys(issueRun)).toEqual([...ISSUE_RUN_WIRE_KEYS]);
-    expect(Object.keys(listRun)).toEqual([...RUN_LIST_WIRE_KEYS]);
+/** Wire keys the schema does not model (parsing drops them). */
+function unmodelledKeys(schema: Schema, payload: Payload): string[] {
+  return Object.keys(payload).filter((key) => !(key in schema.shape));
+}
+
+const djangoListRows: Payload[] = [runsCapture.list.golden_row, runsCapture.detail.ok.body];
+const [djangoListRow] = djangoListRows as [Payload];
+
+const rustListKeys = rustConstKeys(rustRunShape, "RUN_WIRE_FIELDS");
+const rustListRow = assemble(rustListKeys, djangoListRow, { capacity_wait: null });
+
+const rustIssueKeys = rustConstKeys(rustIssueSerializer, "AGENT_RUN_FIELDS");
+// The Rust test uses synthetic ids (5555…) that are not RFC 4122 UUIDs;
+// swap in the captured Django ids so only the shape is under test.
+const replayedIssueRun = rustReplayedJson(rustIssueSerializer, "run_replays_bytes_with_diagnostic_and_live_state");
+const rustIssueRun: Payload = {
+  ...replayedIssueRun,
+  id: djangoListRow.id,
+  runner: djangoListRow.pod,
+  live_state: { ...(replayedIssueRun.live_state as Payload), observed_run_id: djangoListRow.id },
+};
+
+const djangoIssueKeys = pythonReturnedKeys(djangoIssueSerializer, "_serialize_agent_run");
+const djangoIssueRun = assemble(djangoIssueKeys, rustIssueRun, djangoListRow);
+
+describe("run payloads as the serializers produce them", () => {
+  it("reads every serializer source", () => {
+    expect(Object.keys(rustIssueRun)).toEqual(rustIssueKeys);
+    expect(djangoIssueKeys).toContain("live_state");
+    expect(djangoIssueKeys).not.toContain("queue_position");
+    for (const row of djangoListRows) expect(row).not.toHaveProperty("queue_position");
+    expect(rustListKeys).not.toContain("queue_position");
+    expect(rustIssueKeys).not.toContain("queue_position");
   });
 
-  it("parses the issue detail's embedded run", () => {
-    const parsed = AgentRunSummary.safeParse(issueRun);
-    expect(parsed.error?.issues).toBeUndefined();
-    expect(parsed.success).toBe(true);
+  it("parses the issue detail's embedded run from both backends", () => {
+    for (const run of [djangoIssueRun, rustIssueRun]) {
+      const parsed = AgentRunSummary.safeParse(run);
+      expect(parsed.error?.issues).toBeUndefined();
+    }
   });
 
-  it("parses a runs-list item", () => {
-    const parsed = AgentRun.safeParse(listRun);
-    expect(parsed.error?.issues).toBeUndefined();
-    expect(parsed.success).toBe(true);
+  it("parses a runs-list item from both backends", () => {
+    for (const row of [...djangoListRows, rustListRow]) {
+      const parsed = AgentRun.safeParse(row);
+      expect(parsed.error?.issues).toBeUndefined();
+    }
   });
 
   it("requires no key either backend does not send", () => {
-    const missing = (schema: Parameters<typeof requiredKeys>[0], wire: readonly string[]) =>
-      requiredKeys(schema).filter((key) => !wire.includes(key));
-    expect(missing(AgentRunSummary, ISSUE_RUN_WIRE_KEYS)).toEqual([]);
-    expect(missing(AgentRunSummary, RUST_ISSUE_RUN_WIRE_KEYS)).toEqual([]);
-    expect(missing(AgentRun, RUN_LIST_WIRE_KEYS)).toEqual([]);
-    expect(missing(AgentRun, RUST_RUN_LIST_WIRE_KEYS)).toEqual([]);
+    const missing = (schema: Schema, payload: Payload) => requiredKeys(schema).filter((key) => !(key in payload));
+    expect(missing(AgentRunSummary, djangoIssueRun)).toEqual([]);
+    expect(missing(AgentRunSummary, rustIssueRun)).toEqual([]);
+    for (const row of [...djangoListRows, rustListRow]) expect(missing(AgentRun, row)).toEqual([]);
   });
 
-  it("parses the Rust spellings of both payloads", () => {
-    const pick = (source: Record<string, unknown>, keys: readonly string[]) =>
-      Object.fromEntries(keys.map((key) => [key, source[key] ?? null]));
-    expect(AgentRunSummary.safeParse(pick(issueRun, RUST_ISSUE_RUN_WIRE_KEYS)).error?.issues).toBeUndefined();
-    expect(AgentRun.safeParse(pick(listRun, RUST_RUN_LIST_WIRE_KEYS)).error?.issues).toBeUndefined();
+  it("models every key the backends send except the known ones it ignores", () => {
+    // failure_reason drives the server's error_diagnostic; the client
+    // reads the diagnostic. A new key in this list must be modelled or
+    // listed here on purpose.
+    const ignored = ["failure_reason"];
+    expect(unmodelledKeys(AgentRunSummary, djangoIssueRun)).toEqual(ignored);
+    expect(unmodelledKeys(AgentRunSummary, rustIssueRun)).toEqual(ignored);
+    for (const row of [...djangoListRows, rustListRow]) expect(unmodelledKeys(AgentRun, row)).toEqual(ignored);
   });
 
   it("does not require queue_position but still accepts it from older servers", () => {
     expect(requiredKeys(AgentRunSummary)).not.toContain("queue_position");
     expect(requiredKeys(AgentRun)).not.toContain("queue_position");
-    expect(AgentRunSummary.safeParse({ ...issueRun, queue_position: 3 }).success).toBe(true);
-    expect(AgentRun.safeParse({ ...listRun, queue_position: null }).success).toBe(true);
+    expect(AgentRunSummary.safeParse({ ...djangoIssueRun, queue_position: 3 }).success).toBe(true);
+    expect(AgentRun.safeParse({ ...djangoListRow, queue_position: null }).success).toBe(true);
   });
 });

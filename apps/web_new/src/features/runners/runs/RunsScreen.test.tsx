@@ -209,6 +209,22 @@ describe("list load failure", () => {
     });
     renderScreen(1);
     expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not restart a fetch already in flight when Try again is pressed", async () => {
+    const refetch = vi.fn();
+    stubQueries({ list: { data: undefined, isPending: false, isError: true, isFetching: true, refetch } });
+    renderScreen(1);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+  });
+
+  it("lets a retry finish the current request rather than cancel it", () => {
+    const refetch = vi.fn();
+    stubQueries({ list: { data: undefined, isPending: false, isError: true, isFetching: false, refetch } });
+    renderScreen(1);
+    screen.getByRole("button", { name: "Try again" }).click();
+    expect(refetch).toHaveBeenCalledWith({ cancelRefetch: false });
   });
 });
 
