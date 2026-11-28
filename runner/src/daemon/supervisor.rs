@@ -1745,17 +1745,17 @@ async fn drain_in_flight_runs(
     // runner's state, PDASHOSS01-417), otherwise a DaemonRestart failure.
     // Taking the held reports also stops the worker from sending a second
     // one if it finishes cleanup before the process exits.
-    let snapshot: Vec<(uuid::Uuid, uuid::Uuid, ClientMsg, RunnerOut)> = {
+    // A managed run's report is persisted to the SQLite terminal outbox in
+    // the same step that takes it (`take_drain_report`), so a worker that
+    // finishes cleanup meanwhile cannot free the run's queue row first.
+    let snapshot: Vec<(uuid::Uuid, uuid::Uuid, ClientMsg, RunnerOut, bool)> = {
         let guard = runners.read().await;
         guard
             .iter()
             .filter_map(|(rid, (out, state, _))| {
                 let run_id = (*state.rx_in_flight.borrow())?;
-                let msg = state
-                    .take_terminal_for_drain()
-                    .into_iter()
-                    .find(|m| terminal_run_id(m) == Some(run_id))
-                    .unwrap_or_else(|| ClientMsg::RunFailed {
+                let (msg, managed) =
+                    take_drain_report(state, coord.as_deref(), run_id, || ClientMsg::RunFailed {
                         run_id,
                         reason: FailureReason::DaemonRestart,
                         detail: Some(detail.clone()),
@@ -1763,7 +1763,7 @@ async fn drain_in_flight_runs(
                         tokens: None,
                         model: None,
                     });
-                Some((*rid, run_id, msg, out.clone()))
+                Some((*rid, run_id, msg, out.clone(), managed))
             })
             .collect()
     };
@@ -1773,14 +1773,8 @@ async fn drain_in_flight_runs(
     // RunCancelled is sent best-effort, as the worker itself would).
     let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
     let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
-    for (runner_id, run_id, msg, _) in &snapshot {
-        let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
-        if is_managed {
-            let payload = serde_json::to_vec(msg).unwrap_or_default();
-            if let Some(c) = coord.as_ref() {
-                let key = format!("drain-{}", run_id);
-                let _ = c.persist_terminal(*run_id, &payload, &key);
-            }
+    for (runner_id, run_id, msg, _, is_managed) in &snapshot {
+        if *is_managed {
             managed.push((*runner_id, *run_id));
         } else if let ClientMsg::RunFailed {
             reason,
@@ -1824,32 +1818,34 @@ async fn drain_in_flight_runs(
             Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
         }
     }
-    let drains = snapshot.into_iter().map(|(runner_id, run_id, msg, out)| {
-        async move {
-            // Per-attempt timeout so one stuck cloud client can't keep
-            // a parallel sibling from completing in time.
-            match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
-                RunFailedSend::Delivered => {
-                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
-                    Some(run_id)
-                }
-                RunFailedSend::Failed(e) => {
-                    tracing::warn!(
-                        %runner_id, %run_id,
-                        "drain send failed (journaled for replay on next start): {e:#}"
-                    );
-                    None
-                }
-                RunFailedSend::TimedOut => {
-                    tracing::warn!(
-                        %runner_id, %run_id,
-                        "drain send timed out at 2s (journaled for replay on next start)"
-                    );
-                    None
+    let drains = snapshot
+        .into_iter()
+        .map(|(runner_id, run_id, msg, out, _)| {
+            async move {
+                // Per-attempt timeout so one stuck cloud client can't keep
+                // a parallel sibling from completing in time.
+                match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
+                    RunFailedSend::Delivered => {
+                        tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                        Some(run_id)
+                    }
+                    RunFailedSend::Failed(e) => {
+                        tracing::warn!(
+                            %runner_id, %run_id,
+                            "drain send failed (journaled for replay on next start): {e:#}"
+                        );
+                        None
+                    }
+                    RunFailedSend::TimedOut => {
+                        tracing::warn!(
+                            %runner_id, %run_id,
+                            "drain send timed out at 2s (journaled for replay on next start)"
+                        );
+                        None
+                    }
                 }
             }
-        }
-    });
+        });
     let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(drains)
         .await
         .into_iter()
@@ -2117,6 +2113,35 @@ async fn apply_recovery_hold(
         }
     }
     now
+}
+
+/// For the shutdown drain: take `run_id`'s held terminal report (or
+/// `fallback()` when none is held) and, for a run the machine queue
+/// manages, persist it to the terminal outbox. Returns the report and
+/// whether the run is managed. Both happen while the runner's terminal
+/// hold is locked: a worker finishing cleanup meanwhile sees the hold as
+/// drained only afterwards, so it cannot release the slot (and with it
+/// the queue row the record lives in) before the result is recorded.
+fn take_drain_report(
+    state: &StateHandle,
+    coord: Option<&crate::daemon::run_queue::Coordinator>,
+    run_id: uuid::Uuid,
+    fallback: impl FnOnce() -> ClientMsg,
+) -> (ClientMsg, bool) {
+    state.take_terminal_for_drain_then(|msgs| {
+        let msg = msgs
+            .into_iter()
+            .find(|m| terminal_run_id(m) == Some(run_id))
+            .unwrap_or_else(fallback);
+        let managed = coord.is_some_and(|c| c.holds_run(run_id));
+        if let Some(c) = coord.filter(|_| managed) {
+            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            if let Err(e) = c.persist_terminal(run_id, &payload, &format!("drain-{run_id}")) {
+                tracing::warn!(%run_id, "drain: failed to persist terminal report: {e}");
+            }
+        }
+        (msg, managed)
+    })
 }
 
 /// Release a finished run's machine-queue slot. The run's terminal outbox
@@ -8681,6 +8706,78 @@ mod tests {
             after.terminal_pending().len(),
             1,
             "the drain's terminal record was deleted"
+        );
+    }
+
+    /// Review of #3501 at ba9c1c3 (MUST 4): the shutdown drain must record
+    /// a held result in the terminal outbox in the same step that takes it.
+    /// A worker that finishes cleanup right after the take (it sees the hold
+    /// drained, skips its own persist and releases the slot) must not free
+    /// the run's queue row before the drain has recorded the result, or the
+    /// drain finds the run unmanaged and only tries one best-effort send.
+    #[tokio::test]
+    async fn the_drain_records_a_held_result_before_the_slot_can_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        state.hold_terminal();
+        let completed = ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        // Held only in memory: the worker's own persist is what the race skips.
+        assert!(state.hold_terminal_msg(completed).is_none());
+        // The worker: as soon as it sees the hold drained, it releases the slot.
+        let worker = {
+            let (state, coord) = (state.clone(), coord.clone());
+            std::thread::spawn(move || {
+                while !state.terminal_drained() {
+                    std::thread::yield_now();
+                }
+                release_finished_slot(&coord, &state, run_id);
+            })
+        };
+
+        let (msg, managed) = take_drain_report(&state, Some(&coord), run_id, || unreachable!());
+        worker.join().unwrap();
+
+        assert!(matches!(msg, ClientMsg::RunCompleted { .. }));
+        assert!(managed, "the drain lost track of the managed run");
+        assert!(
+            coord.terminal_pending().iter().any(|e| e.run_id == run_id),
+            "the held result never reached the terminal outbox"
         );
     }
 
