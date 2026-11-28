@@ -170,6 +170,26 @@ pub struct ChatRegistry {
     /// working copy is not handed to a run while any is left (see
     /// [`ChatRegistry::release_idle`]).
     lingering: Arc<Mutex<Vec<ChatUnit>>>,
+    /// Evicted runtimes still being ended outside the map (see
+    /// [`ChatRegistry::reap_idle`]). Their processes may still be using the
+    /// working copy, so the handoff refuses while any is ending.
+    ending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Counts one evicted runtime in [`ChatRegistry::ending`] until dropped.
+struct Ending(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Ending {
+    fn new(count: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Shut a session runtime's bridge down, then stop what its agents left in
@@ -227,7 +247,11 @@ impl ChatRegistry {
             }
         }
         *lingering = left;
-        free && lingering.is_empty()
+        // Read under the `lingering` lock: an evicted runtime that ends
+        // unresolved is pushed there before it stops counting as ending,
+        // so it is seen in one place or the other.
+        let ending = self.ending.load(Ordering::SeqCst) > 0;
+        free && lingering.is_empty() && !ending
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
@@ -304,7 +328,7 @@ impl ChatRegistry {
             // caller's Arc (two live runtimes for one chat_session_id). A
             // busy runtime at this point means a turn started after the
             // snapshot: leave the session entirely untouched, no reinsert.
-            let bridge = {
+            let (bridge, _ending) = {
                 let mut map = self.sessions.lock().await;
                 let Some(current) = map.get(&id) else {
                     continue;
@@ -315,13 +339,17 @@ impl ChatRegistry {
                 let Ok(mut rt) = expected.rt.try_lock() else {
                     continue;
                 };
+                // Counted as ending before it leaves the map, so the
+                // handoff never sees it in neither place.
+                let ending = Ending::new(&self.ending);
                 let session = map.remove(&id).expect("entry checked present");
                 let _ = session;
-                SessionRuntime {
+                let rt = SessionRuntime {
                     bridge: rt.bridge.take(),
                     unit: rt.unit.take(),
                     ..SessionRuntime::default()
-                }
+                };
+                (rt, ending)
             };
             let mut ended = bridge;
             self.end_runtime(&mut ended, Duration::from_secs(5)).await;
@@ -512,9 +540,25 @@ pub(crate) async fn handle_warm<S: ChatSink>(
     args: WarmArgs,
     sink: &mut S,
 ) -> Result<Response> {
-    let session = host.sessions.get_or_create(args.chat_session_id).await;
-    let mut rt = session.rt.lock().await;
     let chat_session_id = args.chat_session_id;
+    // A warm starts the agent in the working copy, so it claims the copy
+    // like a turn (AC6, PDASHOSS01-417): never during an issue run or its
+    // unresolved cleanup, and never after an Assign's handoff.
+    let _guard = match host.begin_turn() {
+        Ok(g) => g,
+        Err(detail) => {
+            sink.emit(Response::ChatEvent {
+                chat_session_id,
+                bridge_seq: 0,
+                kind: "chat_warm_failed".into(),
+                payload: serde_json::json!({ "detail": detail, "code": "runner_busy" }),
+            })
+            .await?;
+            return Ok(Response::Ack);
+        }
+    };
+    let session = host.sessions.get_or_create(chat_session_id).await;
+    let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
         args.local_session_id.as_deref(),
@@ -669,7 +713,8 @@ pub(crate) async fn handle_send<S: ChatSink>(
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
         // A one-shot engine spawns per turn: those processes join the
-        // session's unit too.
+        // session's unit too (its process group, or the cgroup their login
+        // shell joins before the agent starts).
         let turn = drive_turn(
             DriveCtx {
                 chat_session_id,
@@ -2612,6 +2657,107 @@ mod tests {
             registry.release_idle().await,
             "gone processes still hold the copy"
         );
+    }
+
+    /// An idle session being evicted keeps the working copy held until its
+    /// processes are stopped: while its runtime is ending outside the map,
+    /// the handoff must still see it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn release_idle_refuses_while_an_evicted_session_is_still_ending() {
+        let registry = ChatRegistry::new();
+        let id = Uuid::new_v4();
+        let mut unit = ChatUnit::new(id);
+        // Ignores TERM, so its unit's cleanup lasts the whole grace.
+        let mut leftover = unit
+            .scoped(async {
+                crate::util::shell::login_shell_command(
+                    "sh",
+                    &["-c", "trap '' TERM; exec sleep 300"],
+                    None,
+                )
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+            })
+            .await;
+        let pid = leftover.id().unwrap();
+        unit.adopt(Some(pid));
+        tokio::spawn(async move { leftover.wait().await });
+        let session = registry.get_or_create(id).await;
+        {
+            let mut rt = session.rt.lock().await;
+            rt.unit = Some(unit);
+            rt.last_used_at = None; // past its idle TTL
+        }
+        // Let the shell reach its `trap` before the eviction signals it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let reaper = registry.clone();
+        let reap = tokio::spawn(async move { reaper.reap_idle(Uuid::new_v4(), 8).await });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while registry.contains(id).await && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!registry.contains(id).await, "the session was not evicted");
+        let released = registry.release_idle().await;
+        let alive = process_alive(pid);
+        reap.await.unwrap();
+        assert!(alive, "the eviction ended before the handoff check");
+        assert!(
+            !released,
+            "handed over while an evicted session's processes were still running"
+        );
+        assert!(
+            registry.release_idle().await,
+            "the ended session still holds the copy"
+        );
+    }
+
+    /// A warm starts an agent in the working copy, so it is refused while
+    /// an issue run (or its unresolved cleanup) holds the copy, like a turn.
+    #[tokio::test]
+    async fn warm_is_refused_while_an_issue_run_holds_the_working_copy() {
+        let inst = offline_instance();
+        inst.state.set_cleanup_reserved(true);
+        let host = ChatHost::runner(&inst);
+        let id = Uuid::new_v4();
+        let mut sink = VecSink::default();
+        let response = handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id: id,
+                cwd: None,
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, Response::Ack));
+        let detail = sink.frames.iter().find_map(|f| match f {
+            Response::ChatEvent { kind, payload, .. } if kind == "chat_warm_failed" => {
+                payload["detail"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        });
+        assert!(
+            detail.as_deref().is_some_and(|d| d.contains("cleaned up")),
+            "warm was not refused as busy: {:?}",
+            sink.frames
+        );
+        if let Some(session) = inst.chat_sessions.get(id).await {
+            let rt = session.rt.lock().await;
+            assert!(
+                rt.bridge.is_none() && rt.unit.is_none(),
+                "warm started an agent"
+            );
+        }
+        assert!(!inst.chat_active.load(Ordering::SeqCst));
     }
 
     #[test]

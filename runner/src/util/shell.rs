@@ -74,11 +74,17 @@ tokio::task_local! {
 }
 
 /// What [`CHAT_ENV`] carries.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ChatEnv {
     pub backend: BackendKind,
     /// The session's anchored process group, as [`RunEnv::process_group`].
     pub process_group: Option<i32>,
+    /// Cgroup backend: the `cgroup.procs` of the unit's cgroup. The login
+    /// shell writes its own pid there before it starts the agent, so every
+    /// agent a chat spawns joins the unit, including one-shot engines that
+    /// spawn a new process per turn (a move after spawn reaches only the
+    /// first bridge's pid).
+    pub cgroup_procs: Option<PathBuf>,
 }
 
 /// What [`RUN_ENV`] carries. Kept as a struct so more per-run values can
@@ -196,12 +202,28 @@ fn apply_run_env(cmd: &mut Command) {
 /// [`CHAT_ENV`]).
 #[cfg(unix)]
 fn apply_chat_env(cmd: &mut Command) {
-    if let Ok(env) = CHAT_ENV.try_with(|e| *e)
-        && env.backend == BackendKind::ProcessGroup
-    {
-        cmd.process_group(env.process_group.unwrap_or(0));
+    let Ok(env) = CHAT_ENV.try_with(|e| e.clone()) else {
+        return;
+    };
+    match env.backend {
+        BackendKind::ProcessGroup => {
+            cmd.process_group(env.process_group.unwrap_or(0));
+        }
+        // The login shell joins the cgroup itself before it starts the
+        // agent ([`SHELL_SCRIPT`]), and refuses to start it otherwise.
+        BackendKind::Cgroup => {
+            if let Some(procs) = &env.cgroup_procs {
+                cmd.env(CHAT_CGROUP_PROCS_ENV, procs.as_os_str());
+            }
+        }
+        BackendKind::None => {}
     }
 }
+
+/// Where [`SHELL_SCRIPT`] writes its own pid to join a chat unit's cgroup
+/// (see [`ChatEnv::cgroup_procs`]). Unset before the agent starts.
+#[cfg(unix)]
+const CHAT_CGROUP_PROCS_ENV: &str = "PIDASH_CHAT_CGROUP_PROCS";
 
 #[cfg(not(unix))]
 fn apply_chat_env(_cmd: &mut Command) {}
@@ -250,7 +272,8 @@ fn apply_run_env_windows(cmd: &mut Command, env: &RunEnv) {
 /// run without that piece of per-run environment produces exactly the
 /// command line it always did.
 #[cfg(not(target_os = "windows"))]
-const SHELL_SCRIPT: &str = r#"[ -n "${PIDASH_AGENT_CWD-}" ] && cd -- "$PIDASH_AGENT_CWD"
+const SHELL_SCRIPT: &str = r#"if [ -n "${PIDASH_CHAT_CGROUP_PROCS-}" ]; then printf '%s\n' "$$" >"$PIDASH_CHAT_CGROUP_PROCS" || { echo "pidash: could not join the chat session's cgroup" >&2; exit 125; }; unset PIDASH_CHAT_CGROUP_PROCS; fi
+[ -n "${PIDASH_AGENT_CWD-}" ] && cd -- "$PIDASH_AGENT_CWD"
 [ -n "${PIDASH_CODEX_HOME-}" ] && export CODEX_HOME="$PIDASH_CODEX_HOME"
 [ -n "${PIDASH_AGENT_PATH_PREPEND-}" ] && export PATH="$PIDASH_AGENT_PATH_PREPEND:$PATH"
 [ -n "${PIDASH_RUNNER_BIN-}" ] && export PATH="$PIDASH_RUNNER_BIN:$PATH"
@@ -725,6 +748,7 @@ mod tests {
                 ChatEnv {
                     backend: BackendKind::ProcessGroup,
                     process_group: Some(pgid),
+                    cgroup_procs: None,
                 },
                 async { login_shell_command("sleep", &["30"], None) },
             )
@@ -747,6 +771,71 @@ mod tests {
             Some(pgid),
             "chat agent did not join the session's group"
         );
+    }
+
+    /// PDASHOSS01-417: on the cgroup backend a chat agent joins the unit's
+    /// cgroup from inside its own login shell, before the agent starts, so
+    /// an agent spawned per turn is contained as well as the first one.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn chat_scope_on_cgroup_joins_the_units_cgroup_before_the_agent_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let procs = dir.path().join("cgroup.procs");
+        std::fs::write(&procs, "").unwrap();
+        let mut cmd = CHAT_ENV
+            .scope(
+                ChatEnv {
+                    backend: BackendKind::Cgroup,
+                    process_group: None,
+                    cgroup_procs: Some(procs.clone()),
+                },
+                async { login_shell_command("true", &[], None) },
+            )
+            .await;
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&procs).unwrap().trim(),
+            pid.to_string(),
+            "the chat agent did not join the unit's cgroup"
+        );
+    }
+
+    /// A chat agent that cannot join its unit's cgroup is not started:
+    /// left outside, it would outlive a cleanup that reports clean.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn chat_agent_that_cannot_join_its_cgroup_is_not_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let procs = dir.path().join("missing").join("cgroup.procs");
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let mut cmd = CHAT_ENV
+            .scope(
+                ChatEnv {
+                    backend: BackendKind::Cgroup,
+                    process_group: None,
+                    cgroup_procs: Some(procs),
+                },
+                async { login_shell_command("touch", &[marker_arg.as_str()], None) },
+            )
+            .await;
+        let status = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .unwrap();
+        assert!(!status.success(), "started outside its cgroup");
+        assert!(!marker.exists(), "the agent ran outside its cgroup");
     }
 
     /// NEWPIDASH-320 §6.3: issue runs export the issue, project and agent

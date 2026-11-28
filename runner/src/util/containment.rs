@@ -899,6 +899,16 @@ pub enum BackendKind {
 }
 
 impl RunGroup {
+    /// The unit's id (names its cgroup and recovery record).
+    pub fn run_id(&self) -> Uuid {
+        self.run_id
+    }
+
+    /// Cgroup backend: the unit cgroup's `cgroup.procs`.
+    pub fn cgroup_procs(&self) -> Option<PathBuf> {
+        self.cgroup_dir.as_ref().map(|d| d.join("cgroup.procs"))
+    }
+
     /// The backend kind for `RUN_ENV` and logs.
     pub fn backend_kind(&self) -> BackendKind {
         self.backend

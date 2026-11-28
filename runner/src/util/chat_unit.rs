@@ -10,7 +10,9 @@
 //! same ownership proof before every signal. Nothing unproven is signalled.
 //!
 //! The unit lives as long as the session's runtime, not one turn: what a
-//! turn starts may be meant for the next turn. The working copy is handed
+//! turn starts may be meant for the next turn. On the cgroup backend each
+//! agent joins the unit from its own login shell, before it starts (see
+//! [`ChatEnv::cgroup_procs`]), so engines that spawn per turn are covered. The working copy is handed
 //! to a run or another chat runtime only once the unit is finished clean.
 
 use std::future::Future;
@@ -27,11 +29,18 @@ pub struct ChatUnit {
 }
 
 impl ChatUnit {
-    /// Create the unit for `chat_session_id`.
+    /// Create a unit for one runtime of `chat_session_id`. Every runtime
+    /// gets a fresh id, so its cgroup and recovery record are its own: an
+    /// earlier runtime's unit that is still being re-checked can never
+    /// signal this runtime's agents or delete its record.
     pub fn new(chat_session_id: Uuid) -> Self {
-        Self {
-            group: containment::create_run_group(chat_session_id),
-        }
+        let group = containment::create_run_group(Uuid::new_v4());
+        tracing::debug!(
+            chat_session_id = %chat_session_id,
+            unit_id = %group.run_id(),
+            "chat runtime containment unit created"
+        );
+        Self { group }
     }
 
     /// Run `fut` with every agent it spawns placed in this unit's process
@@ -45,7 +54,13 @@ impl ChatUnit {
         ChatEnv {
             backend: self.group.backend_kind(),
             process_group: self.group.agent_pgid(),
+            cgroup_procs: self.group.cgroup_procs(),
         }
+    }
+
+    /// The unit's own id (names its cgroup and recovery record).
+    pub fn id(&self) -> Uuid {
+        self.group.run_id()
     }
 
     /// Record an agent pid just spawned (cgroup backend: moved into the
@@ -90,6 +105,17 @@ mod tests {
 
     fn alive(pid: u32) -> bool {
         crate::util::procinfo::info(pid as i32).is_some_and(|p| !p.zombie)
+    }
+
+    /// Each runtime of a session gets a unit of its own: sharing one
+    /// (same cgroup, same recovery record) would let an old runtime's
+    /// re-check signal the new runtime's agent and delete its record.
+    #[test]
+    fn each_runtime_of_a_session_gets_its_own_unit() {
+        let session = Uuid::new_v4();
+        let first = ChatUnit::new(session);
+        let second = ChatUnit::new(session);
+        assert_ne!(first.id(), second.id(), "two runtimes share one unit");
     }
 
     /// What the session's agent leaves running is stopped when the
