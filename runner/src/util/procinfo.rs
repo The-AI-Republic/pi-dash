@@ -297,6 +297,16 @@ fn linux_inspection_usable(mountinfo: &str, probe: impl FnOnce() -> bool) -> boo
     ) && probe()
 }
 
+/// The real-scan half of [`linux_inspection_usable`]: a scan of the own
+/// group (`scan`) works and the kernel's fork counter (`forks`, read from
+/// `/proc/stat`) can be read. Without the counter no scan can settle, so no
+/// group could ever be shown empty: `/proc` mounted with `subset=pid`
+/// (systemd `ProcSubset=pid`) lists processes but has no `/proc/stat`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_scan_probe<T>(scan: std::io::Result<T>, forks: std::io::Result<u64>) -> bool {
+    scan.is_ok() && forks.is_ok()
+}
+
 /// Whether the `/proc` mount in `mountinfo` (the text of
 /// `/proc/self/mountinfo`) hides other users' processes from listing
 /// (`hidepid=2`/`invisible` or `hidepid=4`/`ptraceable`). Then a process
@@ -337,8 +347,8 @@ fn proc_hidepid(mountinfo: &str, levels: &[&str]) -> bool {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{
-        ProcInfo, collect_group, linux_entry_gone, linux_inspection_usable, parse_linux_stat,
-        parse_total_forks, proc_hides_pids, settled_group,
+        ProcInfo, collect_group, linux_entry_gone, linux_inspection_usable, linux_scan_probe,
+        parse_linux_stat, parse_total_forks, proc_hides_pids, settled_group,
     };
 
     pub fn inspection_usable() -> bool {
@@ -346,7 +356,8 @@ mod imp {
             return false;
         };
         linux_inspection_usable(&mountinfo, || {
-            super::info(std::process::id() as i32).is_some_and(|me| group_members(me.pgid).is_ok())
+            super::info(std::process::id() as i32)
+                .is_some_and(|me| linux_scan_probe(group_members(me.pgid), total_forks()))
         })
     }
 
@@ -806,11 +817,29 @@ mod tests {
         assert!(!linux_inspection_usable(&mount("hidepid=0"), || false));
     }
 
+    #[test]
+    fn a_scan_without_the_fork_counter_is_unusable() {
+        // `/proc` with `subset=pid` lists processes but has no `/proc/stat`,
+        // so no scan could ever settle and no group could be shown empty.
+        fn missing<T>() -> std::io::Result<T> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        assert!(!linux_scan_probe(Ok(()), missing()));
+        assert!(!linux_scan_probe::<()>(missing(), Ok(7)));
+        assert!(linux_scan_probe(Ok(()), Ok(7)));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn inspection_is_usable_on_this_host_exactly_when_a_scan_works() {
         let own = info(std::process::id() as i32).unwrap().pgid;
-        assert_eq!(inspection_usable(), group_members(own).is_ok());
+        let forks = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|s| parse_total_forks(&s));
+        assert_eq!(
+            inspection_usable(),
+            group_members(own).is_ok() && forks.is_some()
+        );
     }
 
     #[test]
