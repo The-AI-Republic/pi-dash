@@ -764,6 +764,9 @@ struct ClaudeAuthProbe {
     /// `primaryApiKey` in Claude's global config (`~/.claude.json`), where
     /// a Console API-key login is stored.
     stored_api_key: ConfigKey,
+    /// Why the gathered environment or config root may not be what Claude
+    /// uses, so finding nothing is not proof of a logout; else `None`.
+    env_unverified: Option<String>,
     is_macos: bool,
 }
 
@@ -822,6 +825,9 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
     }
     // From here on nothing positive was found. Only report "not logged in"
     // when every source we know of was actually ruled out.
+    if let Some(why) = &p.env_unverified {
+        return AuthStatus::Unknown(why.clone());
+    }
     if let CredentialsFile::Unrecognized(path) = &p.credentials {
         return AuthStatus::Unknown(format!(
             "unrecognised credentials file ({})",
@@ -1249,6 +1255,9 @@ struct AgentEnvSnapshot {
     providers: Vec<String>,
     config_dir: Option<String>,
     home: Option<String>,
+    /// Why this snapshot may not be the environment Claude runs with (the
+    /// login shell could not be read), else `None`.
+    unverified: Option<String>,
 }
 
 const ENV_SET_MARK: &str = "__pidash_doctor_set ";
@@ -1319,6 +1328,23 @@ fn process_env_snapshot() -> AgentEnvSnapshot {
             .ok()
             .filter(|v| !v.is_empty()),
         home: directories::BaseDirs::new().map(|b| b.home_dir().display().to_string()),
+        unverified: None,
+    }
+}
+
+/// The snapshot from the login-shell script's output, or doctor's own
+/// environment when the shell gave none.
+fn snapshot_or_fallback(shell_stdout: Option<&str>) -> AgentEnvSnapshot {
+    match shell_stdout.and_then(parse_agent_env) {
+        Some(snap) => snap,
+        None => AgentEnvSnapshot {
+            unverified: Some(
+                "could not read the login shell's environment, which Claude runs with; \
+                 checked doctor's own instead"
+                    .to_string(),
+            ),
+            ..process_env_snapshot()
+        },
     }
 }
 
@@ -1327,10 +1353,8 @@ async fn agent_env_snapshot() -> AgentEnvSnapshot {
         return process_env_snapshot();
     }
     let script = agent_env_script();
-    match run_claude_quietly("sh", &["-c", &script]).await {
-        Some((out, _)) => parse_agent_env(&out).unwrap_or_else(process_env_snapshot),
-        None => process_env_snapshot(),
-    }
+    let out = run_claude_quietly("sh", &["-c", &script]).await;
+    snapshot_or_fallback(out.as_ref().map(|(o, _)| o.as_str()))
 }
 
 /// Build the probe from Claude's status answer (if any) and the agent's
@@ -1341,17 +1365,31 @@ fn build_claude_probe(
     managed_settings: &[PathBuf],
     is_macos: bool,
 ) -> ClaudeAuthProbe {
-    let credentials = claude_credentials_path(
-        env.config_dir.clone().map(Into::into),
-        env.home.clone().map(PathBuf::from),
-    )
-    .map(|p| read_credentials_file(&p))
-    .unwrap_or(CredentialsFile::Missing);
-    let (settings, global) = claude_config_files(
-        env.config_dir.clone().map(Into::into),
-        env.home.clone().map(PathBuf::from),
-        managed_settings,
-    );
+    // A relative CLAUDE_CONFIG_DIR resolves against the agent's working
+    // directory (the run's checkout, after any `cd` in the login profile),
+    // which doctor does not know. Read neither it nor the home default.
+    let relative_dir = env
+        .config_dir
+        .as_deref()
+        .filter(|d| Path::new(d).is_relative());
+    let (config_dir, home) = match relative_dir {
+        Some(_) => (None, None),
+        None => (
+            env.config_dir.clone().map(Into::into),
+            env.home.clone().map(PathBuf::from),
+        ),
+    };
+    let env_unverified = match relative_dir {
+        Some(dir) => Some(format!(
+            "CLAUDE_CONFIG_DIR is relative ({dir}); doctor cannot tell which directory Claude \
+             reads"
+        )),
+        None => env.unverified.clone(),
+    };
+    let credentials = claude_credentials_path(config_dir.clone(), home.clone())
+        .map(|p| read_credentials_file(&p))
+        .unwrap_or(CredentialsFile::Missing);
+    let (settings, global) = claude_config_files(config_dir, home, managed_settings);
     let auth = resolve_auth_env(&settings, &env.set_vars);
     let provider = resolve_provider_env(&settings, &env.providers);
     ClaudeAuthProbe {
@@ -1363,6 +1401,7 @@ fn build_claude_probe(
         settings_env_var: auth.settings,
         settings_provider: provider.settings,
         stored_api_key: scan_config_key(global.as_slice(), "primaryApiKey"),
+        env_unverified,
         is_macos,
     }
 }
@@ -1974,6 +2013,7 @@ mod tests {
             settings_env_var: ConfigKey::Absent,
             settings_provider: ConfigKey::Absent,
             stored_api_key: ConfigKey::Absent,
+            env_unverified: None,
             is_macos: false,
         }
     }
@@ -2186,6 +2226,7 @@ mod tests {
                 providers: vec![],
                 config_dir: Some("/cfg".into()),
                 home: Some("/home/u".into()),
+                unverified: None,
             })
         );
         let empty = "__pidash_doctor_cfg \n__pidash_doctor_home /home/u\n";
@@ -2218,6 +2259,7 @@ mod tests {
                 providers: vec!["CLAUDE_CODE_USE_BEDROCK".into()],
                 config_dir: Some("/cfg dir".into()),
                 home: Some("/home/u".into()),
+                unverified: None,
             })
         );
     }
@@ -2230,6 +2272,7 @@ mod tests {
             providers: vec!["CLAUDE_CODE_USE_VERTEX".into()],
             config_dir: None,
             home: None,
+            unverified: None,
         };
         let p = build_claude_probe(None, &env, &[], false);
         assert_eq!(p.env_var, Some("ANTHROPIC_API_KEY"));
@@ -2256,6 +2299,59 @@ mod tests {
         };
         let p = build_claude_probe(None, &env, &[], false);
         assert!(matches!(p.credentials, CredentialsFile::Found(_)));
+    }
+
+    #[test]
+    fn failed_login_shell_snapshot_is_unverified() {
+        // No shell output, or output without the script's markers: doctor
+        // fell back to its own environment, which may lack what the login
+        // shell exports.
+        for out in [None, Some("sh: syntax error\n")] {
+            assert!(snapshot_or_fallback(out).unverified.is_some(), "{out:?}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            unverified: Some("could not read the login shell's environment".into()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, &[], false);
+        match classify_claude_auth(&p) {
+            AuthStatus::Unknown(d) => assert!(d.contains("login shell"), "{d}"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        // Another source confirming the login still wins.
+        let env = AgentEnvSnapshot {
+            set_vars: vec!["ANTHROPIC_API_KEY".into()],
+            ..env
+        };
+        let p = build_claude_probe(None, &env, &[], false);
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
+    }
+
+    #[test]
+    fn relative_claude_config_dir_is_unverified() {
+        // A relative CLAUDE_CONFIG_DIR resolves against the agent's working
+        // directory, which doctor does not know: read neither it nor the
+        // home default, and do not call it a logout.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude").join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"t"}}"#,
+        )
+        .unwrap();
+        let env = AgentEnvSnapshot {
+            config_dir: Some("relative-claude-cfg".into()),
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.credentials, CredentialsFile::Missing);
+        match classify_claude_auth(&p) {
+            AuthStatus::Unknown(d) => assert!(d.contains("relative-claude-cfg"), "{d}"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 
     #[test]
