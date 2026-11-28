@@ -1,9 +1,9 @@
 """Contract tests: api-v1 project settings reads and PATCH (NEWPIDASH-278).
 
 Detail reads render the validated settings with defaults (DIFF-53:
-every known key with its default on Rust — ``issue_run_policy`` and,
-since the lean agent workflow, ``agent_stages`` — the raw stored ``{}``
-on Django). PATCH merges a nested
+``issue_run_policy`` defaults to ``creator_and_assignees`` on Rust, the
+raw stored ``{}`` on Django; DIFF-51: Rust fills every other known key,
+such as ``agent_stages``, with its default). PATCH merges a nested
 ``settings`` object. Django's v1 update serializer has no settings
 field (the key is ignored) and reads echo the raw stored blob, so the
 strict PATCH validation on Rust is the deliberate difference DIFF-51.
