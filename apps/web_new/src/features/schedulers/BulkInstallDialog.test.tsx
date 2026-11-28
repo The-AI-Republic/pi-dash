@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, type ProjectDetails, type Scheduler } from "@pidash/api-client";
 import * as React from "react";
@@ -255,6 +255,33 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(field).toHaveFocus();
   });
 
+  it("keeps the picker open when the dialog's open-time focus pass runs after the user opened it", async () => {
+    // A busy host can run the deferred focus pass late: holding the frame
+    // callbacks back lets the user open the picker first.
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    try {
+      contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+      renderDialog();
+      const trigger = await screen.findByRole("button", { name: /project/ }, { timeout: 10_000 });
+      fireEvent.click(trigger);
+      const search = await screen.findByLabelText("Search projects");
+      await waitFor(() => expect(search).toHaveFocus());
+
+      act(() => {
+        for (const callback of frames.splice(0)) callback(performance.now());
+      });
+
+      expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+      expect(search).toHaveFocus();
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
   it("selects every unlocked target, then clears them", async () => {
     contracts.listProjectDetails.mockResolvedValue([
       project({ id: ALPHA, name: "Alpha" }),
@@ -487,6 +514,240 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+  });
+
+  it("closes only the open picker on Escape and keeps the entered values", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.click(screen.getByLabelText("Search projects"));
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("form")).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: /project/ });
+    expect(trigger).toHaveTextContent("1 project selected");
+    expect(trigger).toHaveFocus();
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the trigger", () => screen.getByRole("button", { name: /project/ })],
+    ["a project checkbox", () => screen.getByLabelText(/Alpha/)],
+    ["the select-all button", () => screen.getByRole("button", { name: "Select all" })],
+  ])("closes only the picker on Escape with focus on %s", async (_label, target) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    target().focus();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveFocus();
+  });
+
+  it("leaves Escape to the input method while search text is being composed", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, isComposing: true });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps the repeats of an Escape held through a composition cancel from closing the picker", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    fireEvent.keyDown(search, { key: "Escape", isComposing: true });
+    // Composition has ended, but the key is still down.
+    fireEvent.keyDown(search, { key: "Escape", repeat: true });
+    fireEvent.keyDown(search, { key: "Escape", repeat: true });
+
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A fresh press after the release closes only the picker.
+    fireEvent.keyUp(search, { key: "Escape" });
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["key Process", { key: "Process", keyCode: 229 }],
+    ["key Escape with keyCode 229", { key: "Escape", keyCode: 229 }],
+  ])("keeps a composition-cancel Escape reported as %s from the picker and the dialog", async (_label, init) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("moves focus into the picker's search field when it opens", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await openPicker(user);
+
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+  });
+
+  it("closes only the picker on Escape when the open picker does not hold focus", async () => {
+    // Safari leaves a clicked button unfocused, so the picker can be open
+    // with focus on the dialog itself.
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    const popup = screen.getByRole("dialog");
+    popup.focus();
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveFocus();
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+  });
+
+  it("keeps the picker open after a click on its non-focusable content, and Escape closes only it", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await user.type(screen.getByLabelText("Search projects"), "zzz");
+    await user.click(within(listbox).getByText("No projects match your search."));
+
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes the picker when focus leaves it, so a later Escape is the dialog's", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    screen.getByLabelText("Search projects").focus();
+
+    screen.getByLabelText("Project context (optional)").focus();
+
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument());
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+  });
+
+  it("closes the picker when focus moves on from the dialog it fell back to, so Escape there is the dialog's", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    screen.getByRole("dialog").focus();
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+
+    screen.getByLabelText("Project context (optional)").focus();
+
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it.each([
+    ["isComposing", { isComposing: true }],
+    ["keyCode 229", { keyCode: 229 }],
+  ])("leaves an Enter that confirms an input method candidate (%s) to the input method", async (_label, init) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("does not start the install on Enter in the picker's search field", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    contracts.createSchedulerBinding.mockResolvedValue(binding(ALPHA));
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.click(screen.getByLabelText("Search projects"));
+
+    await user.keyboard("Al{Enter}");
+
+    expect(screen.getByLabelText("Search projects")).toHaveValue("Al");
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps a held Escape that closed the picker from also closing the dialog", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: /project/ });
+    expect(trigger).toHaveFocus();
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("form")).toBeInTheDocument();
+
+    fireEvent.keyUp(trigger, { key: "Escape" });
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("stops holding Escape back once the window loses focus mid-hold", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    await waitFor(() => expect(screen.getByLabelText("Search projects")).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    const trigger = screen.getByRole("button", { name: /project/ });
+    fireEvent.blur(window);
+    fireEvent.keyDown(trigger, { key: "Escape", repeat: true });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
   it("lets the cancel button close without writing", async () => {

@@ -98,6 +98,8 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const searchRef = React.useRef<HTMLInputElement>(null);
   const visible = React.useMemo(() => filterProjects(projects, query), [projects, query]);
   const visibleIds = visible.map((project) => project.id);
   const visibleEligible = visibleIds.filter((id) => !selection.installed.includes(id));
@@ -112,10 +114,98 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
     return () => document.removeEventListener("mousedown", onPointer);
   }, [open]);
 
+  // Opening the popup moves focus into it, so its Escape handling holds even
+  // where a click leaves the trigger unfocused (Safari).
+  React.useEffect(() => {
+    if (open) searchRef.current?.focus();
+  }, [open]);
+
+  // Escape while the popup is open closes the popup only: stopping the event
+  // keeps the enclosing dialog from treating it as its own dismissal, and
+  // focus returns to the trigger so a second Escape closes the dialog. The
+  // document-level capture also covers an open popup that has lost focus to
+  // the dialog itself, such as after a click on its non-focusable content.
+  // An Escape that cancels an input method's composition is kept from the
+  // dialog too, but otherwise left to the input method: the popup stays open,
+  // and so do the repeats of that press if the key stays down after the
+  // composition ends. `isComposing` covers the usual case; the deprecated
+  // `keyCode` 229 is the fallback for browsers (Safari, older Chromium) that
+  // send the composition-ending keydown with `isComposing` already false.
+  React.useEffect(() => {
+    if (!open) return;
+    function onEscape(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      if (event.isComposing || event.keyCode === 229) {
+        holdEscape();
+        return;
+      }
+      if (event.repeat && releaseEscapeRef.current !== null) return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+      holdEscape();
+    }
+    document.addEventListener("keydown", onEscape, true);
+    return () => document.removeEventListener("keydown", onEscape, true);
+  }, [open]);
+
+  // The key repeats of an Escape held down after it closed the popup belong
+  // to that same press, so they are kept from the dialog until the key is
+  // released or pressed afresh: one press never closes both. The window
+  // losing focus also ends the hold, as the release may then never arrive.
+  const releaseEscapeRef = React.useRef<(() => void) | null>(null);
+  function holdEscape(): void {
+    releaseEscapeRef.current?.();
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      if (!event.repeat) {
+        release();
+        return;
+      }
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    function onKeyUp(event: KeyboardEvent): void {
+      if (event.key === "Escape") release();
+    }
+    function release(): void {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", release);
+      releaseEscapeRef.current = null;
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", release);
+    releaseEscapeRef.current = release;
+  }
+  React.useEffect(() => () => releaseEscapeRef.current?.(), []);
+
+  // Focus arriving at another control outside the picker closes the popup,
+  // so Escape from there belongs to that control or the dialog. Watching
+  // where focus arrives, rather than the picker's own blur, also covers focus
+  // that first fell back to the dialog and then moves on. Focus falling back
+  // to an enclosing container (a click on non-focusable popup content) is not
+  // a move to another control: the popup stays open.
+  React.useEffect(() => {
+    if (!open) return;
+    function onFocusIn(event: FocusEvent): void {
+      const root = rootRef.current;
+      const next = event.target;
+      if (root === null || !(next instanceof Node)) return;
+      if (root.contains(next) || next.contains(root)) return;
+      setOpen(false);
+    }
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [open]);
+
   return (
     <div ref={rootRef} className="relative flex flex-col gap-(--space-2)">
       <span className="text-body font-medium text-(--text)">Projects</span>
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -130,11 +220,18 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
           className="shadow-popover absolute top-full left-0 z-10 mt-(--space-1) flex max-h-80 w-full flex-col gap-(--space-2) overflow-hidden rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-3)"
         >
           <Input
+            inputRef={searchRef}
             label="Search projects"
             placeholder="Search projects…"
             aria-label="Search projects"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            // Enter here only searches: it must not submit the install form.
+            // An Enter that confirms an input method candidate is left alone.
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
+            }}
           />
           <div className="flex justify-end">
             <Button
@@ -159,12 +256,10 @@ function BulkInstallForm({
   workspaceSlug,
   scheduler,
   onClose,
-  startsAtRef,
 }: {
   workspaceSlug: string;
   scheduler: Scheduler;
   onClose: () => void;
-  startsAtRef: React.Ref<HTMLInputElement>;
 }): React.ReactElement {
   const queryClient = useQueryClient();
   const projects = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
@@ -172,6 +267,19 @@ function BulkInstallForm({
   const [detecting, setDetecting] = React.useState(true);
   const [submitting, setSubmitting] = React.useState(false);
   const schedule = useScheduleDraft(emptySchedule());
+
+  // The schedule's start field takes the dialog's open-time focus: it is
+  // the first control present the moment the dialog opens, while the
+  // projects picker waits on its read. The form focuses it on mount and the
+  // dialog takes no initial focus of its own (initialFocus={false}): the
+  // kit's deferred pass would pick the header's Close button, and even
+  // pointed at this field it can land after the reader has clicked into a
+  // control or opened the picker, eating their input or closing the picker
+  // on a busy host (NEWFRONT-1055, 1058).
+  const startsAtRef = React.useRef<HTMLInputElement | null>(null);
+  React.useEffect(() => {
+    startsAtRef.current?.focus();
+  }, []);
 
   const joined = React.useMemo(() => joinedProjects(projects.data ?? []), [projects.data]);
 
@@ -294,13 +402,6 @@ function BulkInstallForm({
 }
 
 export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkInstallDialogProps): React.ReactElement {
-  // The schedule's start field takes the dialog's open-time focus: it is
-  // the first control present the moment the dialog opens, while the
-  // projects picker waits on its read. Left to the kit's default, the
-  // deferred initial-focus pass picks the header's Close button and can
-  // land after the reader has clicked into a field, eating their input on a
-  // busy host (NEWFRONT-1055, 1058).
-  const startsAtRef = React.useRef<HTMLInputElement | null>(null);
   return (
     <Dialog
       open={scheduler !== null}
@@ -310,16 +411,10 @@ export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkIns
       title={scheduler === null ? "Install scheduler" : `Install ${scheduler.name}`}
       description="One schedule applies to every selected project."
       className="max-w-2xl"
-      initialFocus={startsAtRef}
+      initialFocus={false}
     >
       {scheduler === null ? null : (
-        <BulkInstallForm
-          key={scheduler.id}
-          workspaceSlug={workspaceSlug}
-          scheduler={scheduler}
-          onClose={onClose}
-          startsAtRef={startsAtRef}
-        />
+        <BulkInstallForm key={scheduler.id} workspaceSlug={workspaceSlug} scheduler={scheduler} onClose={onClose} />
       )}
     </Dialog>
   );
