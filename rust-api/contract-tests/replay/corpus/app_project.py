@@ -16,6 +16,7 @@ estimate-point endpoints.
 from psycopg.rows import dict_row
 
 from ..session import Request, Session
+from ._settings import SETTINGS_DEFAULTS_JOB_PINS, SETTINGS_DEFAULTS_PIN
 
 # Fixed newcomer id (seeded by _seed_extras, addressed as {newcomer}).
 NEWCOMER_ID = "bbbbbbbb-0000-4000-8000-000000000002"
@@ -153,6 +154,9 @@ SESSIONS = (
         generated_columns={
             "project_member_invites": ["token"],
         },
+        # Rust renders the settings defaults into the project webhook's
+        # before-image too (DIFF-51; see _settings.py).
+        payload_value_diffs=SETTINGS_DEFAULTS_JOB_PINS,
         # NOTE (rebase): PIDASHCONV-870 landed (fced7590); the default
         # pod pin tripped stale and was removed.
         requests=(
@@ -161,6 +165,7 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/",
                 json={"name": "Replay Proj2", "identifier": "RPJ2"},
                 auth="admin", capture={"proj2": "id"}, expect_status=201,
+                known_body_diffs=[SETTINGS_DEFAULTS_PIN],
             ),
             Request(
                 "POST", "/api/workspaces/{ws}/projects/",
@@ -179,6 +184,7 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{pk}/",
                 json={"name": "Renamed", "description": "new desc"},
                 auth="admin", expect_status=200,
+                known_body_diffs=[SETTINGS_DEFAULTS_PIN],
             ),
             Request(
                 "PUT", _P2 + "/",
@@ -206,6 +212,7 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/projects/{pk}/",
                 json={"estimate": "{est}"},
                 auth="admin", expect_status=200,
+                known_body_diffs=[SETTINGS_DEFAULTS_PIN],
             ),
             Request(
                 "PATCH", _P2 + "/estimates/{est}/",
