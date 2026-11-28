@@ -31,12 +31,25 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // Agent auth depends on the environment the agent is spawned from, which
     // is the daemon's, not this terminal's. Ask the running daemon to run
     // the suite; only check in-process when no daemon answers.
-    let report = match report_from_daemon(&paths.ipc_socket_path(), args.runner.as_deref()).await {
+    let report = match report_from_daemon(
+        &paths.ipc_socket_path(),
+        args.runner.as_deref(),
+        &paths.config_dir,
+        DAEMON_DOCTOR_TIMEOUT,
+    )
+    .await
+    {
         DaemonReport::Report(report) => report,
         DaemonReport::Error(message) => anyhow::bail!("{message}"),
+        DaemonReport::OtherConfig(message) => {
+            tracing::debug!("not using the running daemon for doctor: {message}");
+            let mut report = execute(paths, args.runner.as_deref()).await?;
+            mark_local_checks(&mut report, OTHER_CONFIG_NOTE);
+            report
+        }
         DaemonReport::Unavailable => {
             let mut report = execute(paths, args.runner.as_deref()).await?;
-            mark_local_checks(&mut report);
+            mark_local_checks(&mut report, LOCAL_CHECK_NOTE);
             report
         }
     };
@@ -200,7 +213,10 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
         }
     }
 
-    Ok(Report { checks })
+    Ok(Report {
+        checks,
+        daemon_probe_version: None,
+    })
 }
 
 /// Run the agent binary + auth checks for one runner. `prefix` is `Some(name)`
@@ -296,6 +312,10 @@ async fn run_agent_checks(
                 AuthStatus::Unknown("skipped: the claude CLI is not runnable".to_string())
             };
             checks.push(auth.into_check(tag("claude-auth")));
+            checks.push(claude_pickup_check(
+                tag("claude-pickup"),
+                crate::agent::auth::has_claude_credentials(),
+            ));
         }
         crate::config::schema::AgentKind::CursorAgent => {
             match check_version(cursor_binary).await {
@@ -559,7 +579,7 @@ struct ClaudeStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CredentialsFile {
-    /// Holds a `claudeAiOauth` entry.
+    /// Holds a `claudeAiOauth` entry with a token.
     Found(PathBuf),
     /// Exists but is not in a format we recognise.
     Unrecognized(PathBuf),
@@ -743,7 +763,13 @@ fn parse_claude_status(stdout: &str) -> Option<ClaudeStatus> {
 /// An older CLI without it prints the top-level help instead; running
 /// `claude auth status` there would treat the words as a prompt.
 fn supports_auth_status(help_output: &str) -> bool {
-    help_output.contains("claude auth status")
+    // Match the usage line itself, so a shell banner that merely mentions
+    // the subcommand does not count.
+    help_output.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("Usage:")
+            .is_some_and(|rest| rest.trim_start().starts_with("claude auth status"))
+    })
 }
 
 fn claude_credentials_path(
@@ -886,7 +912,12 @@ fn read_credentials_file(path: &Path) -> CredentialsFile {
         };
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) if v.get("claudeAiOauth").is_some_and(|o| o.is_object()) => {
+        // An OAuth record counts only when it holds a token.
+        Ok(v)
+            if v.get("claudeAiOauth").is_some_and(|o| {
+                non_empty_str(o.get("accessToken")) || non_empty_str(o.get("refreshToken"))
+            }) =>
+        {
             CredentialsFile::Found(path.to_path_buf())
         }
         _ => CredentialsFile::Unrecognized(path.to_path_buf()),
@@ -1049,7 +1080,7 @@ fn build_claude_probe(
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
         settings_env_var: scan_configs(&settings, read_settings_env_auth),
         settings_provider: scan_configs(&settings, read_settings_env_provider),
-        stored_api_key: scan_config_key(&Vec::from_iter(global), "primaryApiKey"),
+        stored_api_key: scan_config_key(global.as_slice(), "primaryApiKey"),
         is_macos,
     }
 }
@@ -1070,10 +1101,21 @@ async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
 const LOCAL_CHECK_NOTE: &str =
     "[checked in this terminal; the daemon is not running, so its environment may differ]";
 
-fn mark_local_checks(report: &mut Report) {
+/// Like [`LOCAL_CHECK_NOTE`], when the running daemon uses another config.
+const OTHER_CONFIG_NOTE: &str = "[checked in this terminal; the running daemon uses another \
+     config dir, so this config's runs may see a different environment]";
+
+/// Checks whose answer depends on the environment they ran in.
+fn is_env_dependent(name: &str) -> bool {
+    ["claude-auth", "claude-pickup"]
+        .iter()
+        .any(|base| name == *base || name.starts_with(&format!("{base}@")))
+}
+
+fn mark_local_checks(report: &mut Report, note: &str) {
     for c in &mut report.checks {
-        if c.name == "claude-auth" || c.name.starts_with("claude-auth@") {
-            c.detail = format!("{} {LOCAL_CHECK_NOTE}", c.detail);
+        if is_env_dependent(&c.name) {
+            c.detail = format!("{} {note}", c.detail);
         }
     }
 }
@@ -1082,26 +1124,135 @@ fn mark_local_checks(report: &mut Report) {
 enum DaemonReport {
     /// The running daemon ran the suite in its own environment.
     Report(Report),
-    /// The daemon answered with an error (e.g. an unknown `--runner`).
+    /// The daemon was reached but gave no usable report: an error (e.g. an
+    /// unknown `--runner`), a timeout, or a report from an older daemon.
     Error(String),
+    /// The running daemon uses another config dir than the one asked
+    /// about; check in this process instead.
+    OtherConfig(String),
     /// No daemon answered; check in this process instead.
     Unavailable,
 }
 
-/// Ask the running daemon to run doctor (`DoctorRun` over IPC).
-async fn report_from_daemon(socket: &Path, runner: Option<&str>) -> DaemonReport {
+/// Version of the Claude auth probe a daemon stamps on its `DoctorRun`
+/// report. A daemon that predates the probe leaves it unset.
+pub const CLAUDE_AUTH_PROBE_VERSION: u32 = 1;
+/// `DoctorRun` error code: the daemon uses another config dir.
+pub const CONFIG_MISMATCH_CODE: i64 = 409;
+/// How long the daemon may spend on `DoctorRun` before it gives up.
+pub const DAEMON_DOCTOR_BUDGET: std::time::Duration = std::time::Duration::from_secs(170);
+/// How long the CLI waits for the daemon: the budget plus a margin, so the
+/// daemon's own "did not finish" error normally arrives first.
+const DAEMON_DOCTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(185);
+
+/// Whether the daemon's pre-pickup gate (`agent::auth::has_claude_credentials`:
+/// the daemon process's env plus the legacy login files) lets Claude runs
+/// through. Reported apart from `claude-auth`: a key exported only by the
+/// login shell passes the auth probe but not this gate.
+fn claude_pickup_check(name: String, present: bool) -> Check {
+    Check {
+        name,
+        ok: present,
+        detail: if present {
+            "the daemon's pre-pickup credential check passes".to_string()
+        } else {
+            format!(
+                "the daemon refuses Claude runs before starting them: its pre-pickup check finds \
+                 no ANTHROPIC_API_KEY in the daemon process's own environment and none of \
+                 ~/.claude.json, ~/.claude/credentials.json, ~/.config/claude/auth.json \
+                 (a key exported only in shell rc files does not count); {}",
+                crate::agent::auth::CLAUDE_FIX_HINT
+            )
+        },
+        blocker: false,
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
+/// The daemon's side of `DoctorRun`: refuse a request about another config
+/// dir, bound the suite by `budget`, and stamp the probe version.
+pub async fn daemon_doctor(
+    paths: &Paths,
+    runner: Option<&str>,
+    config_dir: Option<PathBuf>,
+    budget: std::time::Duration,
+) -> crate::ipc::protocol::Response {
+    use crate::ipc::protocol::{Response, RpcError};
+    if let Some(wanted) = config_dir
+        && !same_dir(&wanted, &paths.config_dir)
+    {
+        return Response::Error(RpcError {
+            code: CONFIG_MISMATCH_CODE,
+            message: format!(
+                "the running daemon uses config dir {}, not {}",
+                paths.config_dir.display(),
+                wanted.display()
+            ),
+        });
+    }
+    match tokio::time::timeout(budget, execute(paths, runner)).await {
+        Ok(Ok(mut report)) => {
+            report.daemon_probe_version = Some(CLAUDE_AUTH_PROBE_VERSION);
+            Response::Doctor(report)
+        }
+        Ok(Err(e)) => Response::Error(RpcError {
+            code: 400,
+            message: e.to_string(),
+        }),
+        Err(_) => Response::Error(RpcError {
+            code: 504,
+            message: format!(
+                "the daemon's doctor checks did not finish within {}s; \
+                 retry with `--runner <name>` to check one runner",
+                budget.as_secs()
+            ),
+        }),
+    }
+}
+
+/// Ask the running daemon to run doctor (`DoctorRun` over IPC) for
+/// `config_dir`. Only a failed connect means "no daemon"; once connected,
+/// every other outcome is reported rather than silently re-run here.
+async fn report_from_daemon(
+    socket: &Path,
+    runner: Option<&str>,
+    config_dir: &Path,
+    timeout: std::time::Duration,
+) -> DaemonReport {
     use crate::ipc::protocol::{Request, Response};
     let Ok(mut client) = crate::ipc::client::Client::connect(socket).await else {
         return DaemonReport::Unavailable;
     };
     let call = client.call(Request::DoctorRun {
         runner: runner.map(str::to_string),
+        config_dir: Some(config_dir.to_path_buf()),
     });
-    // Each agent probe is bounded at 15s; leave room for several runners.
-    match tokio::time::timeout(std::time::Duration::from_secs(180), call).await {
-        Ok(Ok(Response::Doctor(report))) => DaemonReport::Report(report),
+    match tokio::time::timeout(timeout, call).await {
+        Ok(Ok(Response::Doctor(report))) => match report.daemon_probe_version {
+            Some(v) if v >= CLAUDE_AUTH_PROBE_VERSION => DaemonReport::Report(report),
+            _ => DaemonReport::Error(
+                "the running daemon is an older build whose doctor does not check the Claude \
+                 login; restart it with `pidash restart` and run doctor again"
+                    .to_string(),
+            ),
+        },
+        Ok(Ok(Response::Error(e))) if e.code == CONFIG_MISMATCH_CODE => {
+            DaemonReport::OtherConfig(e.message)
+        }
         Ok(Ok(Response::Error(e))) => DaemonReport::Error(e.message),
-        _ => DaemonReport::Unavailable,
+        Ok(Ok(other)) => {
+            DaemonReport::Error(format!("unexpected answer from the daemon: {other:?}"))
+        }
+        Ok(Err(e)) => DaemonReport::Error(format!("the daemon connection failed: {e}")),
+        Err(_) => DaemonReport::Error(format!(
+            "the daemon did not answer doctor within {}s; it is running, so its checks were \
+             not repeated here; retry with `--runner <name>` to check one runner",
+            timeout.as_secs()
+        )),
     }
 }
 
@@ -1601,6 +1752,14 @@ mod tests {
         assert!(!supports_auth_status(
             "Usage: claude [options] [command] [prompt]\n\nClaude Code"
         ));
+        // A login-shell banner that mentions the subcommand is not its usage.
+        assert!(!supports_auth_status(
+            "tip: run `claude auth status` to check your login\n\
+             Usage: claude [options] [command] [prompt]"
+        ));
+        assert!(supports_auth_status(
+            "welcome\n  Usage:   claude auth status [options]"
+        ));
     }
 
     #[test]
@@ -1617,6 +1776,23 @@ mod tests {
         assert_eq!(
             read_credentials_file(&path),
             CredentialsFile::Unrecognized(path.clone())
+        );
+        // An OAuth record without a token is not a login.
+        for body in [
+            r#"{"claudeAiOauth":{}}"#,
+            r#"{"claudeAiOauth":{"accessToken":"  "}}"#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                read_credentials_file(&path),
+                CredentialsFile::Unrecognized(path.clone()),
+                "{body}"
+            );
+        }
+        std::fs::write(&path, r#"{"claudeAiOauth":{"refreshToken":"r"}}"#).unwrap();
+        assert_eq!(
+            read_credentials_file(&path),
+            CredentialsFile::Found(path.clone())
         );
     }
 
@@ -1972,8 +2148,9 @@ mod tests {
                     blocker: true,
                 },
             ],
+            daemon_probe_version: None,
         };
-        mark_local_checks(&mut report);
+        mark_local_checks(&mut report, LOCAL_CHECK_NOTE);
         assert!(report.checks[0].detail.contains(LOCAL_CHECK_NOTE));
         assert_eq!(report.checks[1].detail, "git 2");
     }
@@ -1981,39 +2158,31 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn doctor_uses_running_daemon_report() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("pidash.sock");
         // No daemon: caller falls back to a local check.
         assert!(matches!(
-            report_from_daemon(&sock, None).await,
+            report_from_daemon(&sock, None, dir.path(), DAEMON_DOCTOR_TIMEOUT).await,
             DaemonReport::Unavailable
         ));
-        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = BufReader::new(stream);
-            let mut line = String::new();
-            stream.read_line(&mut line).await.unwrap();
-            let req: crate::ipc::protocol::Request = serde_json::from_str(line.trim()).unwrap();
-            assert!(matches!(
-                req,
-                crate::ipc::protocol::Request::DoctorRun { runner: Some(ref r) } if r == "alpha"
-            ));
-            let resp = crate::ipc::protocol::Response::Doctor(Report {
+        let server = fake_daemon(
+            &sock,
+            Some(crate::ipc::protocol::Response::Doctor(Report {
                 checks: vec![
                     AuthStatus::LoggedIn("daemon env".into()).into_check("claude-auth".into()),
                 ],
-            });
-            let mut out = serde_json::to_vec(&resp).unwrap();
-            out.push(b'\n');
-            stream.get_mut().write_all(&out).await.unwrap();
-        });
-        match report_from_daemon(&sock, Some("alpha")).await {
+                daemon_probe_version: Some(CLAUDE_AUTH_PROBE_VERSION),
+            })),
+        );
+        match report_from_daemon(&sock, Some("alpha"), dir.path(), DAEMON_DOCTOR_TIMEOUT).await {
             DaemonReport::Report(r) => assert_eq!(r.checks[0].detail, "daemon env"),
             other => panic!("expected daemon report, got {other:?}"),
         }
-        server.await.unwrap();
+        let req = server.await.unwrap();
+        assert!(matches!(
+            req,
+            crate::ipc::protocol::Request::DoctorRun { runner: Some(ref r), .. } if r == "alpha"
+        ));
     }
 
     #[tokio::test]
@@ -2084,5 +2253,180 @@ mod tests {
             argv.lines().collect::<Vec<_>>(),
             vec!["auth status --help", "auth status"]
         );
+    }
+
+    #[test]
+    fn claude_pickup_check_reports_the_daemon_gate() {
+        let ok = claude_pickup_check("claude-pickup".into(), true);
+        assert!(ok.ok && !ok.blocker, "{ok:?}");
+        let refused = claude_pickup_check("claude-pickup".into(), false);
+        assert!(!refused.ok && !refused.blocker, "{refused:?}");
+        assert!(
+            refused.detail.contains("refuses Claude runs"),
+            "{refused:?}"
+        );
+        assert!(refused.detail.contains("ANTHROPIC_API_KEY"), "{refused:?}");
+    }
+
+    #[tokio::test]
+    async fn claude_runner_reports_pickup_gate_and_local_label() {
+        let mut checks: Vec<Check> = Vec::new();
+        run_agent_checks(
+            &mut checks,
+            Some("a"),
+            AgentKind::ClaudeCode,
+            "codex-missing",
+            "/nonexistent/claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
+            "agy-missing",
+            "muse-missing",
+            false,
+        )
+        .await;
+        assert!(
+            checks.iter().any(|c| c.name == "claude-pickup@a"),
+            "{checks:?}"
+        );
+        let mut report = Report {
+            checks,
+            daemon_probe_version: None,
+        };
+        mark_local_checks(&mut report, LOCAL_CHECK_NOTE);
+        let pickup = report
+            .checks
+            .iter()
+            .find(|c| c.name == "claude-pickup@a")
+            .unwrap();
+        assert!(pickup.detail.contains(LOCAL_CHECK_NOTE), "{pickup:?}");
+    }
+
+    /// A fake daemon that answers one request with `resp` (or never, when
+    /// `None`), returning the request it received.
+    #[cfg(unix)]
+    fn fake_daemon(
+        sock: &Path,
+        resp: Option<crate::ipc::protocol::Response>,
+    ) -> tokio::task::JoinHandle<crate::ipc::protocol::Request> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::UnixListener::bind(sock).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let req = serde_json::from_str(line.trim()).unwrap();
+            match resp {
+                Some(resp) => {
+                    let mut out = serde_json::to_vec(&resp).unwrap();
+                    out.push(b'\n');
+                    stream.get_mut().write_all(&out).await.unwrap();
+                }
+                None => tokio::time::sleep(std::time::Duration::from_secs(30)).await,
+            }
+            req
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_daemon_report_asks_for_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pidash.sock");
+        let server = fake_daemon(
+            &sock,
+            Some(crate::ipc::protocol::Response::Doctor(Report {
+                checks: vec![],
+                daemon_probe_version: None,
+            })),
+        );
+        match report_from_daemon(&sock, None, dir.path(), DAEMON_DOCTOR_TIMEOUT).await {
+            DaemonReport::Error(m) => assert!(m.contains("pidash restart"), "{m}"),
+            other => panic!("expected restart error, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_daemon_is_a_timeout_not_a_missing_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pidash.sock");
+        let _server = fake_daemon(&sock, None);
+        match report_from_daemon(
+            &sock,
+            None,
+            dir.path(),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        {
+            DaemonReport::Error(m) => assert!(m.contains("did not answer"), "{m}"),
+            other => panic!("expected timeout error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_on_another_config_dir_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pidash.sock");
+        let server = fake_daemon(
+            &sock,
+            Some(crate::ipc::protocol::Response::Error(
+                crate::ipc::protocol::RpcError {
+                    code: CONFIG_MISMATCH_CODE,
+                    message: "daemon uses /elsewhere".into(),
+                },
+            )),
+        );
+        let wanted = dir.path().join("other");
+        match report_from_daemon(&sock, Some("beta"), &wanted, DAEMON_DOCTOR_TIMEOUT).await {
+            DaemonReport::OtherConfig(m) => assert!(m.contains("/elsewhere"), "{m}"),
+            other => panic!("expected other-config, got {other:?}"),
+        }
+        let req = server.await.unwrap();
+        assert!(
+            matches!(
+                req,
+                crate::ipc::protocol::Request::DoctorRun {
+                    runner: Some(ref r),
+                    config_dir: Some(ref c),
+                } if r == "beta" && c == &wanted
+            ),
+            "{req:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_doctor_checks_config_dir_and_stamps_probe_version() {
+        let (_dir, paths) = temp_paths();
+        let other = paths.config_dir.join("elsewhere");
+        match daemon_doctor(&paths, None, Some(other), DAEMON_DOCTOR_BUDGET).await {
+            crate::ipc::protocol::Response::Error(e) => {
+                assert_eq!(e.code, CONFIG_MISMATCH_CODE, "{e:?}")
+            }
+            other => panic!("expected mismatch, got {other:?}"),
+        }
+        match daemon_doctor(
+            &paths,
+            None,
+            Some(paths.config_dir.clone()),
+            DAEMON_DOCTOR_BUDGET,
+        )
+        .await
+        {
+            crate::ipc::protocol::Response::Doctor(r) => {
+                assert_eq!(r.daemon_probe_version, Some(CLAUDE_AUTH_PROBE_VERSION))
+            }
+            other => panic!("expected report, got {other:?}"),
+        }
+        match daemon_doctor(&paths, None, None, std::time::Duration::ZERO).await {
+            crate::ipc::protocol::Response::Error(e) => {
+                assert!(e.message.contains("did not finish"), "{e:?}")
+            }
+            other => panic!("expected budget error, got {other:?}"),
+        }
     }
 }

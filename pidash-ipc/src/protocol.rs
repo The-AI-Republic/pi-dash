@@ -197,6 +197,11 @@ pub enum Request {
     DoctorRun {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
+        /// The config dir the client asked about. A daemon using another
+        /// one answers with an error instead of reporting on its own
+        /// config. Omitted by older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_dir: Option<std::path::PathBuf>,
     },
     /// Legacy reconnect verb: kicks every runner's reconnect, like
     /// [`Request::Reconnect`] with no selector.

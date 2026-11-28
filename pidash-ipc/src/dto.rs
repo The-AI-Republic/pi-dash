@@ -223,6 +223,11 @@ pub struct ExecCommandSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub checks: Vec<Check>,
+    /// Version of the Claude auth probe, set only by a daemon that ran the
+    /// suite for `DoctorRun`. `None` for in-process runs and for daemons
+    /// that predate the probe, whose Claude check only looks for files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_probe_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

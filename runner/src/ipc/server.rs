@@ -358,10 +358,13 @@ impl IpcServer {
                 }
                 anyhow::bail!("approval not found or already resolved");
             }
-            Request::DoctorRun { runner } => {
-                let report = crate::cli::doctor::execute(&self.paths, runner.as_deref()).await?;
-                Ok(Response::Doctor(report))
-            }
+            Request::DoctorRun { runner, config_dir } => Ok(crate::cli::doctor::daemon_doctor(
+                &self.paths,
+                runner.as_deref(),
+                config_dir,
+                crate::cli::doctor::DAEMON_DOCTOR_BUDGET,
+            )
+            .await),
             Request::RunnerReconnect => {
                 self.spawn_ctx.kick_reconnect(None)?;
                 Ok(Response::Ack)
