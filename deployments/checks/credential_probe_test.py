@@ -113,7 +113,7 @@ class FakePostgres(FakeServer):
         self.seen.append((user, database))
         if self.hba_reject:
             return self.error(
-                conn, "28000", f'no pg_hba.conf entry for host "172.18.0.5", user "{user}", database "{database}", no encryption'
+                conn, "28000", f'no pg_hba.conf entry for host "192.0.2.5", user "{user}", database "{database}", no encryption'
             )
         if user not in self.roles:
             return self.error(conn, "28000", f'role "{user}" does not exist')
@@ -295,12 +295,12 @@ class ProbeTest(unittest.TestCase):
         probe = {}
         exec(compile(self.source, "probe", "exec"), probe)
         refusal = probe["postgres_refusal"]
-        prefix = 'connection failed: connection to server at "172.18.0.2", port 5432 failed: '
+        prefix = 'connection failed: connection to server at "192.0.2.2", port 5432 failed: '
         for text in (
             prefix + 'FATAL:  password authentication failed for user "pi-dash"',
             prefix + 'FATAL:  role "pi-dash" does not exist',
             prefix + 'FATAL:  database "pi-dash" does not exist',
-            prefix + 'FATAL:  no pg_hba.conf entry for host "172.18.0.5", user "pi-dash", database "pi-dash", no encryption',
+            prefix + 'FATAL:  no pg_hba.conf entry for host "192.0.2.5", user "pi-dash", database "pi-dash", no encryption',
             prefix + 'FATAL:  permission denied for database "pi-dash"\nDETAIL:  User does not have CONNECT privilege.',
         ):
             self.assertTrue(refusal(text), text)
