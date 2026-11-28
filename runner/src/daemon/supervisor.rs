@@ -8490,9 +8490,10 @@ mod tests {
             .await
             .unwrap();
         drop(worker);
-        drop(coord);
-        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
-        let pending = after_crash.terminal_pending();
+        // Read the store the crashed daemon would replay: reopening the
+        // queue here could race a sibling test's child that briefly holds
+        // the queue lock's inherited descriptor.
+        let pending = coord.terminal_pending();
         assert_eq!(pending.len(), 1);
         let replayed: ClientMsg =
             serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
