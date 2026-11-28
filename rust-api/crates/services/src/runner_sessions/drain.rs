@@ -323,11 +323,15 @@ pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"ag
 /// engines take legacy `managed_runner` runs pinned to them always,
 /// plus pins and the pod queue while they take pod work
 /// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
-fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
+fn eligible_condition(
+    runner_id: Uuid,
+    alive_after: DateTime<Utc>,
+    facts: &DispatchFacts,
+) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
     let managed = AgentExecutorKind::PidashAgent.value();
     let pinned = col("agent_run", "pinned_runner_id");
-    let borrowed = borrowed_locality_condition(runner_id);
+    let borrowed = borrowed_locality_condition(runner_id, alive_after);
     if facts.is_pidash_agent {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
@@ -372,11 +376,17 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
 
 /// Another runner's locality pin while that runner is working
 /// (PDASHOSS01-419). A locality pin is a best-effort hint, so while the
-/// runner it names holds a busy-status run it is pod work: an idle pod
-/// member takes it rather than idling while the run waits. It ranks last
-/// ([`rank_expr`]) and its pin is dropped when it is taken
-/// ([`release_borrowed_pin_stmts`]). Dedicated pins are never borrowed.
-pub(crate) fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
+/// runner it names is online (`online`/`busy`, heartbeat at or after
+/// `alive_after`) and holds a busy-status run it is pod work: an idle pod
+/// member takes it rather than idling while the run waits. A silent
+/// runner's pins are left to the offline pin-release sweep and its grace
+/// period. It ranks last ([`rank_expr`]) and its pin is dropped when it
+/// is taken ([`release_borrowed_pin_stmts`]). Dedicated pins are never
+/// borrowed.
+pub(crate) fn borrowed_locality_condition(
+    runner_id: Uuid,
+    alive_after: DateTime<Utc>,
+) -> Condition {
     let statuses: Vec<SimpleExpr> = BUSY_STATUSES
         .iter()
         .map(|status| status.value().into())
@@ -391,11 +401,23 @@ pub(crate) fn borrowed_locality_condition(runner_id: Uuid) -> Condition {
         .and_where(col("U9", "runner_id").eq(col("agent_run", "pinned_runner_id")))
         .limit(1u64)
         .to_owned();
+    let pinned_is_online = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("runner"), Alias::new("U8"))
+        .and_where(col("U8", "id").eq(col("agent_run", "pinned_runner_id")))
+        .and_where(col("U8", "status").is_in(["online", "busy"]))
+        .and_where(col("U8", "last_heartbeat_at").gte(alive_after))
+        .limit(1u64)
+        .to_owned();
     Condition::all()
         .add(col("agent_run", "executor_kind").eq(AgentExecutorKind::LocalRunner.value()))
         .add(col("agent_run", "pin_kind").eq("locality"))
         .add(col("agent_run", "pinned_runner_id").is_not_null())
         .add(col("agent_run", "pinned_runner_id").ne(runner_id))
+        .add(Expr::exists(pinned_is_online))
         .add(Expr::exists(pinned_is_working))
 }
 
@@ -495,6 +517,7 @@ pub fn next_for_runner_stmt(
     pod_id: Uuid,
     runner_id: Uuid,
     owner_id: Uuid,
+    alive_after: DateTime<Utc>,
     facts: &DispatchFacts,
 ) -> Option<SelectStatement> {
     let usability = runs_usable_by_runner_predicate(
@@ -528,7 +551,7 @@ pub fn next_for_runner_stmt(
         ]))
         .and_where(col("agent_run", "pod_id").eq(pod_id))
         .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))
-        .cond_where(eligible_condition(runner_id, facts))
+        .cond_where(eligible_condition(runner_id, alive_after, facts))
         .cond_where(usability)
         .order_by(Alias::new("_is_mine"), Order::Asc)
         .order_by(("agent_run", "created_at"), Order::Asc)
@@ -1027,6 +1050,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("manual arm"),
@@ -1061,6 +1085,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(true, false),
             )
             .expect("engine arm"),
@@ -1087,6 +1112,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(false, false),
             )
             .expect("pinned engine"),
@@ -1111,6 +1137,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &engine_facts(true, true),
             )
             .expect("paused engine"),
@@ -1133,8 +1160,15 @@ mod tests {
         let mut facts = manual_facts();
         facts.last_dedicated = true;
         let sql = render(
-            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &facts)
-                .expect("alternation"),
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &facts,
+            )
+            .expect("alternation"),
         );
         assert!(sql.contains("\"pin_kind\" = 'locality'"));
         assert!(sql.contains("\"pin_kind\" = 'dedicated'"));
@@ -1146,6 +1180,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("today rank"),
@@ -1173,12 +1208,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let borrowed = format!(
-            "(\"agent_run\".\"executor_kind\" = 'local_runner' AND \"agent_run\".\"pin_kind\" = 'locality' AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"pinned_runner_id\" <> '{RUNNER_ID}' AND EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" AS \"U9\" WHERE \"U9\".\"status\" IN ({busy}) AND \"U9\".\"runner_id\" = \"agent_run\".\"pinned_runner_id\" LIMIT 1))"
+            "(\"agent_run\".\"executor_kind\" = 'local_runner' AND \"agent_run\".\"pin_kind\" = 'locality' AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"pinned_runner_id\" <> '{RUNNER_ID}' AND EXISTS(SELECT 1 AS \"a\" FROM \"runner\" AS \"U8\" WHERE \"U8\".\"id\" = \"agent_run\".\"pinned_runner_id\" AND \"U8\".\"status\" IN ('online', 'busy') AND \"U8\".\"last_heartbeat_at\" >= '2026-11-06 07:36:52.000000 +00:00' LIMIT 1) AND EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" AS \"U9\" WHERE \"U9\".\"status\" IN ({busy}) AND \"U9\".\"runner_id\" = \"agent_run\".\"pinned_runner_id\" LIMIT 1))"
         );
         for facts in [manual_facts(), engine_facts(true, false)] {
             let sql = render(
-                &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &facts)
-                    .expect("pod member"),
+                &next_for_runner_stmt(
+                    VISIBILITY_PRIVATE,
+                    pod(),
+                    runner(),
+                    owner(),
+                    threshold(),
+                    &facts,
+                )
+                .expect("pod member"),
             );
             assert!(sql.contains(&borrowed), "{sql}");
             // Borrowed pins rank last, after own pins and the shared queue.
@@ -1192,8 +1234,15 @@ mod tests {
         let mut alternating = manual_facts();
         alternating.last_dedicated = true;
         let sql = render(
-            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &alternating)
-                .expect("alternation"),
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &alternating,
+            )
+            .expect("alternation"),
         );
         // After a dedicated run the runner owes shared work: a borrowed
         // pin (2) ranks behind the unpinned queue (1) but ahead of its
@@ -1214,8 +1263,15 @@ mod tests {
             engine_facts(true, true),
         ] {
             let sql = render(
-                &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &facts)
-                    .expect("no pod work"),
+                &next_for_runner_stmt(
+                    VISIBILITY_PRIVATE,
+                    pod(),
+                    runner(),
+                    owner(),
+                    threshold(),
+                    &facts,
+                )
+                .expect("no pod work"),
             );
             assert!(!sql.contains("\"U9\""), "{sql}");
         }
@@ -1259,8 +1315,15 @@ mod tests {
             last_dedicated: false,
         };
         let sql = render(
-            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &team)
-                .expect("team engine"),
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                threshold(),
+                &team,
+            )
+            .expect("team engine"),
         );
         assert!(sql.contains("\"agent_run\".\"owner_id\""));
         assert!(!sql.contains("NOT IN"));
@@ -1269,10 +1332,19 @@ mod tests {
 
     #[test]
     fn next_for_runner_non_private_selects_nothing() {
-        assert!(next_for_runner_stmt(99, pod(), runner(), owner(), &manual_facts()).is_none());
         assert!(
-            next_for_runner_stmt(1, pod(), runner(), owner(), &engine_facts(true, false)).is_none()
+            next_for_runner_stmt(99, pod(), runner(), owner(), threshold(), &manual_facts())
+                .is_none()
         );
+        assert!(next_for_runner_stmt(
+            1,
+            pod(),
+            runner(),
+            owner(),
+            threshold(),
+            &engine_facts(true, false)
+        )
+        .is_none());
     }
 
     #[test]
@@ -1283,6 +1355,7 @@ mod tests {
                 pod(),
                 runner(),
                 owner(),
+                threshold(),
                 &manual_facts(),
             )
             .expect("manual"),

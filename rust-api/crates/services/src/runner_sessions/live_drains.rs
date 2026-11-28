@@ -421,6 +421,7 @@ async fn drain_for_runner(
         pod_id,
         runner_id,
         owner_id,
+        threshold,
         &facts,
     ) else {
         txn.commit().await?;
@@ -528,6 +529,7 @@ async fn drain_pod(
             pod_id,
             runner_id,
             owner_id,
+            threshold,
             &facts,
         ) else {
             continue;

@@ -291,7 +291,8 @@ pub(crate) async fn drain_pod_by_id(
                 }
             }
         };
-        let Some(next_stmt) = next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, &facts)
+        let Some(next_stmt) =
+            next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, threshold, &facts)
         else {
             continue;
         };

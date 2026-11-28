@@ -1485,6 +1485,7 @@ pub async fn runs_ahead(
                     .add(agent_run::Column::PinnedRunnerId.is_null())
                     .add(crate::runner_sessions::drain::borrowed_locality_condition(
                         pinned_id,
+                        alive_threshold(Utc::now()),
                     )),
             )
             .one(db)

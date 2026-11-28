@@ -116,6 +116,28 @@ def test_locality_pin_on_busy_runner_goes_to_joining_runner(
     assert _row(seeder, parent)["thread_id"] == ""
 
 
+@pytest.mark.parametrize(
+    ("status", "heartbeat"),
+    [("busy", "now() - interval '10 minutes'"), ("offline", "now()")],
+)
+def test_locality_pin_on_silent_runner_is_not_borrowed(
+    seeder, daemon_world, machine_flow, machine_client, status, heartbeat
+):
+    # A silent runner's stale running row is no proof it is working: its
+    # locality pins wait for the offline pin-release sweep and its grace.
+    busy = _busy_runner(seeder, daemon_world)
+    seeder.db.execute(
+        f"UPDATE runner SET status = %s, last_heartbeat_at = {heartbeat} WHERE id = %s",
+        (status, busy),
+    )
+    run = _queued(seeder, daemon_world, busy, pinned_runner_id=busy, pin_kind="locality")
+    _join(machine_client, machine_flow["runner_id"])
+    row = _row(seeder, run)
+    assert row["status"] == "queued"
+    assert str(row["pinned_runner_id"]) == busy
+    assert row["runner_id"] is None
+
+
 def test_dedicated_pin_on_busy_runner_stays(seeder, daemon_world, machine_flow, machine_client):
     busy = _busy_runner(seeder, daemon_world)
     run = _queued(seeder, daemon_world, busy, pinned_runner_id=busy, pin_kind="dedicated")
