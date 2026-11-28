@@ -7,6 +7,8 @@ Renders the composed prompt against a real issue (coding-task/review/
 test) or scheduler binding (scheduler) without creating a run.
 """
 
+import pytest
+
 
 def _preview_url(tenant, kind):
     return (f"/api/workspaces/{tenant['workspace']['slug']}"
@@ -70,10 +72,13 @@ def test_preview_review_kind_against_issue(api, tenant_a, issue_a, write_a):
 
 def test_preview_test_kind_shows_project_block(api, seed, tenant_a,
                                                 project_a, write_a):
+    # PDASHOSS01-294: the built-in prompts render `project.context`; the
+    # plain description is for humans and never reaches the prompt.
     with seed.conn.cursor() as cur:
         cur.execute(
-            "UPDATE projects SET description = %s WHERE id = %s",
-            ("Reject stubs; run two independent review passes.", project_a),
+            "UPDATE projects SET description = %s, context = %s WHERE id = %s",
+            ("Human-facing summary of the web project.",
+             "Reject stubs; run two independent review passes.", project_a),
         )
     state_id = seed.state(project_a, tenant_a["workspace"]["id"],
                           name="In Test", group="test")
@@ -84,7 +89,28 @@ def test_preview_test_kind_shows_project_block(api, seed, tenant_a,
     assert r.status_code == 200, r.text
     prompt = r.json()["prompt"]
     assert "Reject stubs; run two independent review passes." in prompt
-    assert "Project-level instructions in the description apply to this test pass" in prompt
+    assert "Project-level instructions in the project context apply to this test pass" in prompt
+    assert "Human-facing summary of the web project." not in prompt
+
+
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_preview_omits_project_block_without_context(api, seed, tenant_a,
+                                                     project_a, write_a, kind):
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET description = %s, context = '' WHERE id = %s",
+            ("Only a description, no agent context.", project_a),
+        )
+    state_id = seed.state(project_a, tenant_a["workspace"]["id"],
+                          name="In Test", group="test")
+    issue_id = seed.issue(tenant_a["workspace"]["id"], project_a,
+                          name="Port the lexer", state_id=state_id)
+    r = api.post(_preview_url(tenant_a, kind), headers=write_a,
+                 json={"issue_id": str(issue_id)})
+    assert r.status_code == 200, r.text
+    prompt = r.json()["prompt"]
+    assert "Only a description, no agent context." not in prompt
+    assert "Project-level instructions in the project context" not in prompt
 
 
 def test_preview_scheduler_renders(api, tenant_a, binding_a, write_a):

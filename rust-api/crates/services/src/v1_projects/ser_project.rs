@@ -178,6 +178,7 @@ pub const IDENTIFIER_FIELD_REQUIRED_BODY: &str = r#"{"identifier":["This field i
 pub const CREATE_META_FIELDS: &[&str] = &[
     "name",
     "description",
+    "context",
     "project_lead",
     "default_assignee",
     "identifier",
@@ -1086,10 +1087,10 @@ mod tests {
 
     #[test]
     fn shape_consts_match_python_source() {
-        assert_eq!(CREATE_META_FIELDS.len(), 27);
+        assert_eq!(CREATE_META_FIELDS.len(), 28);
         assert_eq!(CREATE_META_FIELDS[0], "name");
-        assert_eq!(CREATE_META_FIELDS[25], "default_agent_executor");
-        assert_eq!(CREATE_META_FIELDS[26], "default_work_type");
+        assert_eq!(CREATE_META_FIELDS[26], "default_agent_executor");
+        assert_eq!(CREATE_META_FIELDS[27], "default_work_type");
         assert!(CREATE_META_FIELDS.contains(&"identifier"));
         assert_eq!(
             CREATE_META_READ_ONLY_FIELDS,

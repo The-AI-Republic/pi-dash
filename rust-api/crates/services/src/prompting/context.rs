@@ -952,6 +952,7 @@ pub struct IssueContextInput {
     pub project_id: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    pub project_context: Option<String>,
     /// `issue.work_type` — the per-issue work-type override (NULL inherits).
     pub issue_work_type: Option<String>,
     /// `issue.project.default_work_type`.
@@ -1075,6 +1076,7 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             "identifier": input.project_identifier,
             "name": input.project_name,
             "description": or_empty(&input.project_description),
+            "context": or_empty(&input.project_context),
         },
         // The effective work type composed with (PDASHOSS01-234) — exposed so
         // sections can name it ("work type: software") without re-deriving it.
@@ -1332,6 +1334,7 @@ pub struct SchedulerContextInput {
     pub project_identifier: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    pub project_context: Option<String>,
     pub scheduler_slug: String,
     pub scheduler_name: String,
     pub scheduler_description: Option<String>,
@@ -1369,6 +1372,7 @@ pub fn build_scheduler_context(input: &SchedulerContextInput) -> Value {
             "identifier": input.project_identifier,
             "name": input.project_name,
             "description": or_empty(&input.project_description),
+            "context": or_empty(&input.project_context),
         },
         "scheduler": {
             "slug": input.scheduler_slug,
@@ -1875,6 +1879,7 @@ mod tests {
             project_id: "project-1".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            project_context: None,
             issue_work_type: None,
             project_default_work_type: Some("software".to_owned()),
             repo: repo_context(
@@ -1986,6 +1991,79 @@ mod tests {
         for key in build["relation_keys"].as_array().expect("array") {
             let key = key.as_str().expect("str");
             assert!(context.get(key).is_some(), "relation key {key}");
+        }
+    }
+
+    // PDASHOSS01-294: built-in prompts read `project.context`; `project.description`
+    // stays in the dict for custom templates only.
+
+    #[test]
+    fn build_context_carries_project_context_and_description() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Billing admin tool.".to_owned());
+        input.project_context = Some("Prefer additive migrations. Never push to main.".to_owned());
+        let context = build_context(&input);
+        assert_eq!(
+            context["project"]["context"],
+            json!("Prefer additive migrations. Never push to main.")
+        );
+        assert_eq!(
+            context["project"]["description"],
+            json!("Billing admin tool.")
+        );
+        // "" (never null) so the built-in `{% if project.context %}` guard behaves.
+        assert_eq!(
+            build_context(&minimal_issue_input())["project"]["context"],
+            json!("")
+        );
+    }
+
+    fn issue_turns(input: &IssueContextInput) -> Vec<String> {
+        let ctx = build_context(input);
+        let index = composer::OverrideIndex::new();
+        let mut out = Vec::new();
+        for kind in [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+        ] {
+            for executor in [None, Some("cloud_agent")] {
+                let turn =
+                    build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1, None)
+                        .expect("turn");
+                out.push((kind, executor, turn.text));
+            }
+        }
+        out.into_iter()
+            // The Cloud implement recipe has no project block (PDASHOSS01-302).
+            .filter(|(kind, executor, _)| {
+                !(*kind == recipes::KIND_CODING_TASK && executor.is_some())
+            })
+            .map(|(_, _, text)| text)
+            .collect()
+    }
+
+    #[test]
+    fn issue_turns_render_project_context_not_description() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Human-facing summary only.".to_owned());
+        input.project_context = Some("Never push to main.".to_owned());
+        for text in issue_turns(&input) {
+            assert!(text.contains("Never push to main."));
+            assert!(!text.contains("Human-facing summary only."));
+        }
+    }
+
+    #[test]
+    fn issue_turns_omit_empty_project_context() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Only a description, no agent context.".to_owned());
+        for text in issue_turns(&input) {
+            assert!(!text.contains("Only a description, no agent context."));
+            assert!(!text.contains("Project-level instructions in the project context"));
+            // All three kinds name the project (intro: "belongs to", review/test: "in project").
+            assert!(text.contains("Project"));
+            assert!(text.contains("FX"));
         }
     }
 
@@ -2238,6 +2316,7 @@ mod tests {
             project_identifier: "FX".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            project_context: None,
             scheduler_slug: "security-audit".to_owned(),
             scheduler_name: "Security Audit".to_owned(),
             scheduler_description: Some("Scans.".to_owned()),

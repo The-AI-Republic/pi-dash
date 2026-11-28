@@ -15,7 +15,7 @@ Scheduled-run context:
 - Scheduler: Nightly Audit (`nightly-audit`)
 - Purpose: Scan for issues nightly.
 - Project: Sample Project (SAMPLE)
-- Project description: Sample project description.
+- Project context: Sample project context.
 - Run id: 00000000-0000-0000-0000-000000000003
 
 ## Session framing

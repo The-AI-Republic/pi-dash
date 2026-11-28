@@ -1298,10 +1298,10 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 47);
-        assert_eq!(project_cols::COLUMNS[12], "identifier");
-        assert_eq!(project_cols::COLUMNS[45], "default_agent_executor");
-        assert_eq!(project_cols::COLUMNS[46], "default_work_type");
+        assert_eq!(project_cols::COLUMNS.len(), 48);
+        assert_eq!(project_cols::COLUMNS[13], "identifier");
+        assert_eq!(project_cols::COLUMNS[46], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS[47], "default_work_type");
         assert_eq!(project_cols::TABLE, "projects");
     }
 

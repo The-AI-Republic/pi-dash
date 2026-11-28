@@ -66,6 +66,13 @@
           "blank": true
         },
         {
+          "name": "context",
+          "column": "context",
+          "type": "TextField",
+          "blank": true,
+          "default": ""
+        },
+        {
           "name": "description_text",
           "column": "description_text",
           "type": "JSONField",

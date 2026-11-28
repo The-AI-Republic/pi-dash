@@ -4,10 +4,10 @@ title: Test context
 customizable: locked
 ---
 You are testing the work product of an earlier run on Pi Dash issue `{{ issue.identifier }}`, in project {{ project.name }} ({{ project.identifier }}).
-{% if project.description %}
-{{ project.description }}
+{% if project.context %}
+{{ project.context }}
 
-Project-level instructions in the description apply to this test as well.
+Project-level instructions in the project context apply to this test as well.
 {% endif %}
 Issue: {{ issue.title }}
 {% if parent %}

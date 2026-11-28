@@ -801,6 +801,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -1060,6 +1061,11 @@ pub async fn render_project(
         &mut map,
         "description",
         Value::String(row_string_opt(row, "description")?.unwrap_or_default()),
+    );
+    put(
+        &mut map,
+        "context",
+        Value::String(row_string_opt(row, "context")?.unwrap_or_default()),
     );
     put(
         &mut map,
@@ -1460,6 +1466,7 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
 const PROJECT_LIST_FIELDS: &[&str] = &[
     "name",
     "description",
+    "context",
     "project_lead",
     "default_assignee",
     "identifier",
@@ -1844,6 +1851,7 @@ pub struct WriteData {
 pub const CREATE_FIELD_ORDER: &[&str] = &[
     "name",
     "description",
+    "context",
     "project_lead",
     "default_assignee",
     "identifier",
@@ -1903,7 +1911,7 @@ async fn coerce_field(
     Ok(Some(match field {
         "name" => FieldValue::Str(coerce_char(value, false, Some(255))?),
         "identifier" => FieldValue::Str(coerce_char(value, false, Some(12))?),
-        "description" => FieldValue::Str(coerce_char(value, true, None)?),
+        "description" | "context" => FieldValue::Str(coerce_char(value, true, None)?),
         "project_lead" | "default_assignee" | "default_state" | "estimate" => {
             FieldValue::Fk(coerce_fk_user(pool, field, value).await?)
         }
@@ -3077,6 +3085,7 @@ pub async fn create_project_inner(
     let is_default = requested_default || !has_default;
     let now = chrono::Utc::now();
     let description = field_str(&data, "description").unwrap_or_default();
+    let context = field_str(&data, "context").unwrap_or_default();
     // `transaction.atomic()`: unset-others + insert (`:187-194`, plus the
     // `save()` unset arm `:277-284`).
     let v1_name = name.clone().unwrap_or_default();
@@ -3094,6 +3103,7 @@ pub async fn create_project_inner(
         &pidash_services::domain::projects::NewProject {
             name: &v1_name,
             description: &description,
+            context: &context,
             description_text: None,
             description_html: None,
             network: 2,
@@ -3736,6 +3746,9 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "description") {
         push(&mut sets, "description", ProjectPatchBind::Str(v));
+    }
+    if let Some(v) = field_str(data, "context") {
+        push(&mut sets, "context", ProjectPatchBind::Str(v));
     }
     for key in [
         "project_lead_id",

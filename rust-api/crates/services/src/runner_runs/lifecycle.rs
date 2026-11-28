@@ -2898,7 +2898,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
-                ("\"projects\"".to_owned(), 47),
+                ("\"projects\"".to_owned(), 48),
                 ("\"states\"".to_owned(), 18),
             ]
         );
@@ -2919,7 +2919,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
-                ("\"projects\"".to_owned(), 47),
+                ("\"projects\"".to_owned(), 48),
                 ("\"runner\"".to_owned(), 2),
                 ("\"dev_machine\"".to_owned(), 2),
             ]

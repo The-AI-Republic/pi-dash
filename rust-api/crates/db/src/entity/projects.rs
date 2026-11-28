@@ -12,6 +12,8 @@ pub struct Model {
     pub name: String,
     #[sea_orm(column_type = "Text")]
     pub description: String,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub context: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub description_text: Option<Json>,
     #[sea_orm(column_type = "JsonBinary", nullable)]

@@ -1151,6 +1151,7 @@ struct ProjectRow {
     id: uuid::Uuid,
     name: String,
     description: String,
+    context: String,
     description_text: Option<Value>,
     description_html: Option<Value>,
     network: i16,
@@ -1209,6 +1210,7 @@ struct ProjectRowOrm {
     id: uuid::Uuid,
     name: String,
     description: String,
+    context: Option<String>,
     description_text: Option<Value>,
     description_html: Option<Value>,
     network: i16,
@@ -1267,6 +1269,7 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         id: orm.id,
         name: orm.name,
         description: orm.description,
+        context: orm.context.clone().unwrap_or_default(),
         description_text: orm.description_text,
         description_html: orm.description_html,
         network: orm.network,
@@ -1349,6 +1352,7 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::Id,
         proj_entity::Column::Name,
         proj_entity::Column::Description,
+        proj_entity::Column::Context,
         proj_entity::Column::DescriptionText,
         proj_entity::Column::DescriptionHtml,
         proj_entity::Column::Network,
@@ -2063,6 +2067,7 @@ async fn render_list_row(
         is_time_tracking_enabled: row.is_time_tracking_enabled,
         is_issue_type_enabled: row.is_issue_type_enabled,
         description: row.description.clone(),
+        context: row.context.clone(),
         description_text: row.description_text.clone(),
         description_html: row.description_html.clone(),
         workspace: row.workspace_id.to_string(),
@@ -2171,6 +2176,7 @@ async fn render_current_instance(
         deleted_at: None,
         name: row.name.clone(),
         description: row.description.clone(),
+        context: row.context.clone(),
         description_text: row.description_text.clone(),
         description_html: row.description_html.clone(),
         network: i64::from(row.network),
@@ -3720,6 +3726,7 @@ enum ValidateMode {
 struct Validated {
     name: Option<String>,
     description: Option<String>,
+    context: Option<String>,
     description_text: Option<Option<Value>>,
     description_html: Option<Option<Value>>,
     network: Option<i16>,
@@ -3800,6 +3807,7 @@ const WRITE_FIELDS: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -3979,6 +3987,10 @@ async fn validate_one_field(
         }
         "description" => match validate_char(value, None, true) {
             Ok(text) => out.description = Some(text),
+            Err(messages) => return fail_many(messages),
+        },
+        "context" => match validate_char(value, None, true) {
+            Ok(text) => out.context = Some(text),
             Err(messages) => return fail_many(messages),
         },
         "description_text" => {
@@ -4739,6 +4751,7 @@ async fn insert_project(
         &pidash_services::domain::projects::NewProject {
             name,
             description: validated.description.as_deref().unwrap_or(""),
+            context: validated.context.as_deref().unwrap_or(""),
             description_text: validated
                 .description_text
                 .as_ref()
@@ -5030,6 +5043,7 @@ async fn apply_update(
             .description
             .as_deref()
             .unwrap_or(&instance.description),
+        context: validated.context.as_deref().unwrap_or(&instance.context),
         description_text: validated
             .description_text
             .as_ref()
@@ -5936,6 +5950,7 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "id" => Ok("p.id"),
         "name" => Ok("p.name"),
         "description" => Ok("p.description"),
+        "context" => Ok("p.context"),
         "identifier" => Ok("p.identifier"),
         "network" => Ok("p.network"),
         "workspace" => Ok("p.workspace_id"),
@@ -7588,9 +7603,14 @@ mod tests {
         assert!(position("deleted_at") < position("name"));
         assert!(position("name") < position("identifier"));
         assert!(position("identifier") < position("workspace"));
+        assert_eq!(
+            WRITE_FIELDS[position("description") + 1],
+            "context",
+            "context follows description (PDASHOSS01-294)"
+        );
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 45);
+        assert_eq!(WRITE_FIELDS.len(), 46);
     }
 
     #[test]

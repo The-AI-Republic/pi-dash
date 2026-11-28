@@ -99,6 +99,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "identifier": "SAMPLE",
                 "name": "Sample Project",
                 "description": "Sample project description.",
+                "context": "Sample project context.",
             },
             "work_type": {"key": "software", "title": "Software"},
             "repo": {
@@ -224,7 +225,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "project_states": [],
             },
             "workspace": {"slug": "sample-ws", "name": ""},
-            "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": ""},
+            "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": "", "context": ""},
             "work_type": {"key": "general", "title": "General"},
             "repo": {
                 "url": null,
@@ -290,6 +291,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
                 "identifier": "SAMPLE",
                 "name": "Sample Project",
                 "description": "Sample project description.",
+                "context": "Sample project context.",
             },
             "scheduler": {
                 "slug": "nightly-audit",
@@ -318,7 +320,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
     } else {
         serde_json::json!({
             "workspace": {"slug": "sample-ws", "name": ""},
-            "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": ""},
+            "project": {"id": "", "identifier": "SAMPLE", "name": "", "description": "", "context": ""},
             "scheduler": {"slug": "s", "name": "", "description": ""},
             "run": {
                 "id": "00000000-0000-0000-0000-000000000003",
