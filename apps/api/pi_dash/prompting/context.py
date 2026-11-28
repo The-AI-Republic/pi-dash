@@ -581,6 +581,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "identifier": project.identifier,
             "name": project.name,
             "description": project.description or "",
+            "context": project.context or "",
         },
         # The effective work type composed with (PDASHOSS01-234) — exposed so
         # sections can name it ("work type: software") without re-deriving it.
@@ -708,6 +709,7 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
             "identifier": getattr(project, "identifier", ""),
             "name": getattr(project, "name", ""),
             "description": (getattr(project, "description", "") or ""),
+            "context": (getattr(project, "context", "") or ""),
         },
         "scheduler": {
             "slug": getattr(scheduler, "slug", ""),

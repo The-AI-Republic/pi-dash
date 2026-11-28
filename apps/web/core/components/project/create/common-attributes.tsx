@@ -140,7 +140,7 @@ function ProjectCommonAttributes(props: Props) {
               id="description"
               name="description"
               value={value}
-              placeholder={t("Project Context (Will be shown to AI agents)")}
+              placeholder={t("Description")}
               onChange={(e) => {
                 onChange(e);
                 handleFormOnChange?.();
@@ -151,6 +151,28 @@ function ProjectCommonAttributes(props: Props) {
             />
           )}
         />
+      </div>
+      <div className="flex flex-col gap-1 md:col-span-4">
+        <Controller
+          name="context"
+          control={control}
+          render={({ field: { value, onChange } }) => (
+            <TextArea
+              id="context"
+              name="context"
+              value={value}
+              placeholder={t("Project context (optional)")}
+              onChange={(e) => {
+                onChange(e);
+                handleFormOnChange?.();
+              }}
+              className="focus:border-blue-400 max-h-80 min-h-40 text-13"
+              hasError={Boolean(errors?.context)}
+              tabIndex={getIndex("context")}
+            />
+          )}
+        />
+        <span className="text-11 text-tertiary">{t("Shown to AI agents on every run in this project.")}</span>
       </div>
       <div className="md:col-span-3">
         <Controller
