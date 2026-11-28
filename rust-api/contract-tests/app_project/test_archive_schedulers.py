@@ -3,9 +3,14 @@
 Companion to v1_projects/test_archive_schedulers.py: same-transaction
 disable on the app route (POST /api/workspaces/<slug>/projects/<id>/
 archive/), bindings stay installed, unarchive does not re-enable.
+
+Disabling the bindings is new-system behaviour (DIFF-47): Django's
+archive stamps ``archived_at`` only and leaves ``enabled`` alone.
 """
 
 from psycopg.rows import dict_row
+
+from _harness.diffs import expect
 
 DTSTART = "2026-10-01T00:00:00+00:00"
 NEXT_RUN_AT = "2026-10-20T00:00:00+00:00"
@@ -65,6 +70,9 @@ def test_app_archive_disables_bindings(world, db):
     binding_a = _binding(db, workspace_id=str(ws["id"]), project_id=str(project["id"]), scheduler_id=sched_a["id"], actor_id=str(user["id"]))
     binding_b = _binding(db, workspace_id=str(ws["id"]), project_id=str(project["id"]), scheduler_id=sched_b["id"], actor_id=str(user["id"]))
 
+    # `scheduler_bindings.enabled` after archive (and after unarchive, which
+    # never re-enables): Django leaves it on, Rust turns it off (DIFF-47).
+    enabled_after_archive = expect("DIFF-47", django=True, rust=False)
     url = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/archive/"
     resp = client.post(url)
     assert resp.status_code == 200, resp.text[:500]
@@ -73,7 +81,7 @@ def test_app_archive_disables_bindings(world, db):
         for binding in (binding_a, binding_b):
             cur.execute("SELECT enabled, deleted_at FROM scheduler_bindings WHERE id=%s", (binding["id"],))
             row = cur.fetchone()
-            assert row["enabled"] is False
+            assert row["enabled"] is enabled_after_archive
             assert row["deleted_at"] is None
         cur.execute("SELECT is_enabled FROM schedulers WHERE id=%s", (sched_a["id"],))
         assert cur.fetchone()["is_enabled"] is True
@@ -87,4 +95,4 @@ def test_app_archive_disables_bindings(world, db):
         assert cur.fetchone()["archived_at"] is None
         for binding in (binding_a, binding_b):
             cur.execute("SELECT enabled FROM scheduler_bindings WHERE id=%s", (binding["id"],))
-            assert cur.fetchone()["enabled"] is False
+            assert cur.fetchone()["enabled"] is enabled_after_archive
