@@ -34,19 +34,27 @@ use crate::ipc::protocol::{
     HelloWorkspace, IPC_VERSION, Response, RunnerChanges, version_lt,
 };
 use crate::ipc::server::IpcServer;
-use crate::util::containment::{self, RunGroup};
+use crate::util::containment::{self, CleanupOutcome, RunGroup};
 
 /// Empty a run's containment unit and execute its run-end hook, if the
 /// run wrote one (parity-stack teardown). Runs on the normal terminal
-/// path, after the cloud has been told; the abort path relies on the
-/// guard's [`Drop`] (processes only — hooks are left for the sweep).
-async fn run_cleanup(mut guard: RunGroup) {
-    guard.cleanup().await;
-    guard.mark_cleaned();
+/// path, before the cloud is told the run ended; the abort path relies on
+/// the guard's [`Drop`] (processes only — hooks are left for the sweep).
+/// The hook runs once even when processes are left over: it tears down
+/// what lives outside the unit and must not wait on what is inside it.
+async fn run_cleanup(guard: &mut RunGroup) -> CleanupOutcome {
+    let outcome = guard.cleanup().await;
+    if outcome == CleanupOutcome::Clean {
+        guard.mark_cleaned();
+    }
     if let Some(ws) = guard.workspace().map(|p| p.to_path_buf()) {
         containment::run_end_hook(&ws).await;
     }
+    outcome
 }
+
+/// How often a runner held by unresolved run-end cleanup re-checks it.
+const UNRESOLVED_CLEANUP_RECHECK: Duration = Duration::from_secs(5);
 use crate::util::fs::create_dir_all_private;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -2681,6 +2689,7 @@ impl RunnerLoop {
                 engine,
                 coordinator,
                 queue_blocked,
+                run_end: RunEnd::default(),
             };
             if let Err(e) = worker
                 .run(run_id, prompt, repo_url, expected_codex_model, context)
@@ -2700,6 +2709,9 @@ impl RunnerLoop {
                     .await;
                 worker.state.set_current_run(None).await;
             }
+            // The run has been reported; the runner stays reserved (the
+            // loop keeps `current_run`) until its cleanup is resolved.
+            worker.hold_while_unresolved().await;
             let _ = done_tx.send(());
         });
     }
@@ -4618,6 +4630,13 @@ fn clean_gateway_failure_detail(raw: &str) -> String {
     gateway_refusal_detail(status, text)
 }
 
+/// Lock the held-terminal slot; a poisoned lock still holds valid data.
+fn lock_held(
+    held: &std::sync::Mutex<Option<HeldTerminal>>,
+) -> std::sync::MutexGuard<'_, Option<HeldTerminal>> {
+    held.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Owns one `Assign`'s lifecycle. Spawned as a task from `RunnerLoop`, so the
 /// message loop stays live and can deliver Cancel / Decide frames to us via
 /// `self.cancel` and `self.approvals`.
@@ -4636,6 +4655,27 @@ struct AssignWorker {
     /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
     coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
     queue_blocked: bool,
+    run_end: RunEnd,
+}
+
+/// Run-end ordering state of an [`AssignWorker`] (PDASHOSS01-417): the
+/// terminal report is held until run-end cleanup is done, and a run whose
+/// cleanup is unresolved keeps the runner reserved.
+#[derive(Default)]
+struct RunEnd {
+    /// While `Some`, terminal reports (and clearing the in-flight run) are
+    /// collected here instead of taking effect; see [`AssignWorker::send`].
+    held: std::sync::Mutex<Option<HeldTerminal>>,
+    /// The run's unit when cleanup left processes it could not account
+    /// for. While set, the worker does not finish, so the runner loop keeps
+    /// the run in flight and rejects new assignments and chat.
+    unresolved: Option<RunGroup>,
+}
+
+#[derive(Default)]
+struct HeldTerminal {
+    msgs: Vec<ClientMsg>,
+    clear_current_run: bool,
 }
 
 struct RunMetadata {
@@ -4727,6 +4767,11 @@ impl AssignWorker {
         // covering every exit path — normal end, failure, cancellation,
         // daemon shutdown and task abort alike.
         let mut guard = containment::create_run_group(run_id);
+        // The run's terminal report is held while the run executes and
+        // sent only after cleanup, so the cloud never sees the run finished
+        // (and offers the runner new work) while its processes or its
+        // teardown hook are still pending.
+        self.hold_terminal();
         // Scope the run context over everything this run does so every
         // agent subprocess the bridges spawn (and re-spawn per turn)
         // inherits `PIDASH_RUN_ID` plus the issue/project/agent names —
@@ -4768,13 +4813,75 @@ impl AssignWorker {
         // Cleanup runs even when the run fails: a failed run must not
         // leave its processes (or its parity-stack hook) behind.
         let result = scope.await;
-        // Containment cleanup runs after the run's terminal report has
-        // been sent: empty the unit, then execute a run-end hook the
-        // run opted into (parity-stack teardown), outside the unit.
-        // `workspace` is None when workspace resolution never produced
-        // one; then there is no hook to run either.
-        run_cleanup(guard).await;
+        // Empty the unit, then execute a run-end hook the run opted into
+        // (parity-stack teardown), outside the unit. `workspace` is None
+        // when workspace resolution never produced one; then there is no
+        // hook to run either.
+        let outcome = run_cleanup(&mut guard).await;
+        self.release_terminal().await;
+        if outcome == CleanupOutcome::Unresolved {
+            self.run_end.unresolved = Some(guard);
+        }
         result
+    }
+
+    /// Start holding terminal reports (see [`RunEnd::held`]).
+    fn hold_terminal(&self) {
+        *lock_held(&self.run_end.held) = Some(HeldTerminal::default());
+    }
+
+    /// Stop holding and send what was held, in order.
+    async fn release_terminal(&self) {
+        let Some(held) = lock_held(&self.run_end.held).take() else {
+            return;
+        };
+        for msg in held.msgs {
+            self.send(msg).await;
+        }
+        if held.clear_current_run {
+            self.state.set_current_run(None).await;
+        }
+    }
+
+    /// Clear the in-flight run, or defer it while terminal reports are
+    /// held: the shutdown drain reports runs that are still in flight, so a
+    /// run whose report is held must stay visible to it.
+    async fn clear_current_run(&self) {
+        if let Some(held) = lock_held(&self.run_end.held).as_mut() {
+            held.clear_current_run = true;
+            return;
+        }
+        self.state.set_current_run(None).await;
+    }
+
+    /// Keep the runner reserved while the finished run's cleanup is
+    /// unresolved: re-check every [`UNRESOLVED_CLEANUP_RECHECK`] (each
+    /// check re-proves ownership before any signal) until nothing is left.
+    /// Daemon shutdown ends the wait; the unit's drop then makes one more
+    /// ownership-proven attempt.
+    async fn hold_while_unresolved(&mut self) {
+        let Some(mut guard) = self.run_end.unresolved.take() else {
+            return;
+        };
+        tracing::warn!(
+            runner = %self.runner_config.name,
+            "run-end cleanup is unresolved; runner stays reserved until the run's processes are gone"
+        );
+        let shutdown = self.state.shutdown_notified();
+        loop {
+            tokio::select! {
+                _ = shutdown.notified() => return,
+                _ = tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK) => {}
+            }
+            if guard.cleanup().await == CleanupOutcome::Clean {
+                guard.mark_cleaned();
+                tracing::info!(
+                    runner = %self.runner_config.name,
+                    "run-end cleanup resolved; runner released"
+                );
+                return;
+            }
+        }
     }
 
     async fn handle_assign_inner(
@@ -4816,7 +4923,7 @@ impl AssignWorker {
                     // synchronously when the Assign arrived; clear it now so
                     // a session reconnect after the failure doesn't claim a
                     // run that no longer exists.
-                    self.state.set_current_run(None).await;
+                    self.clear_current_run().await;
                     return Ok(());
                 }
             }
@@ -4935,7 +5042,7 @@ impl AssignWorker {
                     model: None,
                 })
                 .await;
-                self.state.set_current_run(None).await;
+                self.clear_current_run().await;
                 return Ok(());
             }
         };
@@ -4991,7 +5098,7 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                self.state.set_current_run(None).await;
+                self.clear_current_run().await;
                 if cancelled {
                     self.send(ClientMsg::RunCancelled {
                         run_id,
@@ -5041,7 +5148,7 @@ impl AssignWorker {
                     })
                     .await;
                     bridge.shutdown(Duration::from_secs(5)).await.ok();
-                    self.state.set_current_run(None).await;
+                    self.clear_current_run().await;
                     return Ok(());
                 }
             };
@@ -5131,7 +5238,7 @@ impl AssignWorker {
 
         if status_label == "cancelled" {
             let terminal_metadata = self.run_metadata().await;
-            self.state.set_current_run(None).await;
+            self.clear_current_run().await;
             self.send(ClientMsg::RunCancelled {
                 run_id,
                 cancelled_at: Utc::now(),
@@ -5142,7 +5249,7 @@ impl AssignWorker {
             return Ok(());
         }
 
-        self.state.set_current_run(None).await;
+        self.clear_current_run().await;
         Ok(())
     }
 
@@ -5834,6 +5941,16 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
+        if matches!(
+            msg,
+            ClientMsg::RunCompleted { .. }
+                | ClientMsg::RunFailed { .. }
+                | ClientMsg::RunCancelled { .. }
+        ) && let Some(held) = lock_held(&self.run_end.held).as_mut()
+        {
+            held.msgs.push(msg);
+            return;
+        }
         // Clone the journal-relevant fields BEFORE the send consumes
         // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
         // otherwise be discarded with only a warn log, leaving the
@@ -7053,6 +7170,144 @@ mod tests {
         assert_eq!(resolve_working_dir(&inst), Some(expected));
     }
 
+    /// An `AssignWorker` for a Codex run in `wd` whose agent binary is
+    /// `binary`, reporting on `tx`. No cloud context, no coordinator.
+    #[cfg(unix)]
+    fn codex_worker(
+        tmp: &std::path::Path,
+        wd: std::path::PathBuf,
+        binary: &std::path::Path,
+        tx: mpsc::Sender<Envelope<ClientMsg>>,
+    ) -> AssignWorker {
+        let paths = paths_for(tmp);
+        paths.ensure().unwrap();
+        let mut config = runner_config("general-tasks", "TEST", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::Codex;
+        config.codex.binary = binary.to_string_lossy().into_owned();
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let engine_paths = paths.clone();
+        AssignWorker {
+            runner_paths,
+            daemon_paths: paths,
+            runner_config: config.clone(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                engine_paths,
+                WorkspaceTokens::default(),
+                None,
+            ),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                auth_event: None,
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            coordinator: None,
+            queue_blocked: false,
+            run_end: RunEnd::default(),
+        }
+    }
+
+    /// PDASHOSS01-417 part 2 (review item 2 on #2952): when run-end cleanup
+    /// is unresolved, the worker does not finish, so the runner loop keeps
+    /// the run in flight and turns away new work. The group it cannot prove
+    /// is never signalled, and the runner is released once it is gone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_cleanup_keeps_the_runner_reserved_until_resolved() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        // A stranger now holds the run's recorded pgid: same pid, other
+        // start time, so its ownership can never be proven.
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let info = crate::util::procinfo::info(stranger.id() as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let (tx, _rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        worker.run_end.unresolved = Some(RunGroup::claimed_for_test(&recorded));
+        let held = tokio::spawn(async move { worker.hold_while_unresolved().await });
+        tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK * 4).await;
+        let reserved = !held.is_finished();
+        let survived = stranger.try_wait().unwrap().is_none();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(reserved, "runner was released while cleanup was unresolved");
+        assert!(survived, "an unproven process group was signalled");
+        tokio::time::timeout(UNRESOLVED_CLEANUP_RECHECK * 3, held)
+            .await
+            .expect("runner stayed reserved after the group was gone")
+            .unwrap();
+    }
+
+    /// PDASHOSS01-417 part 2: the run's terminal report goes out only
+    /// after run-end cleanup (process stop, then the run-end hook) is
+    /// done, so the cloud never sees a run finished while its processes
+    /// or teardown are still pending. The test runs on one thread: once
+    /// `RunFailed` is received the worker cannot make progress before
+    /// the assertion, so a hook still pending at that point is caught.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_report_is_sent_after_run_end_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("task-folder");
+        std::fs::create_dir_all(&wd).unwrap();
+        // The agent opts into a run-end hook, then crashes on startup.
+        let agent = tmp.path().join("fake-codex");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\nmkdir -p .pidash\necho 'touch hook-ran' > .pidash/run-end-hook\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd.clone(), &agent, tx);
+        let run = tokio::spawn(async move {
+            worker
+                .run(
+                    uuid::Uuid::new_v4(),
+                    "Summarize".into(),
+                    None,
+                    None,
+                    AssignContext::default(),
+                )
+                .await
+        });
+        loop {
+            let msg = rx.recv().await.expect("worker ended without a report").body;
+            if matches!(
+                msg,
+                ClientMsg::RunFailed { .. }
+                    | ClientMsg::RunCompleted { .. }
+                    | ClientMsg::RunCancelled { .. }
+            ) {
+                break;
+            }
+        }
+        assert!(
+            wd.join("hook-ran").exists(),
+            "terminal report was sent before run-end cleanup finished"
+        );
+        run.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn repo_free_assignment_reaches_agent_spawn_and_skips_branch_checkout() {
         for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
@@ -7100,6 +7355,7 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 coordinator: None,
                 queue_blocked: false,
+                run_end: RunEnd::default(),
             };
             worker
                 .run(
@@ -7873,6 +8129,7 @@ mod tests {
             ),
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         let run_id = uuid::Uuid::new_v4();
         let ended_at = Utc::now();
@@ -7937,6 +8194,7 @@ mod tests {
             ),
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         worker
             .send(ClientMsg::RunFailed {
@@ -8299,6 +8557,7 @@ mod tests {
             engine,
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         let run_id = uuid::Uuid::new_v4();
         let hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
