@@ -13,7 +13,7 @@ test_page_versions.py (duplicate). Session-cookie auth
 
 from psycopg.rows import dict_row
 
-from ..session import Request, Session
+from ..session import ABSENT, Request, Session
 
 # Fixed page ids seeded by _seed_pages (addressed via static_context).
 PG_PARENT_ID = "aaaaaaaa-0000-4000-8000-000000000001"
@@ -95,6 +95,17 @@ def _seed_pages(conn) -> None:
     conn.commit()
 
 
+# DIFF-48 (NEWPIDASH-240): Rust's page list reads add project_status and
+# project_archived_at after the serializer fields; Django renders neither.
+# The session's project is active, so Rust answers "active" / null.
+def _project_status_pins(count: int) -> list:
+    pins = []
+    for index in range(count):
+        pins.append((f"{index}/project_status", "NEWPIDASH-240", ABSENT, "active"))
+        pins.append((f"{index}/project_archived_at", "NEWPIDASH-240", ABSENT, None))
+    return pins
+
+
 SESSIONS = (
     Session(
         name="app_pages_lifecycle",
@@ -132,6 +143,7 @@ SESSIONS = (
                 "GET", _P + "/pages/",
                 route="/api/workspaces/{slug}/projects/{project_id}/pages/",
                 auth="admin", expect_status=200,
+                known_body_diffs=_project_status_pins(4),
             ),
             Request(
                 "GET", _P + "/pages/{p1}/",

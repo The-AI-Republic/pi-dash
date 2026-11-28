@@ -1069,6 +1069,39 @@ def test_known_body_pin_passes_exact_and_fails_on_change():
     assert error is not None and "Django body changed" in error
 
 
+def test_known_body_pin_absent_side_is_exact():
+    """ABSENT pins a key one side lacks: both halves stay exact."""
+    import json
+
+    from . import compare
+    from .session import ABSENT
+
+    def resp(body):
+        return _fake_response(
+            200, json.dumps(body).encode(), {"content-type": "application/json"}
+        )
+
+    ctx = compare.CompareContext()
+    dj = resp([{"id": "p1", "name": "Page"}])
+    rs = resp([{"id": "p1", "name": "Page", "project_status": "active"}])
+    pin = [("0/project_status", "NEWPIDASH-240", ABSENT, "active")]
+    assert compare.compare_response(dj, rs, ctx, known_body=pin) is None
+    # Unpinned, the extra Rust key fails.
+    assert compare.compare_response(dj, rs, ctx) is not None
+    # Django starts sending the key: loud.
+    error = compare.compare_response(rs, rs, ctx, known_body=pin)
+    assert error is not None and "Django body changed" in error
+    # Rust drops the key, or sends another value: loud.
+    error = compare.compare_response(dj, dj, ctx, known_body=pin)
+    assert error is not None and "NEWPIDASH-240" in error
+    other = resp([{"id": "p1", "name": "Page", "project_status": "archived"}])
+    error = compare.compare_response(dj, other, ctx, known_body=pin)
+    assert error is not None and "NEWPIDASH-240" in error
+    # The rest of the element still compares.
+    renamed = resp([{"id": "p1", "name": "Other", "project_status": "active"}])
+    assert compare.compare_response(dj, renamed, ctx, known_body=pin) is not None
+
+
 def test_known_job_shapes_share_task_and_consume_one_each():
     """Two same-task shape pins each excuse exactly one job per side."""
     from . import compare

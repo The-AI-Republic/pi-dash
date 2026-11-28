@@ -20,6 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Pin value meaning "this side must NOT have the key" in known_body_diffs:
+# a key one backend adds that the other never renders (a documented
+# new-system field). The other side must hold its pinned value exactly;
+# the key then drops out of the diff on both sides.
+ABSENT = "<replay-absent>"
+
 
 @dataclass(frozen=True)
 class Request:
@@ -97,7 +103,8 @@ class Request:
     # subtree at the ``/``-separated pointer must exactly equal its
     # pinned value (a template over the gap ctx); any deviation fails
     # loudly (fix landed -> remove the pin; Django changed ->
-    # investigate). Pinned subtrees blank out of the diff.
+    # investigate). Pinned subtrees blank out of the diff. A side
+    # pinned to ABSENT must lack the pointer's leaf instead.
     known_body_diffs: list = field(default_factory=list)
     # Known body KEY divergences on THIS request: [(dj_pointer,
     # rs_pointer, fix_issue, value)] or [(dj_pointer, rs_pointer,
