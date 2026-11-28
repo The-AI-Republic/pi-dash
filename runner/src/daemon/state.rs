@@ -387,6 +387,12 @@ impl StateHandle {
         }
     }
 
+    /// Whether the shutdown drain has taken this runner's terminal reports
+    /// (and with them the run's terminal outbox record).
+    pub fn terminal_drained(&self) -> bool {
+        matches!(*self.lock_terminal_hold(), TerminalHold::Drained)
+    }
+
     /// For the shutdown drain: take the reports held so far (empty while the
     /// run is still executing), including ones the worker is sending right
     /// now, and drop any later ones. From here the drain owns the send.

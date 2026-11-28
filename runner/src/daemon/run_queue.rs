@@ -386,6 +386,38 @@ impl Coordinator {
         Ok(removed)
     }
 
+    /// Release a finished run's slot but keep its terminal record: the
+    /// shutdown drain owns it and deletes it (`complete_terminal`) only
+    /// once the cloud took the report; until then the next daemon start
+    /// replays it. A row with no terminal record is deleted as by
+    /// [`Self::complete`].
+    pub fn release_slot(&self, run_id: Uuid) -> Result<bool, String> {
+        let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+        let removed = inner.active.remove(&run_id).is_some();
+        if removed {
+            inner.revision += 1;
+        }
+        drop(inner);
+        if removed {
+            let has_terminal = self
+                .store
+                .list_terminal_pending()
+                .is_ok_and(|pending| pending.iter().any(|e| e.run_id == run_id));
+            if !has_terminal {
+                let _ = self.store.delete_entry(run_id);
+            }
+            self.admission.notify_waiters();
+        }
+        Ok(removed)
+    }
+
+    /// Whether the store still has a row for `run_id` (`None`: unreadable).
+    #[cfg(test)]
+    pub fn store_has_row(&self, run_id: Uuid) -> Option<bool> {
+        let rows = self.store.list_all_phases().ok()?;
+        Some(rows.iter().any(|(id, _)| *id == run_id))
+    }
+
     pub fn complete(&self, run_id: Uuid) -> Result<bool, String> {
         let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
         let removed = if inner.active.remove(&run_id).is_some() {
