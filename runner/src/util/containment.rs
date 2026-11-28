@@ -585,7 +585,13 @@ pub(crate) fn stop_owned_group(
             o.confirm_empty();
             CleanupOutcome::Clean
         }
-        Proof::Ours(_) | Proof::Unproven(_) | Proof::Unknown => CleanupOutcome::Unresolved,
+        Proof::Ours(live) => {
+            // The group's SIGKILL may also have ended the anchor: keep the
+            // crash record able to prove the group through what survived.
+            crate::util::group_recovery::keep_survivors(&o, &live);
+            CleanupOutcome::Unresolved
+        }
+        Proof::Unproven(_) | Proof::Unknown => CleanupOutcome::Unresolved,
     };
     (stopped, outcome)
 }
