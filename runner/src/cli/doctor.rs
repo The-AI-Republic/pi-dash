@@ -31,8 +31,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // Agent auth depends on the environment the agent is spawned from, which
     // is the daemon's, not this terminal's. Ask the running daemon to run
     // the suite; only check in-process when no daemon answers.
-    let daemon = report_from_daemon(
+    let daemon = ask_daemon(
         &paths.ipc_socket_path(),
+        paths.legacy_ipc_socket_path().as_deref(),
         args.runner.as_deref(),
         &paths.config_dir,
         DAEMON_DOCTOR_TIMEOUT,
@@ -180,9 +181,12 @@ pub async fn execute_until(
                     true
                 }
             };
+            // Each agent's one blocking check is its binary check; when
+            // the deadline hit before it, a required check never ran.
+            let binary_checked = runner_checks.iter().any(|c| c.blocker);
             checks.append(&mut runner_checks);
             if !finished {
-                checks.push(runner_timeout_check(&r.name, multi));
+                checks.push(runner_timeout_check(&r.name, multi, !binary_checked));
             }
         }
     }
@@ -275,7 +279,9 @@ pub async fn execute_until(
 }
 
 /// A runner whose checks were cut off by the daemon's doctor deadline.
-fn runner_timeout_check(name: &str, tagged: bool) -> Check {
+/// `blocker` when its binary check never ran: the report is then
+/// incomplete and doctor must not exit 0.
+fn runner_timeout_check(name: &str, tagged: bool, blocker: bool) -> Check {
     Check {
         name: if tagged {
             format!("runner-checks@{name}")
@@ -287,7 +293,7 @@ fn runner_timeout_check(name: &str, tagged: bool) -> Check {
             "this runner's checks did not finish within the daemon's doctor budget; \
              run `pidash doctor --runner {name}` to check it on its own"
         ),
-        blocker: false,
+        blocker,
     }
 }
 
@@ -584,19 +590,13 @@ async fn check_version(binary: &str) -> Result<String> {
 /// overruns `limit` or when the caller drops this future (the daemon's
 /// doctor budget does), so a hung binary never outlives the probe.
 async fn check_version_within(binary: &str, limit: std::time::Duration) -> Result<String> {
-    let mut cmd = login_shell_command(binary, &["--version"], None);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let out = tokio::time::timeout(limit, cmd.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "{binary} --version did not finish within {}s",
-                limit.as_secs()
-            )
-        })??;
+    let cmd = login_shell_command(binary, &["--version"], None);
+    let out = contained_output(cmd, limit).await.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{binary} --version did not finish within {}s",
+            limit.as_secs()
+        )
+    })??;
     if !out.status.success() {
         anyhow::bail!(
             "{binary} --version exited {}: {}",
@@ -609,6 +609,48 @@ async fn check_version_within(binary: &str, limit: std::time::Duration) -> Resul
         String::from_utf8_lossy(&out.stdout).trim(),
         binary
     ))
+}
+
+/// Run a probe `cmd` with no stdin and piped output, bounded by `limit`
+/// (`None` when it overran). On unix the probe runs in a process group of
+/// its own, pinned by an anchor, and the whole group is SIGKILLed when the
+/// probe ends, times out or is cancelled, so a wrapper that starts the real
+/// CLI without `exec` cannot leave it running. Elsewhere, or when no anchor
+/// can be spawned, only the direct child is killed (`kill_on_drop`).
+async fn contained_output(
+    mut cmd: Command,
+    limit: std::time::Duration,
+) -> Option<std::io::Result<std::process::Output>> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let _group = ProbeGroup::join(&mut cmd);
+    tokio::time::timeout(limit, cmd.output()).await.ok()
+}
+
+/// The process group a doctor probe runs in; killed as a unit on drop.
+struct ProbeGroup(Option<crate::util::group_ownership::GroupOwner>);
+
+impl ProbeGroup {
+    fn join(cmd: &mut Command) -> Self {
+        #[cfg(unix)]
+        if let Some(owner) = crate::util::group_ownership::GroupOwner::new_anchored() {
+            cmd.process_group(owner.pgid());
+            return Self(Some(owner));
+        }
+        #[cfg(not(unix))]
+        let _ = cmd;
+        Self(None)
+    }
+}
+
+impl Drop for ProbeGroup {
+    fn drop(&mut self) {
+        if let Some(owner) = &mut self.0 {
+            owner.signal(crate::util::group_ownership::GroupSignal::Kill);
+        }
+    }
 }
 
 /// Outcome of a cheap, local agent-auth check. Never derived from a model
@@ -923,19 +965,6 @@ fn read_config_key(path: &Path, key: &str) -> ConfigKey {
     read_config_with(path, |v| non_empty_str(v.get(key)))
 }
 
-/// Whether the settings file at `path` sets a Claude auth variable in its
-/// `env` block. Values are never returned.
-fn read_settings_env_auth(path: &Path) -> ConfigKey {
-    read_config_with(path, |v| {
-        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
-            return false;
-        };
-        CLAUDE_AUTH_ENV_VARS
-            .iter()
-            .any(|var| non_empty_str(env.get(*var)))
-    })
-}
-
 /// Whether the effective Claude settings enable a cloud-provider switch.
 ///
 /// `paths` are ordered lowest to highest precedence (user settings, then
@@ -946,6 +975,35 @@ fn read_settings_env_auth(path: &Path) -> ConfigKey {
 /// unreadable file outranks the deciding one, the switch cannot be ruled
 /// out (an enabled lower value stays `Found`, otherwise `Unreadable`).
 fn resolve_settings_provider(paths: &[PathBuf]) -> ConfigKey {
+    resolve_settings_env(paths, CLAUDE_THIRD_PARTY_ENV_VARS, setting_truthy, false)
+}
+
+/// Whether the effective Claude settings set an auth variable to a
+/// non-empty value, resolved by the same precedence as
+/// [`resolve_settings_provider`]: an empty value in managed settings
+/// overrides the user's token. A value an unreadable file outranks is not
+/// counted as a login (`Unreadable`). Values are never returned.
+fn resolve_settings_auth(paths: &[PathBuf]) -> ConfigKey {
+    resolve_settings_env(
+        paths,
+        CLAUDE_AUTH_ENV_VARS,
+        |v| non_empty_str(Some(v)),
+        true,
+    )
+}
+
+/// For each of `vars`, take its value from the highest-precedence settings
+/// file that sets it and test it with `enabled`. The first enabled one is
+/// `Found` with its file. An unreadable file above the deciding one leaves
+/// the answer open: with `unreadable_overrides` the enabled value is then
+/// not counted; otherwise it still is. Else `Unreadable` if any file was
+/// unreadable, or `Absent`.
+fn resolve_settings_env(
+    paths: &[PathBuf],
+    vars: &[&str],
+    enabled: impl Fn(&serde_json::Value) -> bool,
+    unreadable_overrides: bool,
+) -> ConfigKey {
     // Highest precedence first.
     let envs: Vec<(&PathBuf, SettingsEnv)> = paths
         .iter()
@@ -953,14 +1011,16 @@ fn resolve_settings_provider(paths: &[PathBuf]) -> ConfigKey {
         .map(|p| (p, read_settings_env(p)))
         .collect();
     let mut unreadable: Option<&PathBuf> = None;
-    for var in CLAUDE_THIRD_PARTY_ENV_VARS {
+    for var in vars {
+        let mut outranked = false;
         for (path, env) in &envs {
             match env {
                 SettingsEnv::Unreadable => {
+                    outranked = true;
                     unreadable.get_or_insert(path);
                 }
                 SettingsEnv::Env(map) if map.contains_key(*var) => {
-                    if setting_truthy(&map[*var]) {
+                    if enabled(&map[*var]) && !(outranked && unreadable_overrides) {
                         return ConfigKey::Found((*path).clone());
                     }
                     break;
@@ -1094,15 +1154,19 @@ fn read_credentials_file(path: &Path) -> CredentialsFile {
 /// helper with a timeout and no stdin. Returns `(stdout, stderr)`, or `None`
 /// if it could not be spawned or did not finish in time.
 async fn run_claude_quietly(binary: &str, args: &[&str]) -> Option<(String, String)> {
-    let mut cmd = login_shell_command(binary, args, None);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    run_claude_quietly_within(binary, args, CLAUDE_PROBE_TIMEOUT).await
+}
+
+/// How long one short `claude` probe may run.
+const CLAUDE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn run_claude_quietly_within(
+    binary: &str,
+    args: &[&str],
+    limit: std::time::Duration,
+) -> Option<(String, String)> {
+    let cmd = login_shell_command(binary, args, None);
+    let out = contained_output(cmd, limit).await?.ok()?;
     Some((
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -1244,7 +1308,7 @@ fn build_claude_probe(
         third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS, &env.providers),
         credentials,
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
-        settings_env_var: scan_configs(&settings, read_settings_env_auth),
+        settings_env_var: resolve_settings_auth(&settings),
         settings_provider: resolve_settings_provider(&settings),
         stored_api_key: scan_config_key(global.as_slice(), "primaryApiKey"),
         is_macos,
@@ -1255,16 +1319,22 @@ fn build_claude_probe(
 const CLAUDE_FILE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Run blocking `f` off the async workers, giving up after `limit`. A read
-/// stuck on a stalled mount then costs one blocking thread, not the
-/// daemon's IPC task.
+/// stuck on a stalled mount then costs one detached thread, not the
+/// daemon's IPC task. It is a plain thread rather than `spawn_blocking`
+/// because runtime shutdown joins blocking tasks: a stalled scan would
+/// keep an in-process `pidash doctor` from ever exiting.
 async fn blocking_within<T: Send + 'static>(
     limit: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    tokio::time::timeout(limit, tokio::task::spawn_blocking(f))
-        .await
-        .ok()?
-        .ok()
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("pidash-doctor-scan".to_string())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    tokio::time::timeout(limit, rx).await.ok()?.ok()
 }
 
 /// `None` when Claude's config files could not be read in time.
@@ -1310,8 +1380,8 @@ fn mark_local_checks(report: &mut Report, note: &str) {
 enum DaemonReport {
     /// The running daemon ran the suite in its own environment.
     Report(Report),
-    /// The daemon was reached but gave no usable report: an error (e.g. an
-    /// unknown `--runner`), a timeout, or a report from an older daemon.
+    /// A current daemon was reached but gave no usable report: an error it
+    /// marked as its own (e.g. an unknown `--runner`) or a timeout.
     Error(String),
     /// The running daemon uses another config dir than the one asked
     /// about; check in this process instead.
@@ -1319,7 +1389,8 @@ enum DaemonReport {
     /// No daemon answered; check in this process instead.
     Unavailable,
     /// The daemon predates the Claude auth probe (and ignores the config
-    /// dir it was asked about).
+    /// dir it was asked about): an unversioned report, an unmarked error,
+    /// or a daemon on the legacy socket.
     Outdated(String),
 }
 
@@ -1328,6 +1399,11 @@ enum DaemonReport {
 pub const CLAUDE_AUTH_PROBE_VERSION: u32 = 1;
 /// `DoctorRun` error code: the daemon uses another config dir.
 pub const CONFIG_MISMATCH_CODE: i64 = 409;
+/// `DoctorRun` error code: a current daemon could not run the suite for
+/// this request (e.g. an unknown `--runner`).
+pub const DOCTOR_FAILED_CODE: i64 = 422;
+/// `DoctorRun` error code: a current daemon ran out of budget.
+pub const DOCTOR_TIMEOUT_CODE: i64 = 504;
 /// How long the daemon may spend on `DoctorRun` before it gives up.
 pub const DAEMON_DOCTOR_BUDGET: std::time::Duration = std::time::Duration::from_secs(170);
 /// How long the CLI waits for the daemon: the budget plus a margin, so the
@@ -1402,11 +1478,11 @@ pub async fn daemon_doctor(
             Response::Doctor(report)
         }
         Ok(Err(e)) => Response::Error(RpcError {
-            code: 400,
+            code: DOCTOR_FAILED_CODE,
             message: e.to_string(),
         }),
         Err(_) => Response::Error(RpcError {
-            code: 504,
+            code: DOCTOR_TIMEOUT_CODE,
             message: format!(
                 "the daemon's doctor checks did not finish within {}s; \
                  retry with `--runner <name>` to check one runner",
@@ -1415,6 +1491,31 @@ pub async fn daemon_doctor(
         }),
     }
 }
+
+/// [`report_from_daemon`], and when no daemon answers at `socket`, check
+/// the `legacy` socket an older daemon may still listen on.
+async fn ask_daemon(
+    socket: &Path,
+    legacy: Option<&Path>,
+    runner: Option<&str>,
+    config_dir: &Path,
+    timeout: std::time::Duration,
+) -> DaemonReport {
+    match report_from_daemon(socket, runner, config_dir, timeout).await {
+        // Only a daemon older than this CLI listens there (see
+        // `Paths::legacy_ipc_socket_path`), so it is outdated, not stopped.
+        DaemonReport::Unavailable => match legacy {
+            Some(legacy) if crate::ipc::client::Client::connect(legacy).await.is_ok() => {
+                DaemonReport::Outdated(OUTDATED_DAEMON.to_string())
+            }
+            _ => DaemonReport::Unavailable,
+        },
+        other => other,
+    }
+}
+
+const OUTDATED_DAEMON: &str = "the running daemon is an older build whose doctor does not \
+     check the Claude login; restart it with `pidash restart` and run doctor again";
 
 /// Ask the running daemon to run doctor (`DoctorRun` over IPC) for
 /// `config_dir`. Only a failed connect means "no daemon"; once connected,
@@ -1436,16 +1537,24 @@ async fn report_from_daemon(
     match tokio::time::timeout(timeout, call).await {
         Ok(Ok(Response::Doctor(report))) => match report.daemon_probe_version {
             Some(v) if v >= CLAUDE_AUTH_PROBE_VERSION => DaemonReport::Report(report),
-            _ => DaemonReport::Outdated(
-                "the running daemon is an older build whose doctor does not check the Claude \
-                 login; restart it with `pidash restart` and run doctor again"
-                    .to_string(),
-            ),
+            _ => DaemonReport::Outdated(OUTDATED_DAEMON.to_string()),
         },
         Ok(Ok(Response::Error(e))) if e.code == CONFIG_MISMATCH_CODE => {
             DaemonReport::OtherConfig(e.message)
         }
-        Ok(Ok(Response::Error(e))) => DaemonReport::Error(e.message),
+        // Only a current daemon marks its doctor errors with these codes.
+        // Anything else comes from an older daemon, which ignores
+        // `config_dir`: its "no runner named ..." may be about another
+        // config, so it is not trusted.
+        Ok(Ok(Response::Error(e)))
+            if e.code == DOCTOR_FAILED_CODE || e.code == DOCTOR_TIMEOUT_CODE =>
+        {
+            DaemonReport::Error(e.message)
+        }
+        Ok(Ok(Response::Error(e))) => {
+            tracing::debug!("older daemon answered doctor with an error: {}", e.message);
+            DaemonReport::Outdated(OUTDATED_DAEMON.to_string())
+        }
         Ok(Ok(other)) => {
             DaemonReport::Error(format!("unexpected answer from the daemon: {other:?}"))
         }
@@ -2925,7 +3034,274 @@ mod tests {
             .iter()
             .find(|c| c.name == "runner-checks@slow")
             .unwrap_or_else(|| panic!("no timeout check in {names:?}"));
-        assert!(!timed_out.ok && !timed_out.blocker, "{timed_out:?}");
+        // The slow runner's binary check never ran, so the report is
+        // incomplete and doctor must not exit 0.
+        assert!(!timed_out.ok && timed_out.blocker, "{timed_out:?}");
         assert!(timed_out.detail.contains("--runner slow"), "{timed_out:?}");
+        assert!(report.has_blockers());
+    }
+
+    /// A fake `claude` that answers `--version` and hangs on anything else.
+    #[cfg(unix)]
+    fn claude_hanging_after_version(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("claude-slow-auth");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.0.0 (Claude Code)'; exit 0; fi\n\
+             exec sleep 300\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runner_deadline_after_the_binary_check_is_not_a_blocker() {
+        // The binary check passed; only the (non-blocking) auth probe was
+        // cut off, so the timeout does not fail preflight.
+        let (dir, paths) = temp_paths();
+        let mut slow = runner("slow", "codex-missing");
+        slow.agent.kind = AgentKind::ClaudeCode;
+        slow.claude_code.binary = claude_hanging_after_version(dir.path())
+            .display()
+            .to_string();
+        crate::config::file::write_config(&paths, &cfg_with(vec![slow])).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let report = execute_until(&paths, None, Some(deadline)).await.unwrap();
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        let binary = report.checks.iter().find(|c| c.name == "claude");
+        assert!(binary.is_some_and(|c| c.ok), "{names:?}");
+        let timed_out = report
+            .checks
+            .iter()
+            .find(|c| c.name == "runner-checks")
+            .unwrap_or_else(|| panic!("no timeout check in {names:?}"));
+        assert!(!timed_out.blocker, "{timed_out:?}");
+    }
+
+    #[test]
+    fn stalled_file_scan_does_not_block_runtime_shutdown() {
+        // `pidash doctor` runs in-process on a tokio runtime that is shut
+        // down when `main` returns; a scan stuck on a stalled mount must not
+        // keep that shutdown waiting.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(blocking_within(
+                std::time::Duration::from_millis(50),
+                move || {
+                    let _ = release_rx.recv();
+                    1
+                },
+            ));
+            drop(rt);
+            let _ = done_tx.send(out);
+        });
+        let res = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let _ = release_tx.send(());
+        assert_eq!(
+            res.expect("runtime shutdown waited for the stalled scan"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn error_from_an_older_daemon_is_outdated_not_trusted() {
+        // An older daemon ignores `config_dir`, so its "no runner named"
+        // may be about another config; only errors a current daemon marks
+        // as its own are reported as-is.
+        let dir = tempfile::tempdir().unwrap();
+        let err = |code: i64| {
+            Some(crate::ipc::protocol::Response::Error(
+                crate::ipc::protocol::RpcError {
+                    code,
+                    message: "no runner named \"beta\" in config; configured: [main]".into(),
+                },
+            ))
+        };
+        for (i, code) in [500, 400].into_iter().enumerate() {
+            let sock = dir.path().join(format!("old{i}.sock"));
+            let server = fake_daemon(&sock, err(code));
+            match report_from_daemon(&sock, Some("beta"), dir.path(), DAEMON_DOCTOR_TIMEOUT).await {
+                DaemonReport::Outdated(_) => {}
+                other => panic!("code {code}: expected outdated daemon, got {other:?}"),
+            }
+            server.await.unwrap();
+        }
+        for (i, code) in [DOCTOR_FAILED_CODE, DOCTOR_TIMEOUT_CODE]
+            .into_iter()
+            .enumerate()
+        {
+            let sock = dir.path().join(format!("new{i}.sock"));
+            let server = fake_daemon(&sock, err(code));
+            match report_from_daemon(&sock, Some("beta"), dir.path(), DAEMON_DOCTOR_TIMEOUT).await {
+                DaemonReport::Error(m) => assert!(m.contains("no runner named"), "{m}"),
+                other => panic!("code {code}: expected daemon error, got {other:?}"),
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_doctor_marks_its_runner_errors() {
+        let (_dir, paths) = temp_paths();
+        crate::config::file::write_config(&paths, &cfg_with(vec![runner("main", "codex")]))
+            .unwrap();
+        match daemon_doctor(&paths, Some("nope"), None, DAEMON_DOCTOR_BUDGET).await {
+            crate::ipc::protocol::Response::Error(e) => {
+                assert_eq!(e.code, DOCTOR_FAILED_CODE, "{e:?}")
+            }
+            other => panic!("expected runner error, got {other:?}"),
+        }
+    }
+
+    /// A fake `claude` wrapper that starts the real (hanging) CLI as a
+    /// child instead of `exec`ing it, recording the child's pid.
+    #[cfg(unix)]
+    fn wrapper_binary(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let pid = dir.join("child-pid");
+        let bin = dir.join("claude-wrapper");
+        let script = format!(
+            "#!/bin/sh\nsh -c 'echo $$ > \"{pid}\"; exec sleep 300'\necho done\n",
+            pid = pid.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, pid)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_probe_timeout_kills_the_wrappers_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, pid_file) = wrapper_binary(dir.path());
+        let started = std::time::Instant::now();
+        let out = run_claude_quietly_within(
+            &bin.display().to_string(),
+            &["auth", "status"],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert!(out.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        let pid = wait_for_pid(&pid_file).await;
+        let gone = is_gone(pid).await;
+        if !gone {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert!(gone, "child {pid} of the timed-out wrapper survived");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_cancel_kills_the_wrappers_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, pid_file) = wrapper_binary(dir.path());
+        let bin = bin.display().to_string();
+        let probe = tokio::spawn(async move { check_version(&bin).await });
+        let pid = wait_for_pid(&pid_file).await;
+        probe.abort();
+        let _ = probe.await;
+        let gone = is_gone(pid).await;
+        if !gone {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert!(gone, "child {pid} of the cancelled wrapper survived");
+    }
+
+    #[test]
+    fn managed_settings_override_user_auth_vars() {
+        // An empty value in managed settings overrides the user's token, so
+        // the fallback must not count the user's value as a login.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let user = home.path().join(".claude").join("settings.json");
+        let managed_dir = tempfile::tempdir().unwrap();
+        let managed = managed_dir.path().join("managed-settings.json");
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        std::fs::write(&user, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"tok"}}"#).unwrap();
+        std::fs::write(&managed, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":""}}"#).unwrap();
+        let p = build_claude_probe(None, &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_env_var, ConfigKey::Absent);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+
+        // Another variable still set in the user's settings counts.
+        std::fs::write(
+            &user,
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"tok","ANTHROPIC_API_KEY":"key"}}"#,
+        )
+        .unwrap();
+        let p = build_claude_probe(None, &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_env_var, ConfigKey::Found(user.clone()));
+
+        // The reverse: user empty, managed set, is a login from managed.
+        std::fs::write(&user, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":""}}"#).unwrap();
+        std::fs::write(&managed, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"tok"}}"#).unwrap();
+        let p = build_claude_probe(None, &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_env_var, ConfigKey::Found(managed.clone()));
+
+        // An unreadable managed file could blank the user's token.
+        std::fs::write(&user, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"tok"}}"#).unwrap();
+        std::fs::write(&managed, "{not json").unwrap();
+        let p = build_claude_probe(None, &env, std::slice::from_ref(&managed), false);
+        assert!(
+            matches!(p.settings_env_var, ConfigKey::Unreadable(_)),
+            "{:?}",
+            p.settings_env_var
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_on_the_legacy_socket_is_outdated_not_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("current.sock");
+        let legacy = dir.path().join("legacy.sock");
+        match ask_daemon(
+            &socket,
+            Some(&legacy),
+            None,
+            dir.path(),
+            DAEMON_DOCTOR_TIMEOUT,
+        )
+        .await
+        {
+            DaemonReport::Unavailable => {}
+            other => panic!("expected no daemon, got {other:?}"),
+        }
+        let _listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+        match ask_daemon(
+            &socket,
+            Some(&legacy),
+            None,
+            dir.path(),
+            DAEMON_DOCTOR_TIMEOUT,
+        )
+        .await
+        {
+            DaemonReport::Outdated(m) => assert!(m.contains("pidash restart"), "{m}"),
+            other => panic!("expected outdated daemon, got {other:?}"),
+        }
     }
 }
