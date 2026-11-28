@@ -164,6 +164,16 @@ cap}`: a refusal (`wait_cap_reached` once the one-pool allowance is
   grouped by type from its side (`blocked_by`, `blocking`,
   `relates_to`, …), each `{id, identifier, name, state, state_group}`.
   `pidash issue get <identifier>` carries the same block as `relations`.
+- `pidash issue tree <identifier> [--recursive] [--open]` — an epic's
+  progress in one call: the parent, its children and a rollup. Prints
+  `{issue, recursive, rollup, children, truncated}`; `rollup` is
+  `{total, done, open, by_state_group}`, where `done` counts completed
+  **and** cancelled children (both are closed). Each child carries
+  `{id, identifier, name, state, state_group, priority, parent, depth,
+  assignees, active_run}` (`active_run` is `{id, status}` or `null`).
+  `--recursive` walks every descendant depth-first and rolls them all up;
+  `--open` lists only the open children (the rollup still counts all).
+  Backed by `GET .../work-items/<id>/tree/[?recursive=true]`.
 - `pidash issue search <query> [--project <PROJ-or-UUID>] [--status <status>] [--state-group <group>] [--since <iso8601>] [--limit <N>] [--sort <order>]` —
   full-text search across work item titles, descriptions, **and** comments.
   Use this to recover historical context: check whether a similar issue has

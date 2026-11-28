@@ -37,6 +37,7 @@ from .issue import (
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
     IssueRelationGroupedAPIEndpoint,
+    IssueTreeAPIEndpoint,
     IssueRelationRelateAPIEndpoint,
     IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,

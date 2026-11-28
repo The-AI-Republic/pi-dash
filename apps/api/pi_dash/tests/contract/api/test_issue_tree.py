@@ -1,0 +1,338 @@
+# Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+
+"""Contract tests for ``GET .../work-items/<id>/tree/`` (PDASHOSS01-405).
+
+Backs ``pidash issue tree``: a parent plus its children (optionally every
+descendant) with a rollup per state group, ``done`` counting both completed
+and cancelled children as closed.
+"""
+
+import pytest
+from rest_framework import status as http_status
+
+from pi_dash.db.models import Issue, IssueAssignee, Project, ProjectMember, State
+from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod
+
+
+@pytest.fixture
+def tree_project(db, workspace, create_user):
+    project = Project.objects.create(name="Tree", identifier="TREE", workspace=workspace, created_by=create_user)
+    ProjectMember.objects.get_or_create(project=project, member=create_user, defaults={"role": 20, "is_active": True})
+    return project
+
+
+@pytest.fixture
+def states(tree_project):
+    groups = {
+        "backlog": "Backlog",
+        "unstarted": "Todo",
+        "started": "In Progress",
+        "review": "In Review",
+        "completed": "Done",
+        "cancelled": "Cancelled",
+    }
+    return {group: State.objects.create(name=name, project=tree_project, group=group) for group, name in groups.items()}
+
+
+@pytest.fixture
+def make_issue(tree_project, states, create_user):
+    def _make(name, *, parent=None, group="unstarted", project=None):
+        project = project or tree_project
+        return Issue.objects.create(
+            name=name,
+            project=project,
+            workspace=project.workspace,
+            state=states[group] if project == tree_project else None,
+            parent=parent,
+            created_by=create_user,
+        )
+
+    return _make
+
+
+def _ident(issue):
+    return f"{issue.project.identifier}-{issue.sequence_id}"
+
+
+def _url(slug, issue, query=""):
+    return f"/api/v1/workspaces/{slug}/projects/{issue.project_id}/work-items/{issue.id}/tree/{query}"
+
+
+@pytest.mark.contract
+@pytest.mark.django_db
+class TestIssueTree:
+    def test_rollup_counts_mixed_state_groups_cancelled_is_closed(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic", group="started")
+        make_issue("backlog child", parent=epic, group="backlog")
+        make_issue("todo child", parent=epic, group="unstarted")
+        make_issue("wip child", parent=epic, group="started")
+        make_issue("done child", parent=epic, group="completed")
+        make_issue("done child 2", parent=epic, group="completed")
+        make_issue("cancelled child", parent=epic, group="cancelled")
+        make_issue("unrelated")
+
+        resp = api_key_client.get(_url(workspace.slug, epic))
+
+        assert resp.status_code == http_status.HTTP_200_OK, resp.content
+        body = resp.json()
+        assert body["issue"]["identifier"] == _ident(epic)
+        assert body["issue"]["state_group"] == "started"
+        assert body["recursive"] is False
+        assert body["truncated"] is False
+        assert body["rollup"] == {
+            "total": 6,
+            "done": 3,
+            "open": 3,
+            "by_state_group": {
+                "backlog": 1,
+                "unstarted": 1,
+                "started": 1,
+                "review": 0,
+                "test": 0,
+                "completed": 2,
+                "cancelled": 1,
+            },
+        }
+        assert [c["name"] for c in body["children"]] == [
+            "backlog child",
+            "todo child",
+            "wip child",
+            "done child",
+            "done child 2",
+            "cancelled child",
+        ]
+        assert all(c["depth"] == 1 and c["parent"] == _ident(epic) for c in body["children"])
+
+    def test_child_carries_state_assignees_and_active_run(
+        self, api_key_client, workspace, make_issue, create_user, tree_project
+    ):
+        epic = make_issue("Epic")
+        wip = make_issue("wip", parent=epic, group="started")
+        IssueAssignee.objects.create(
+            issue=wip, assignee=create_user, project=tree_project, workspace=tree_project.workspace
+        )
+        pod = Pod.default_for_project(tree_project)
+        AgentRun.objects.create(
+            workspace=workspace,
+            created_by=create_user,
+            pod=pod,
+            work_item=wip,
+            status=AgentRunStatus.COMPLETED,
+        )
+        run = AgentRun.objects.create(
+            workspace=workspace,
+            created_by=create_user,
+            pod=pod,
+            work_item=wip,
+            status=AgentRunStatus.RUNNING,
+        )
+        idle = make_issue("idle", parent=epic)
+
+        body = api_key_client.get(_url(workspace.slug, epic)).json()
+
+        by_name = {c["name"]: c for c in body["children"]}
+        assert by_name["wip"]["identifier"] == _ident(wip)
+        assert by_name["wip"]["state"] == "In Progress"
+        assert by_name["wip"]["state_group"] == "started"
+        assert by_name["wip"]["assignees"] == [{"id": str(create_user.id), "display_name": create_user.display_name}]
+        assert by_name["wip"]["active_run"] == {"id": str(run.id), "status": "running"}
+        assert by_name["idle"]["identifier"] == _ident(idle)
+        assert by_name["idle"]["assignees"] == []
+        assert by_name["idle"]["active_run"] is None
+
+    def test_recursive_walks_descendants_depth_first(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic, group="completed")
+        b = make_issue("b", parent=epic)
+        a1 = make_issue("a1", parent=a, group="cancelled")
+        make_issue("a1x", parent=a1, group="started")
+
+        flat = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert [c["name"] for c in flat["children"]] == ["a", "b"]
+        assert flat["rollup"]["total"] == 2
+
+        deep = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert deep["recursive"] is True
+        assert [(c["name"], c["depth"], c["parent"]) for c in deep["children"]] == [
+            ("a", 1, _ident(epic)),
+            ("a1", 2, _ident(a)),
+            ("a1x", 3, _ident(a1)),
+            ("b", 1, _ident(epic)),
+        ]
+        assert deep["rollup"]["total"] == 4
+        assert deep["rollup"]["done"] == 2
+        assert deep["rollup"]["open"] == 2
+        assert _ident(b) in [c["identifier"] for c in deep["children"]]
+
+    def test_hidden_and_archived_children_are_left_out(self, api_key_client, workspace, make_issue, create_user):
+        from django.utils import timezone
+
+        epic = make_issue("Epic")
+        make_issue("visible", parent=epic)
+        archived = make_issue("archived", parent=epic)
+        archived.archived_at = timezone.now()
+        archived.save()
+        other = Project.objects.create(name="Other", identifier="OTH", workspace=workspace, created_by=create_user)
+        ProjectMember.objects.filter(project=other, member=create_user).update(is_active=False)
+        make_issue("not a member", parent=epic, project=other)
+
+        body = api_key_client.get(_url(workspace.slug, epic)).json()
+
+        assert [c["name"] for c in body["children"]] == ["visible"]
+        assert body["rollup"]["total"] == 1
+
+    def test_no_children_is_an_empty_rollup(self, api_key_client, workspace, make_issue):
+        leaf = make_issue("leaf")
+        body = api_key_client.get(_url(workspace.slug, leaf)).json()
+        assert body["children"] == []
+        assert body["rollup"]["total"] == 0
+        assert body["rollup"]["done"] == 0
+        assert body["rollup"]["open"] == 0
+
+    def test_bad_recursive_value_is_400(self, api_key_client, workspace, make_issue):
+        leaf = make_issue("leaf")
+        resp = api_key_client.get(_url(workspace.slug, leaf, "?recursive=maybe"))
+        assert resp.status_code == http_status.HTTP_400_BAD_REQUEST
+
+    def test_unknown_issue_is_404(self, api_key_client, workspace, tree_project):
+        url = (
+            f"/api/v1/workspaces/{workspace.slug}/projects/{tree_project.id}/work-items/"
+            "00000000-0000-0000-0000-000000000000/tree/"
+        )
+        assert api_key_client.get(url).status_code == http_status.HTTP_404_NOT_FOUND
+
+    def test_recursive_accepts_1_and_0(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic)
+        make_issue("a1", parent=a)
+        assert api_key_client.get(_url(workspace.slug, epic, "?recursive=1")).json()["rollup"]["total"] == 2
+        flat = api_key_client.get(_url(workspace.slug, epic, "?recursive=0")).json()
+        assert flat["recursive"] is False
+        assert flat["rollup"]["total"] == 1
+
+    def test_stateless_child_counts_as_open(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        child = make_issue("no state", parent=epic)
+        Issue.objects.filter(pk=child.pk).update(state=None)
+        body = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert body["children"][0]["state"] is None
+        assert body["children"][0]["state_group"] is None
+        assert body["rollup"]["total"] == 1
+        assert body["rollup"]["open"] == 1
+        assert body["rollup"]["done"] == 0
+
+    def test_past_node_limit_is_truncated(self, api_key_client, workspace, make_issue, monkeypatch):
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic, group="completed")
+        make_issue("b", parent=epic)
+        make_issue("a1", parent=a)
+        make_issue("a2", parent=a)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert body["truncated"] is True
+        assert [c["name"] for c in body["children"]] == ["a", "a1", "b"]
+        assert body["rollup"]["total"] == 3
+        assert body["rollup"]["done"] == 1
+        flat = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert flat["truncated"] is False
+
+    def test_deep_chain_at_the_cap_is_not_a_500(self, api_key_client, workspace, make_issue):
+        # One level per node: deeper than Python's default recursion limit
+        # once the request frames are counted.
+        epic = make_issue("Epic")
+        parent = epic
+        for i in range(1000):
+            parent = make_issue(f"c{i}", parent=parent)
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as queries:
+            resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
+        assert resp.status_code == http_status.HTTP_200_OK
+        # One set-based traversal, not one query per level: the request
+        # costs a fixed number of queries however deep the chain is.
+        assert len(queries) <= 15, len(queries)
+        body = resp.json()
+        assert len(body["children"]) == 1000
+        assert body["children"][-1]["depth"] == 1000
+        assert body["truncated"] is False
+
+    def test_truncated_only_past_the_limit(self, api_key_client, workspace, make_issue, monkeypatch):
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        for name in ("a", "b", "c"):
+            make_issue(name, parent=epic)
+        at_limit = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert at_limit["truncated"] is False
+        assert [c["name"] for c in at_limit["children"]] == ["a", "b", "c"]
+        make_issue("d", parent=epic)
+        past = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert past["truncated"] is True
+        assert [c["name"] for c in past["children"]] == ["a", "b", "c"]
+
+    def test_hidden_child_cuts_off_its_subtree(self, api_key_client, workspace, make_issue, create_user):
+        epic = make_issue("Epic")
+        other = Project.objects.create(name="Other", identifier="OTH", workspace=workspace, created_by=create_user)
+        ProjectMember.objects.filter(project=other, member=create_user).update(is_active=False)
+        hidden = make_issue("hidden", parent=epic, project=other)
+        make_issue("visible grandchild", parent=hidden)
+        make_issue("shown", parent=epic)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert [c["name"] for c in body["children"]] == ["shown"]
+
+    def test_parent_cycle_terminates(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic)
+        b = make_issue("b", parent=a)
+        Issue.objects.filter(pk=epic.pk).update(parent=b)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert [(c["name"], c["depth"]) for c in body["children"]] == [("a", 1), ("b", 2)]
+        assert body["truncated"] is False
+
+    def test_chain_one_past_the_limit_is_truncated(self, api_key_client, workspace, make_issue, monkeypatch):
+        # The depth cap lets the row at depth NODE_LIMIT + 1 through, so a
+        # chain one deeper than the limit still reports the cut.
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        parent = epic
+        for name in ("c1", "c2", "c3"):
+            parent = make_issue(name, parent=parent)
+        at_limit = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert at_limit["truncated"] is False
+        make_issue("c4", parent=parent)
+        past = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert past["truncated"] is True
+        assert [c["name"] for c in past["children"]] == ["c1", "c2", "c3"]
+
+    def test_child_gone_between_queries_is_left_out(self, api_key_client, workspace, make_issue, monkeypatch):
+        # The traversal and the row fetch are separate reads: a child
+        # archived in between is dropped (with its subtree), not a 500.
+        from django.utils import timezone
+
+        from pi_dash.orchestration import issue_tree
+
+        epic = make_issue("Epic")
+        gone = make_issue("gone", parent=epic)
+        make_issue("gone child", parent=gone)
+        make_issue("kept", parent=epic)
+        real = issue_tree._descendants
+
+        def racing(issue, visible, *, recursive):
+            result = real(issue, visible, recursive=recursive)
+            Issue.objects.filter(pk=gone.pk).update(archived_at=timezone.now())
+            return result
+
+        monkeypatch.setattr(issue_tree, "_descendants", racing)
+        resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
+        assert resp.status_code == http_status.HTTP_200_OK, resp.content
+        body = resp.json()
+        assert [c["name"] for c in body["children"]] == ["kept"]
+        assert body["rollup"]["total"] == 1
