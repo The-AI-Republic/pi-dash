@@ -108,7 +108,9 @@ jobs:
     # test_link_crawl_comments_scripts.py) pin production's html.parser
     # behaviour (CPython 3.12.10, apps/api/Dockerfile.api) and skip on
     # >=3.12.12, so "3.12.x" would silently drop them. ubuntu-24.04 still
-    # ships a 3.12.10 build; ubuntu-26.04 does not. Move both together.
+    # ships a 3.12.10 build; ubuntu-26.04 does not. Move the image and pin
+    # together, here and in the live job (rust-api-contract.yml) and the
+    # contract-rust job (rust-api-contract-rust.yml).
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -242,15 +244,8 @@ jobs:
             apps/api/requirements/test.txt
             rust-api/contract-tests/requirements.txt
 
-      - name: Assert production html.parser (link-crawl parity tests must not skip)
-        run: |
-          python - <<'PY'
-          import sys
-          from html.parser import HTMLParser
-          if hasattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS"):
-              sys.exit(f"Python {sys.version.split()[0]} has the new html.parser; the requires_legacy_parser link-crawl tests would skip. Keep this job on CPython 3.12.10.")
-          print(f"Python {sys.version.split()[0]}: legacy html.parser OK")
-          PY
+      - name: Assert production html.parser (oracle must match CPython 3.12.10)
+        run: python rust-api/contract-tests/_harness/assert_legacy_html_parser.py
 
       - name: Install API dependencies
         working-directory: apps/api
