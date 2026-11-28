@@ -12,8 +12,14 @@ name: rust-api-contract-tests-dispatch-expire-rust
 # recent waits, other executors and terminal rows untouched).
 
 on:
+  # rust-dev is retired (PDASHOSS01-423): the push trigger now targets main,
+  # plus the same nightly + manual runs as the other rust-api workflows, so
+  # a red main is visible even when no push touches these paths.
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-dispatch-expire-rust.yml"

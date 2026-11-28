@@ -332,75 +332,7 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
     let now = chrono::Utc::now();
     let mut update = run_entity::Entity::update_many();
     for clause in &values.clauses {
-        update = match clause.column {
-            "status" => update.col_expr(
-                run_entity::Column::Status,
-                sea_orm::sea_query::Expr::value(match &clause.value {
-                    pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
-                    _ => return Err(SeamError("status finalize clause".to_owned())),
-                }),
-            ),
-            "ended_at" => update.col_expr(
-                run_entity::Column::EndedAt,
-                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
-            ),
-            "terminal_hooks_applied_at" | "terminal_capacity_released_at" => match clause.column {
-                "terminal_hooks_applied_at" => update.col_expr(
-                    run_entity::Column::TerminalHooksAppliedAt,
-                    sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
-                ),
-                _ => update.col_expr(
-                    run_entity::Column::TerminalCapacityReleasedAt,
-                    sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
-                ),
-            },
-            // `error_code` / `error` are folded into `error_details`
-            // (`ERROR_DETAILS_COLUMN`); `refusal_category` is a
-            // generated column. Only `llm_model` is an own column.
-            "error_code" | "error" => update,
-            "refusal_category" | "llm_model" => {
-                let text = match &clause.value {
-                    pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
-                    pidash_services::runner_runs::SetValue::Null => String::new(),
-                    _ => return Err(SeamError("text finalize clause".to_owned())),
-                };
-                match clause.column {
-                    "refusal_category" => update.col_expr(
-                        run_entity::Column::RefusalCategory,
-                        sea_orm::sea_query::Expr::value(text),
-                    ),
-                    _ => update.col_expr(
-                        run_entity::Column::LlmModel,
-                        sea_orm::sea_query::Expr::value(text),
-                    ),
-                }
-            }
-            "done_payload" | "usage" => match (&clause.value, clause.column) {
-                (pidash_services::runner_runs::SetValue::Json(value), "done_payload") => update
-                    .col_expr(
-                        run_entity::Column::DonePayload,
-                        sea_orm::sea_query::Expr::value(value.clone()),
-                    ),
-                (pidash_services::runner_runs::SetValue::Json(value), "usage") => update.col_expr(
-                    run_entity::Column::Usage,
-                    sea_orm::sea_query::Expr::value(value.clone()),
-                ),
-                _ => return Err(SeamError("json finalize clause".to_owned())),
-            },
-            "error_details" => update.col_expr(
-                run_entity::Column::ErrorDetails,
-                sea_orm::sea_query::Expr::value(
-                    merged_error_details
-                        .clone()
-                        .unwrap_or_else(|| Value::Object(Default::default())),
-                ),
-            ),
-            unknown => {
-                return Err(SeamError(format!(
-                    "finalize_agent_run: unmapped finalize column {unknown}"
-                )))
-            }
-        };
+        update = finalize_set(update, clause, now, merged_error_details.as_ref())?;
     }
     update
         .filter(run_entity::Column::Id.eq(call.run_id))
@@ -433,6 +365,94 @@ async fn finalize_agent_run(pool: &PgPool, call: FinalizeCall) -> Result<bool, S
         }
     }
     Ok(true)
+}
+
+/// One finalize clause onto the `agent_run` UPDATE. Every column
+/// `plan_finalize_values` can emit must map here: an unmapped one fails
+/// the whole finalize, and the sweep retries forever (PDASHOSS01-423).
+fn finalize_set(
+    update: sea_orm::UpdateMany<pidash_db::entity::agent_run::Entity>,
+    clause: &pidash_services::runner_runs::SetClause,
+    now: DateTime<Utc>,
+    merged_error_details: Option<&Value>,
+) -> Result<sea_orm::UpdateMany<pidash_db::entity::agent_run::Entity>, SeamError> {
+    use pidash_db::entity::agent_run as run_entity;
+    let update = match clause.column {
+        "status" => update.col_expr(
+            run_entity::Column::Status,
+            sea_orm::sea_query::Expr::value(match &clause.value {
+                pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
+                _ => return Err(SeamError("status finalize clause".to_owned())),
+            }),
+        ),
+        "ended_at" => update.col_expr(
+            run_entity::Column::EndedAt,
+            sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+        ),
+        "terminal_hooks_applied_at" | "terminal_capacity_released_at" => match clause.column {
+            "terminal_hooks_applied_at" => update.col_expr(
+                run_entity::Column::TerminalHooksAppliedAt,
+                sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+            ),
+            _ => update.col_expr(
+                run_entity::Column::TerminalCapacityReleasedAt,
+                sea_orm::sea_query::Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+            ),
+        },
+        // `error_code` / `error` are folded into `error_details`
+        // (`ERROR_DETAILS_COLUMN`); `refusal_category` is a
+        // generated column. `llm_model` and `failure_reason` (the
+        // PDASHOSS01-183 taxonomy, set on every FAILED plan) are own
+        // columns.
+        "error_code" | "error" => update,
+        "refusal_category" | "llm_model" | "failure_reason" => {
+            let text = match &clause.value {
+                pidash_services::runner_runs::SetValue::Text(text) => text.clone(),
+                pidash_services::runner_runs::SetValue::Null => String::new(),
+                _ => return Err(SeamError("text finalize clause".to_owned())),
+            };
+            match clause.column {
+                "refusal_category" => update.col_expr(
+                    run_entity::Column::RefusalCategory,
+                    sea_orm::sea_query::Expr::value(text),
+                ),
+                "failure_reason" => update.col_expr(
+                    run_entity::Column::FailureReason,
+                    sea_orm::sea_query::Expr::value(text),
+                ),
+                _ => update.col_expr(
+                    run_entity::Column::LlmModel,
+                    sea_orm::sea_query::Expr::value(text),
+                ),
+            }
+        }
+        "done_payload" | "usage" => match (&clause.value, clause.column) {
+            (pidash_services::runner_runs::SetValue::Json(value), "done_payload") => update
+                .col_expr(
+                    run_entity::Column::DonePayload,
+                    sea_orm::sea_query::Expr::value(value.clone()),
+                ),
+            (pidash_services::runner_runs::SetValue::Json(value), "usage") => update.col_expr(
+                run_entity::Column::Usage,
+                sea_orm::sea_query::Expr::value(value.clone()),
+            ),
+            _ => return Err(SeamError("json finalize clause".to_owned())),
+        },
+        "error_details" => update.col_expr(
+            run_entity::Column::ErrorDetails,
+            sea_orm::sea_query::Expr::value(
+                merged_error_details
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            ),
+        ),
+        unknown => {
+            return Err(SeamError(format!(
+                "finalize_agent_run: unmapped finalize column {unknown}"
+            )))
+        }
+    };
+    Ok(update)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,5 +583,35 @@ mod tests {
             json!(PidashAgentReason::NOT_CONNECTED)
         );
         assert_eq!(updates["error"], json!(DETAIL_NEVER_CAME_ONLINE));
+    }
+
+    /// Every clause `plan_finalize_values` emits for the expiry's FAILED
+    /// finalize maps onto the UPDATE. PDASHOSS01-183 added the
+    /// `failure_reason` safety-net clause; an unmapped column failed every
+    /// sweep that found a stale wait, and the job retried forever.
+    #[test]
+    fn every_planned_expiry_clause_maps_onto_the_update() {
+        use pidash_services::runner_runs::{finalization, SetValue};
+        let extras: Vec<(&'static str, SetValue)> = expire_updates()
+            .iter()
+            .map(|(column, value)| update_clause(column, value).expect("expiry update maps"))
+            .collect();
+        let values = finalization::plan_finalize_values(
+            pidash_types::runner_runs::AgentRunStatus::Failed,
+            &extras,
+        )
+        .expect("terminal plan");
+        assert!(
+            values
+                .clauses
+                .iter()
+                .any(|clause| clause.column == "failure_reason"),
+            "the FAILED plan carries the taxonomy clause"
+        );
+        let mut update = pidash_db::entity::agent_run::Entity::update_many();
+        for clause in &values.clauses {
+            update = finalize_set(update, clause, Utc::now(), None)
+                .unwrap_or_else(|error| panic!("{}: {error}", clause.column));
+        }
     }
 }
