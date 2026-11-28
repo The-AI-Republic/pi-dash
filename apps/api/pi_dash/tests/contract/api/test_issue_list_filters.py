@@ -204,6 +204,42 @@ class TestWorkItemListFilters:
         for row in response.data["results"]:
             assert set(row) == {"id", "sequence_id", "name", "state", "parent"}
 
+    def test_list_items_carry_state_name_and_group(self, api_key_client, workspace, proj, world):
+        response = api_key_client.get(_url(workspace, proj))
+        assert response.status_code == status.HTTP_200_OK
+        by_name = {r["name"]: r for r in response.data["results"]}
+        assert by_name["Epic"]["state_detail"] == {"name": "Todo", "group": "unstarted"}
+        assert by_name["Child done"]["state_detail"] == {"name": "Done", "group": "completed"}
+        assert by_name["Loose backlog"]["state_detail"] == {"name": "Backlog", "group": "backlog"}
+        # The bare UUID stays as it was.
+        assert str(by_name["Epic"]["state"]) == str(world["todo"].id)
+
+    def test_fields_state_detail_returns_only_that_object(self, api_key_client, workspace, proj, world):
+        response = api_key_client.get(_url(workspace, proj), {"state": "Done", "fields": "state_detail"})
+        assert response.status_code == status.HTTP_200_OK
+        assert [dict(r) for r in response.data["results"]] == [{"state_detail": {"name": "Done", "group": "completed"}}]
+
+    def test_fields_can_combine_state_and_state_detail(self, api_key_client, workspace, proj, world):
+        response = api_key_client.get(
+            _url(workspace, proj), {"state": "Todo", "fields": "id,sequence_id,name,state,state_detail,parent"}
+        )
+        assert response.status_code == status.HTTP_200_OK
+        (row,) = response.data["results"]
+        assert set(row) == {"id", "sequence_id", "name", "state", "state_detail", "parent"}
+        assert row["state_detail"] == {"name": "Todo", "group": "unstarted"}
+
+    def test_detail_carries_state_detail_and_null_without_state(self, api_key_client, workspace, proj, world):
+        epic = world["epic"]
+        detail = api_key_client.get(f"{_url(workspace, proj)}{epic.id}/")
+        assert detail.status_code == status.HTTP_200_OK
+        assert detail.data["state_detail"] == {"name": "Todo", "group": "unstarted"}
+
+        Issue.objects.filter(pk=epic.pk).update(state=None)
+        stateless = api_key_client.get(f"{_url(workspace, proj)}{epic.id}/", {"fields": "state,state_detail"})
+        assert stateless.status_code == status.HTTP_200_OK
+        assert stateless.data["state"] is None
+        assert stateless.data["state_detail"] is None
+
     def test_pagination_and_order_by_with_filters(self, api_key_client, workspace, proj, world):
         url = _url(workspace, proj)
         first = api_key_client.get(url, {"state_group": "backlog,completed", "order_by": "name", "per_page": 2})
