@@ -197,6 +197,11 @@ pub enum Request {
     DoctorRun {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
+        /// The config dir the client asked about. A daemon using another
+        /// one answers with an error instead of reporting on its own
+        /// config. Omitted by older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_dir: Option<std::path::PathBuf>,
     },
     /// Legacy reconnect verb: kicks every runner's reconnect, like
     /// [`Request::Reconnect`] with no selector.
@@ -1793,5 +1798,38 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(req, Request::EngineSetPaused { paused: true }));
+    }
+
+    #[test]
+    fn doctor_wire_shapes_interoperate_across_versions() {
+        // An older CLI sends DoctorRun without `config_dir`; an older daemon
+        // answers without `daemon_probe_version`. Both must still parse.
+        let req: Request =
+            serde_json::from_str(r#"{"method":"doctor_run","params":{"runner":"main"}}"#).unwrap();
+        assert!(matches!(
+            req,
+            Request::DoctorRun { runner: Some(ref r), config_dir: None } if r == "main"
+        ));
+        let resp: Response =
+            serde_json::from_str(r#"{"result":"doctor","data":{"checks":[]}}"#).unwrap();
+        assert!(matches!(
+            resp,
+            Response::Doctor(ref r) if r.daemon_probe_version.is_none()
+        ));
+        // A current CLI's request carries the new field; a daemon that
+        // ignores unknown fields still reads the runner.
+        let sent = serde_json::to_value(Request::DoctorRun {
+            runner: None,
+            config_dir: Some("/cfg".into()),
+        })
+        .unwrap();
+        assert_eq!(sent["params"]["config_dir"], "/cfg");
+        // Unset fields are omitted, so older peers see the old shape.
+        let sent = serde_json::to_value(Response::Doctor(crate::dto::Report {
+            checks: vec![],
+            daemon_probe_version: None,
+        }))
+        .unwrap();
+        assert!(sent["data"].get("daemon_probe_version").is_none(), "{sent}");
     }
 }
