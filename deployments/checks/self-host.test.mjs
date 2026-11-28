@@ -144,6 +144,37 @@ describe("compose images", () => {
   });
 });
 
+describe("third-party MinIO image", () => {
+  // pgsty/minio replaces the official image, which can no longer be pulled
+  // anonymously. The self-host README records the trust decision and the
+  // exact reference; both must move together on a re-pin.
+  const refs = composeFiles().flatMap((file) =>
+    imagesOf(readFileSync(file, "utf8"))
+      .filter(({ image }) => imageRepository(image) === "pgsty/minio")
+      .map(({ line, image }) => ({ where: `${relative(root, file)}:${line}`, image }))
+  );
+
+  it("is pinned to one reference, by tag and digest, everywhere it is used", () => {
+    assert.ok(refs.length > 0, "no compose file uses pgsty/minio");
+    for (const { where, image } of refs) {
+      assert.match(image, /^pgsty\/minio:RELEASE\.[^@]+@sha256:[0-9a-f]{64}$/, `${where}: ${image}`);
+    }
+    assert.deepEqual(
+      new Set(refs.map(({ image }) => image)).size,
+      1,
+      refs.map((r) => `${r.where}: ${r.image}`).join("\n")
+    );
+  });
+
+  it("is recorded, with the same digest, in the self-host README", () => {
+    const readme = readFileSync(join(root, "deployments", "cli", "community", "README.md"), "utf8");
+    assert.ok(readme.includes(`\`${refs[0].image}\``), `README does not record ${refs[0].image}`);
+    for (const user of new Set(refs.map(({ where }) => where.split(":")[0]))) {
+      assert.ok(readme.includes(`\`${user}\``), `README's "Used by" row does not list ${user}`);
+    }
+  });
+});
+
 describe("variables.env templates", () => {
   const templates = [
     join(root, "deployments", "cli", "community", "variables.env"),
@@ -192,21 +223,45 @@ describe("web_new nginx", () => {
     assert.match(http[1], /types\s*\{[^}]*application\/manifest\+json\s+webmanifest;[^}]*\}/);
   });
 
+  /** The `location ~ ^/(dir|...)/...` block for web_new's public directories. */
+  function publicDirLocation(conf) {
+    const block = /location\s+~\s+(\^\/\(([^)]*)\)\/\S*)\s*\{([^}]*)\}/.exec(conf);
+    assert.ok(block !== null, "web_new nginx has no `location ~ ^/(dir|...)/` block for its public directories");
+    return { regexp: new RegExp(block[1]), dirs: block[2].split("|"), body: block[3] };
+  }
+
   it("answers 404 for a missing file under every public directory", () => {
     // The proxy sends web_new's public directories (illustrations/, logos/,
     // ...) here first, with the same 404 retry of the old app as /assets/.
     const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");
-    const block = /location\s+~\s+\^\/\(([^)]*)\)\/\s*\{([^}]*)\}/.exec(conf);
-    assert.ok(block !== null, "web_new nginx has no `location ~ ^/(dir|...)/` block for its public directories");
-    assert.match(block[2], /try_files\s+\$uri\s+=404;/);
+    const location = publicDirLocation(conf);
+    assert.match(location.body, /try_files\s+\$uri\s+=404;/);
     const dirs = readdirSync(join(root, "apps", "web_new", "public"), { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
       .map((entry) => entry.name)
       .toSorted();
     assert.deepEqual(
-      block[1].split("|").toSorted(),
+      location.dirs.toSorted(),
       dirs,
       "nginx public-directory list is out of step with apps/web_new/public/"
     );
+    for (const file of ["/logos/github.svg", "/illustrations/not-found.svg", "/empty-state/a/b.webp"]) {
+      assert.ok(location.regexp.test(file), `${file} should be served as a file (or 404)`);
+    }
+  });
+
+  it("still serves the SPA shell for a workspace page under a public directory name", () => {
+    // Workspace slugs are not reserved against public/ names: /logos/projects
+    // is a page of workspace "logos" and must reach the SPA fallback.
+    const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");
+    const location = publicDirLocation(conf);
+    for (const page of [
+      "/logos/projects",
+      "/illustrations/projects/6f1e/issues",
+      "/empty-state/",
+      "/logos/active-cycles/",
+    ]) {
+      assert.ok(!location.regexp.test(page), `${page} would 404 instead of loading the SPA`);
+    }
   });
 });

@@ -375,7 +375,106 @@ function download() {
     echo "In case of 'Upgrade', please check the 'pi_dash.env 'file for any new variables and update them accordingly"
     echo ""
 }
+# Connection URLs the services fall back to when pi_dash.env leaves
+# DATABASE_URL / AMQP_URL blank (the defaults in docker-compose.yml).
+DEFAULT_DATABASE_URL="postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash"
+DEFAULT_AMQP_URL="amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash"
+
+function urlDecode() {
+    local value="${1//+/ }"
+    printf '%b' "${value//%/\\x}"
+}
+
+# Prints "user<TAB>password<TAB>host<TAB>path" for scheme://user:pass@host[:port]/path
+function splitServiceUrl() {
+    local rest=${1#*://}
+    local auth=${rest%@*}
+    local hostpath=${rest##*@}
+    local host=${hostpath%%/*}
+    host=${host%%:*}
+    local path=""
+    if [[ $hostpath == */* ]]; then path=${hostpath#*/}; fi
+    path=${path%%\?*}
+    printf '%s\t%s\t%s\t%s\n' "$(urlDecode "${auth%%:*}")" "$(urlDecode "${auth#*:}")" "$host" "$(urlDecode "$path")"
+}
+
+function credentialMismatch() {
+    local service=$1 detail=$2 variable=$3
+    echo "" >&2
+    echo "   $service: $detail ❌" >&2
+    echo "" >&2
+    echo "   $service only reads its user, password and database when its volume" >&2
+    echo "   is first created, so this volume was created with other values." >&2
+    echo "   Installs created from older templates used 'pi dash' for all of them." >&2
+    echo "   Set $variable in $DOCKER_ENV_PATH to the credentials the volume was" >&2
+    echo "   created with, then start again. See \"Database and RabbitMQ" >&2
+    echo "   credentials\" in the self-hosting README." >&2
+    echo "   Stop the data services with: ./setup.sh stop" >&2
+}
+
+# Postgres and RabbitMQ only take their credentials from the environment
+# when their volume is first created. Before the app starts, check that the
+# bundled services accept the credentials the app will connect with, so an
+# old volume fails here with a clear message instead of an auth error in
+# the API logs. External services (another host in the URL) are skipped.
+function checkBundledCredentials() {
+    local attempts=${CREDENTIAL_CHECK_ATTEMPTS:-60}
+    local interval=${CREDENTIAL_CHECK_INTERVAL:-2}
+    local compose="$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH"
+    local services
+    services=$($compose config --services 2>/dev/null)
+    local user password host name out i
+
+    local db_url
+    db_url=$(getEnvValue "DATABASE_URL" "$DOCKER_ENV_PATH")
+    IFS=$'\t' read -r user password host name <<< "$(splitServiceUrl "${db_url:-$DEFAULT_DATABASE_URL}")"
+    if [ "$host" == "pi-dash-db" ] && grep -qx "pi-dash-db" <<< "$services"; then
+        # 127.0.0.1 only answers once first-boot initialisation is done.
+        for ((i = 0; i < attempts; i++)); do
+            $compose exec -T pi-dash-db pg_isready -q -h 127.0.0.1 >/dev/null 2>&1 && break
+            sleep "$interval"
+        done
+        for ((i = 0; i < attempts; i++)); do
+            out=$($compose exec -T pi-dash-db psql -U "$user" -d "$name" -tAc "select 1" 2>&1) && { out=""; break; }
+            [[ $out == *"does not exist"* ]] && break
+            sleep "$interval"
+        done
+        if [ -n "$out" ]; then
+            credentialMismatch "PostgreSQL" "the database volume has no role \"$user\" with database \"$name\" (${out##*FATAL:  })" "DATABASE_URL"
+            return 1
+        fi
+    fi
+
+    local amqp_url
+    amqp_url=$(getEnvValue "AMQP_URL" "$DOCKER_ENV_PATH")
+    IFS=$'\t' read -r user password host name <<< "$(splitServiceUrl "${amqp_url:-$DEFAULT_AMQP_URL}")"
+    if [ "$host" == "pi-dash-mq" ] && grep -qx "pi-dash-mq" <<< "$services"; then
+        for ((i = 0; i < attempts; i++)); do
+            $compose exec -T pi-dash-mq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && break
+            sleep "$interval"
+        done
+        if ! $compose exec -T pi-dash-mq rabbitmqctl -q authenticate_user "$user" "$password" >/dev/null 2>&1; then
+            credentialMismatch "RabbitMQ" "the broker volume does not accept user \"$user\"" "AMQP_URL"
+            return 1
+        fi
+        if ! $compose exec -T pi-dash-mq rabbitmqctl -q list_vhosts name 2>/dev/null | grep -qxF "$name"; then
+            credentialMismatch "RabbitMQ" "the broker volume has no vhost \"$name\"" "AMQP_URL"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 function startServices() {
+    # Data services first: their volumes must accept the app's credentials.
+    # Only the bundled ones this compose file still defines.
+    local data_services
+    data_services=$($COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH config --services 2>/dev/null | grep -xE "pi-dash-db|pi-dash-mq" | tr '\n' ' ')
+    if [ -n "$data_services" ]; then
+        /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull $data_services"
+        checkBundledCredentials || exit 1
+    fi
+
     /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull"
 
     local migrator_container_id=$(docker container ls -aq -f "name=$SERVICE_FOLDER-migrator")
@@ -751,5 +850,8 @@ if [ -f "$DOCKER_ENV_PATH" ]; then
     fi
 fi
 
-print_header
-askForAction "$@"
+# Tests source this file for its functions without running the menu.
+if [ "${SETUP_SH_SOURCE_ONLY:-}" != "1" ]; then
+    print_header
+    askForAction "$@"
+fi

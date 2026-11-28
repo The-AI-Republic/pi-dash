@@ -137,12 +137,24 @@ describe("buildCeLines", () => {
     // is useless without its own. The old app's bundles fall through.
     assert.deepEqual(buildCeAssetLines(), [
       "\t# web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.",
-      "\t@web_new_static path /assets/*",
+      "\t@web_new_static {",
+      "\t\tpath /assets/*",
+      "\t\tpath_regexp \\.[^/]+$",
+      "\t}",
       "\treverse_proxy @web_new_static web_new:3000 {",
       "\t\t@web_new_static_missing status 404",
       "\t\thandle_response @web_new_static_missing {",
       "\t\t\treverse_proxy web:3000",
       "\t\t}",
+      "\t}",
+      "\t# web_new not deployed or down: the 404 retry above never runs, so the old app still serves these files.",
+      "\thandle_errors {",
+      "\t\t@web_new_static_down {",
+      "\t\t\tpath /assets/*",
+      "\t\t\tpath_regexp \\.[^/]+$",
+      "\t\t\texpression `{err.status_code} in [502, 503]`",
+      "\t\t}",
+      "\t\treverse_proxy @web_new_static_down web:3000",
       "\t}",
     ]);
     assert.deepEqual(buildCeLines(["/{ws}"]).slice(-buildCeAssetLines().length), buildCeAssetLines());
@@ -150,8 +162,40 @@ describe("buildCeLines", () => {
 
   it("routes web_new's public files with its bundles, behind the same 404 fallback", () => {
     const lines = buildCeLines(["/{ws}"], [], ["/icon.svg", "/illustrations/*"]);
-    assert.ok(lines.includes("\t@web_new_static path /assets/* /icon.svg /illustrations/*"), lines.join("\n"));
-    assert.deepEqual(lines.slice(-8), buildCeAssetLines(["/icon.svg", "/illustrations/*"]));
+    assert.ok(lines.includes("\t\tpath /assets/* /icon.svg /illustrations/*"), lines.join("\n"));
+    assert.ok(lines.includes("\t\t\tpath /assets/* /icon.svg /illustrations/*"), lines.join("\n"));
+    const assetLines = buildCeAssetLines(["/icon.svg", "/illustrations/*"]);
+    assert.deepEqual(lines.slice(-assetLines.length), assetLines);
+  });
+
+  it("keeps the old app's files served when web_new cannot be reached", () => {
+    // A dial or DNS failure is a proxy error, not an upstream 404, so
+    // handle_response never runs; only handle_errors can retry the old app.
+    const lines = buildCeAssetLines(["/icon.svg"]);
+    const start = lines.indexOf("\thandle_errors {");
+    assert.ok(start !== -1, lines.join("\n"));
+    const errors = lines.slice(start);
+    assert.ok(errors.includes("\t\treverse_proxy @web_new_static_down web:3000"), lines.join("\n"));
+    // Scoped to the proxy's own dial/no-upstream errors on these paths; the
+    // `handle_errors 502 503` shorthand would drop the inner matcher.
+    assert.ok(errors.includes("\t\t\texpression `{err.status_code} in [502, 503]`"), lines.join("\n"));
+  });
+
+  it("only routes file requests, so a workspace named after a public directory keeps its pages", () => {
+    // /logos/projects is a page of workspace "logos", not a file under
+    // web_new's public logos/ directory.
+    const lines = buildCeAssetLines(["/logos/*"]);
+    const regexps = lines.filter((line) => line.trim().startsWith("path_regexp "));
+    assert.equal(regexps.length, 2, lines.join("\n"));
+    for (const line of regexps) {
+      const re = new RegExp(line.trim().slice("path_regexp ".length));
+      for (const file of ["/logos/github.svg", "/assets/index-abc123.js", "/illustrations/a/b.svg"]) {
+        assert.ok(re.test(file), `${file} should match ${re}`);
+      }
+      for (const page of ["/logos/projects", "/logos/projects/6f1e/issues", "/logos/"]) {
+        assert.ok(!re.test(page), `${page} should not match ${re}`);
+      }
+    }
   });
 
   it("adds no asset route when nothing or everything has migrated", () => {
@@ -548,12 +592,25 @@ describe("the repo's generated Caddyfiles", () => {
   const proxyDir = join(here, "..", "..", "proxy");
   const publicDir = join(here, "..", "public");
 
-  it("route web_new's /assets/* bundles before the old app's catch-all", () => {
+  // The static block exists only while some, but not all, routes are
+  // migrated: with none the old app owns /assets/, with the `/` catch-all
+  // web_new already serves every path.
+  const { entries } = loadEntries();
+  const partial = entries.length > 0 && !entries.includes("/");
+
+  it("route web_new's /assets/* bundles before the old app's catch-all only during a partial migration", () => {
     for (const [name, assetLines, anchor] of [
       ["Caddyfile.ce", buildCeAssetLines(publicPathsOf(publicDir)), CE_ANCHOR],
       ["Caddyfile.aio.ce", buildAioAssetLines(publicPathsOf(publicDir)), AIO_ANCHOR],
     ]) {
       const text = readFileSync(join(proxyDir, name), "utf8");
+      if (!partial) {
+        assert.ok(
+          !text.includes("@web_new_static"),
+          `${name} routes /assets/* although no partial migration is in progress`
+        );
+        continue;
+      }
       const block = assetLines.join("\n");
       assert.ok(text.includes(block), `${name} is missing the generated /assets/* route`);
       assert.ok(
@@ -562,7 +619,8 @@ describe("the repo's generated Caddyfiles", () => {
       );
     }
   });
-  it("route every entry of apps/web_new/public/ to web_new", () => {
+
+  it("route every entry of apps/web_new/public/ to web_new during a partial migration", { skip: !partial }, () => {
     // Listed independently of the generator: icon.svg, the manifests and
     // illustrations/ must not reach the old app's SPA fallback.
     const wanted = readdirSync(publicDir, { withFileTypes: true })
@@ -570,7 +628,7 @@ describe("the repo's generated Caddyfiles", () => {
       .map((entry) => (entry.isDirectory() ? `/${entry.name}/*` : `/${entry.name}`));
     assert.ok(wanted.includes("/icon.svg") && wanted.includes("/illustrations/*"), wanted.join(" "));
     for (const [name, matcher] of [
-      ["Caddyfile.ce", /^\t@web_new_static path (.+)$/m],
+      ["Caddyfile.ce", /@web_new_static \{\n\s+path (.+)$/m],
       ["Caddyfile.aio.ce", /@web_new_static \{\n\s+path (.+)$/m],
     ]) {
       const found = matcher.exec(readFileSync(join(proxyDir, name), "utf8"));

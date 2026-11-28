@@ -249,19 +249,44 @@ function staticPaths(publicPaths) {
   return ["/assets/*", ...publicPaths];
 }
 
+// Only a request whose last segment has an extension is a static file.
+// web_new's public directories (logos/, illustrations/, ...) are not
+// reserved workspace slugs, so /logos/projects is a page of workspace
+// "logos" and must keep reaching the workspace routes or the old app.
+const STATIC_FILE_REGEXP = "\\.[^/]+$";
+
 /**
  * CE static route: web_new first; its nginx answers a real 404 for a file
- * it does not have, and the proxy then retries the old app.
+ * it does not have, and the proxy then retries the old app. When web_new
+ * cannot be reached at all (a stack without the web_new service, or the
+ * service down) the dial fails before any response, so handle_response
+ * never runs: handle_errors retries the old app for the same paths.
  */
 export function buildCeAssetLines(publicPaths = []) {
+  const paths = staticPaths(publicPaths).join(" ");
   return [
     `\t# ${ASSET_NOTE}`,
-    `\t@web_new_static path ${staticPaths(publicPaths).join(" ")}`,
+    "\t@web_new_static {",
+    `\t\tpath ${paths}`,
+    `\t\tpath_regexp ${STATIC_FILE_REGEXP}`,
+    "\t}",
     `\treverse_proxy @web_new_static ${WEB_NEW_UPSTREAM} {`,
     "\t\t@web_new_static_missing status 404",
     "\t\thandle_response @web_new_static_missing {",
     `\t\t\treverse_proxy ${WEB_UPSTREAM}`,
     "\t\t}",
+    "\t}",
+    "\t# web_new not deployed or down: the 404 retry above never runs, so the old app still serves these files.",
+    // Status codes go in the matcher, not as `handle_errors 502 503`:
+    // Caddy 2.10 drops the inner matchers of that form, which would send
+    // every 502 on the site to the old app.
+    "\thandle_errors {",
+    "\t\t@web_new_static_down {",
+    `\t\t\tpath ${paths}`,
+    `\t\t\tpath_regexp ${STATIC_FILE_REGEXP}`,
+    "\t\t\texpression `{err.status_code} in [502, 503]`",
+    "\t\t}",
+    `\t\treverse_proxy @web_new_static_down ${WEB_UPSTREAM}`,
     "\t}",
   ];
 }

@@ -350,6 +350,46 @@ Once done, choose `7` to exit from prompt.
 
 Once done with making changes in `pi_dash.env` file, jump on to `Redeploy Stack`
 
+#### Database and RabbitMQ credentials
+
+Older `variables.env` templates set `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGDATABASE` and the `RABBITMQ_USER` / `RABBITMQ_PASSWORD` / `RABBITMQ_VHOST` values to `pi dash` (with a space). The current template uses `pi-dash`. That matches the `DATABASE_URL` / `AMQP_URL` defaults in `docker-compose.yml`, which the services use when those two variables are blank.
+
+- **Upgrades keep your values.** `Upgrade` carries every value from your existing `pi_dash.env` into the new one, so an install that already works keeps its credentials. Nothing is renamed inside the database or the broker.
+- **PostgreSQL and RabbitMQ read these values only when their volume is first created.** Editing them in `pi_dash.env` later does not change the user, password or database stored in the `pgdata` / `rabbitmq_data` volumes.
+- **`Start` checks this.** Before the app starts, `setup.sh` starts the bundled database and broker and confirms that they accept the credentials the app will connect with. If a volume was created with other values (for example `pi dash`), it stops and names the variable to fix, instead of leaving the API failing with authentication errors.
+
+To fix a mismatch, keep your volumes and point the app at the credentials they were created with. Encode a space as `%20`:
+
+```env
+DATABASE_URL=postgresql://pi%20dash:pi%20dash@pi-dash-db:5432/pi%20dash
+AMQP_URL=amqp://pi%20dash:pi%20dash@pi-dash-mq:5672/pi%20dash
+```
+
+Then run `Start` again. Only remove the volumes if you mean to start with an empty database.
+
+---
+
+### Object storage image (MinIO)
+
+The bundled object storage service (`pi-dash-minio`) uses **`pgsty/minio`**, a third-party image, rather than an official MinIO image. The trust decision and how to re-pin it are recorded here.
+
+**Why not an official image.** MinIO no longer publishes `minio/minio` on Docker Hub, and `quay.io/minio/minio` refuses anonymous pulls. Either one makes a fresh `docker compose up` fail with a pull error. No official, anonymously pullable MinIO server image was available when this was checked (2026-11-28).
+
+**Why `pgsty/minio`.** It is the community-maintained build of the MinIO server published by the Pigsty project ([github.com/pgsty/minio](https://github.com/pgsty/minio), Docker Hub `pgsty/minio`). It is a drop-in replacement for the old image: same `docker-entrypoint.sh`, runs as root, same `/data` layout, and it ships `mc` (a link to `mcli`), which the `docker-compose-local.yml` bucket bootstrap uses. Existing `uploads` volumes keep working with no `user:` override. Chainguard's free MinIO image was considered and rejected: it only publishes `latest` and runs as non-root, which breaks existing volumes.
+
+**How it is trusted.** The image is pinned by release tag **and** multi-arch digest, so a pull can only ever fetch the exact image that was reviewed:
+
+|           |                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------ |
+| Image     | `pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372` |
+| Platforms | `linux/amd64`, `linux/arm64` (OCI image index)                                                                     |
+| Verified  | 2026-11-28: Docker Hub resolves the tag to exactly this digest                                                     |
+| Used by   | `deployments/cli/community/docker-compose.yml`, `docker-compose.yml`, `docker-compose-local.yml`                   |
+
+The `self-host-checks` CI workflow re-checks on every change that the pinned reference still resolves for both platforms, and that this table names the same digest as the compose files.
+
+**Re-pinning.** Never switch to `latest`. To move to a newer release, pick a tag from Docker Hub and read the upstream release notes. Resolve its digest with `docker buildx imagetools inspect pgsty/minio:<tag>` and confirm that it lists `linux/amd64` and `linux/arm64`. Then update the compose files and this table in the same change. If an official MinIO image becomes anonymously pullable again, prefer it.
+
 ---
 
 ### View Logs

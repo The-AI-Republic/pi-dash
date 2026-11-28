@@ -472,7 +472,7 @@
     }
     # web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.
     @web_new_static {
-        path /assets/* /apple-touch-icon.svg /empty-state/* /icon-contrast.svg /icon.svg /illustrations/* /logos/* /manifest.desktop.webmanifest /manifest.webmanifest /social-card.svg /world-map.svg
+        path /assets/* /apple-touch-icon.svg /empty-state/* /icon-contrast.svg /icon.svg /illustrations/* /logos/* /manifest.desktop.webmanifest /manifest.webmanifest /social-card.svg /static/* /world-map.svg
         file {
             root /app/web_new
         }

@@ -3,8 +3,9 @@
 # See the LICENSE file for details.
 # Self-host smoke checks: compose images that can no longer be
 # pulled, variables.env values that break interpolation, and the web_new
-# nginx 404 the community proxy's /assets/* fallback depends on. Plain
-# node:test over the shipped files, so no install step.
+# nginx 404 the community proxy's /assets/* fallback depends on, plus the
+# installer's credential preflight. Plain node:test over the shipped files,
+# so no install step; one step resolves the pinned MinIO image on Docker Hub.
 name: self-host-checks
 
 on:
@@ -39,3 +40,20 @@ jobs:
         with:
           node-version: 22
       - run: node --test deployments/checks/*.test.mjs
+      # The tests above only check the reference's shape. This resolves it
+      # on Docker Hub: the tag must still point at the pinned digest, and
+      # the image must exist for both platforms an install pulls.
+      - name: Pinned MinIO image resolves on the registry
+        run: |
+          set -euo pipefail
+          ref=$(grep -hoE 'pgsty/minio:[^"[:space:]]+' deployments/cli/community/docker-compose.yml | head -n1)
+          tag_ref=${ref%@*}
+          digest=${ref#*@}
+          resolved=$(docker buildx imagetools inspect "$tag_ref" --format '{{.Manifest.Digest}}')
+          if [ "$resolved" != "$digest" ]; then
+            echo "::error::$tag_ref resolves to $resolved, not the pinned $digest"
+            exit 1
+          fi
+          docker buildx imagetools inspect --raw "$ref" \
+            | jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] as $p | ($p | index("linux/amd64")) and ($p | index("linux/arm64"))'
+
