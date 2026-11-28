@@ -546,6 +546,17 @@ def check_postgres():
     retry("PostgreSQL", attempt)
 
 
+def rabbit_refusal(text):
+    """The 530 replies to connection.open that mean the vhost is missing or
+    closed to the user (rabbit_reader.erl and rabbit_access_control.erl,
+    3.13.6). The limit replies add ": ..." after the user, so the anchored
+    end keeps them out."""
+    return bool(
+        re.search(r"NOT_ALLOWED - vhost .* not found$", text)
+        or re.search(r"NOT_ALLOWED - access to vhost '.*' refused for user '[^']*'$", text)
+    )
+
+
 def check_rabbitmq():
     import amqp.exceptions
     from kombu import Connection
@@ -566,7 +577,6 @@ def check_rabbitmq():
     if conn.hostname != "pi-dash-mq":
         say("SKIP", "RabbitMQ", f"external host {conn.hostname}")
         return
-    refused = (amqp.exceptions.AccessRefused, amqp.exceptions.NotAllowed)
 
     def attempt():
         try:
@@ -577,10 +587,17 @@ def check_rabbitmq():
             chain, seen = error, set()
             while chain is not None and id(chain) not in seen:
                 seen.add(id(chain))
-                # 403 ACCESS_REFUSED: bad user or password. 530 NOT_ALLOWED:
-                # no such vhost, or the user has no permissions on it.
-                if isinstance(chain, refused) or getattr(chain, "code", None) in (403, 530):
+                # 403 ACCESS_REFUSED: bad user or password. 530 NOT_ALLOWED
+                # is a refusal only for a missing vhost or no permissions on
+                # it; RabbitMQ also sends 530 for connection limits and a
+                # limit lookup timeout, which stay on the retry path.
+                code = getattr(chain, "code", None)
+                if isinstance(chain, amqp.exceptions.AccessRefused) or code == 403:
                     return ("MISMATCH", f"{chain} (user {conn.userid!r}, vhost {conn.virtual_host!r})")
+                if isinstance(chain, amqp.exceptions.NotAllowed) or code == 530:
+                    if rabbit_refusal(str(getattr(chain, "reply_text", "") or chain)):
+                        return ("MISMATCH", f"{chain} (user {conn.userid!r}, vhost {conn.virtual_host!r})")
+                    break
                 chain = chain.__cause__ or chain.__context__
             return ("RETRY", f"{type(error).__name__}: {error}")
 

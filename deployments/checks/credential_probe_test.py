@@ -148,8 +148,10 @@ class FakeRabbit(FakeServer):
     that stopped answering.
     """
 
-    def __init__(self, users, permissions, hang=False):
+    def __init__(self, users, permissions, hang=False, open_reply=None):
         self.users, self.permissions, self.hang = users, permissions, hang
+        # (code, text) to close connection.open with, after a good login.
+        self.open_reply = open_reply
         super().__init__()
 
     @staticmethod
@@ -192,6 +194,9 @@ class FakeRabbit(FakeServer):
         self.read_method(conn)  # tune-ok
         _, _, args = self.read_method(conn)
         (vhost, _caps, _insist), _ = loads("ssb", args, 0)
+        if self.open_reply:
+            code, text = self.open_reply
+            return self.close_with(conn, code, text.format(vhost=vhost, user=user))
         if vhost not in self.permissions.get(user, set()):
             return self.close_with(conn, 530, f"NOT_ALLOWED - access to vhost '{vhost}' refused for user '{user}'")
         conn.sendall(self.frame(10, 41, "s", ("",)))
@@ -418,6 +423,30 @@ class ProbeTest(unittest.TestCase):
         results, out = self.run_probe({"AMQP_URL": self.mq_url(mq)}, services="mq")
         self.assertEqual(results["RabbitMQ"][0], "MISMATCH", out)
         self.assertIn("NOT_ALLOWED", results["RabbitMQ"][1])
+
+    def test_rabbitmq_missing_vhost_is_a_refusal(self):
+        # rabbit_reader.erl (3.13.6) is_over_vhost_connection_limit/2.
+        mq = FakeRabbit({"pi-dash": "pi-dash"}, {}, open_reply=(530, "NOT_ALLOWED - vhost {vhost} not found"))
+        results, out = self.run_probe({"AMQP_URL": self.mq_url(mq)}, services="mq")
+        self.assertEqual(results["RabbitMQ"][0], "MISMATCH", out)
+        self.assertIn("not found", results["RabbitMQ"][1])
+
+    def test_rabbitmq_connection_limits_and_timeouts_are_not_refusals(self):
+        # The other 530 replies to connection.open in rabbit_reader.erl
+        # (3.13.6): valid credentials, the broker is at capacity or slow.
+        replies = [
+            "NOT_ALLOWED - connection refused: node connection limit (10) is reached",
+            "NOT_ALLOWED - access to vhost '{vhost}' refused for user '{user}': connection limit (10) is reached",
+            "NOT_ALLOWED - access to vhost '{vhost}' refused for user '{user}': "
+            "connection limit cannot be queried, timeout",
+            "NOT_ALLOWED - connection refused for user '{user}': user connection limit (10) is reached",
+        ]
+        for text in replies:
+            with self.subTest(text=text):
+                mq = FakeRabbit({"pi-dash": "pi-dash"}, {"pi-dash": {"pi-dash"}}, open_reply=(530, text))
+                results, out = self.run_probe({"AMQP_URL": self.mq_url(mq)}, services="mq", seconds="1")
+                self.assertEqual(results["RabbitMQ"][0], "NOTREADY", out)
+                self.assertIn("limit", results["RabbitMQ"][1])
 
     def test_rabbitmq_keeps_plus_backslash_and_surrounding_whitespace(self):
         password = " a+b\\c "
