@@ -174,15 +174,15 @@ Pi Dash no incluye un agente de IA: tú aportas el tuyo. Asegúrate de que la CL
 
 ### 4. Skill de Pi Dash para el agente de codificación (opcional)
 
-[`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill) empaqueta una skill de agente portátil para que Claude Code o Codex puedan crear, listar, mover e inspeccionar issues de Pi Dash directamente desde una sesión de codificación a través de la CLI `pidash`.
+[`skill/`](skill/) empaqueta una skill de agente portátil para que Claude Code o Codex puedan crear, listar, mover e inspeccionar issues de Pi Dash directamente desde una sesión de codificación a través de la CLI `pidash`.
 
 ```bash
 npx @airepublic/pidash-skill-installer           # se instala en Claude Code, Codex o ambos
 ```
 
-El instalador solicita un destino (predeterminado: todos) y obtiene la skill desde GitHub bajo demanda: no requiere clonar nada. Pasa `--all`, `--claude-code` o `--codex` para omitir la solicitud.
+El instalador solicita un destino (predeterminado: todos) ; la skill viene incluida en el paquete npm, así que no requiere clonar nada. Pasa `--all`, `--claude-code` o `--codex` para omitir la solicitud.
 
-Los usuarios de Codex también pueden instalarla mediante el `$skill-installer` integrado desde dentro de una sesión de Codex. Consulta el [README de pi-dash-skill](https://github.com/The-AI-Republic/pi-dash-skill#readme) para conocer las variables de entorno alternativas (`CLAUDE_HOME` / `CODEX_HOME`), la ruta de instalación basada en clonación y otras alternativas.
+Los usuarios de Codex también pueden instalarla mediante el `$skill-installer` integrado desde dentro de una sesión de Codex. Consulta el [README de la skill](skill/README.md) para conocer las variables de entorno alternativas (`CLAUDE_HOME` / `CODEX_HOME`), la ruta de instalación basada en clonación y otras alternativas.
 
 ## ⚙️ Construido con
 

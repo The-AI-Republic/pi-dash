@@ -10,8 +10,6 @@
 
 import type { EstimateList, ModuleStatus } from "@pidash/api-client";
 
-import { selectActiveSystem } from "../../../estimates/index.js";
-
 export const MODULE_STATUS_LABELS: Record<ModuleStatus, string> = {
   backlog: "Backlog",
   planned: "Planned",
@@ -47,11 +45,18 @@ export function moduleSidebarEditable(input: { readOnly: boolean; archived: bool
 }
 
 /**
- * Whether the points row belongs on this sidebar. Only an active points
- * system turns it on; an absent list, no active system, or a time or
- * categories system keeps it absent (not a zero row).
+ * Whether the points row belongs on this sidebar. Only the project's
+ * selected estimate system turns it on, and only when that system is the
+ * points family — a disabled project (no selected system) keeps it absent
+ * even if a stale system still carries `last_used`. An absent list, no
+ * selected id, or a time or categories system keeps it absent (not a zero
+ * row). Spec §9.1: "no estimate system → no points row".
  */
-export function showsModulePoints(estimates: EstimateList | undefined): boolean {
+export function showsModulePoints(
+  estimates: EstimateList | undefined,
+  selectedEstimateId: string | null | undefined
+): boolean {
   if (estimates === undefined) return false;
-  return selectActiveSystem(estimates)?.type === "points";
+  if (selectedEstimateId === null || selectedEstimateId === undefined) return false;
+  return estimates.find((estimate) => estimate.id === selectedEstimateId)?.type === "points";
 }

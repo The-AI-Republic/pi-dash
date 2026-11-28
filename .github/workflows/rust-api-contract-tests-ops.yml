@@ -37,7 +37,7 @@ concurrency:
 jobs:
   ops-repair:
     name: ops oracle vs Rust binary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
@@ -184,7 +184,7 @@ jobs:
 
   ops-boot-storage:
     name: ops boot + storage vs binary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:

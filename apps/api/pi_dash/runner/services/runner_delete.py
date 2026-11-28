@@ -127,6 +127,12 @@ def delete_dev_machine(machine: DevMachine, *, purge_local: bool) -> None:
     with transaction.atomic():
         now = timezone.now()
         MachineToken.objects.filter(dev_machine_id=machine_pk, revoked_at__isnull=True).update(revoked_at=now)
+        # Revoke (and audit) the engine credential before the row goes; the
+        # machine delete would cascade it silently.
+        from pi_dash.runner.models import EngineCredentialRevokeReason
+        from pi_dash.runner.services.engine_credentials import revoke_engine_credential
+
+        revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.MACHINE_REMOVED)
         runners = list(Runner.objects.select_for_update().filter(dev_machine_id=machine_pk))
         active = [r for r in runners if r.revoked_at is None]
         reason = "runner_removed" if purge_local else "user_revoke"

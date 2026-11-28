@@ -174,15 +174,15 @@ Pi Dash는 AI 에이전트를 함께 제공하지 않습니다. 직접 가져와
 
 ### 4. 코딩 에이전트용 Pi Dash 스킬 (선택 사항)
 
-[`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill)은 이식 가능한 에이전트 스킬을 패키징하여 Claude Code나 Codex가 코딩 세션에서 `pidash` CLI를 통해 Pi Dash 이슈를 직접 생성, 나열, 이동, 검사할 수 있게 합니다.
+[`skill/`](skill/)은 이식 가능한 에이전트 스킬을 패키징하여 Claude Code나 Codex가 코딩 세션에서 `pidash` CLI를 통해 Pi Dash 이슈를 직접 생성, 나열, 이동, 검사할 수 있게 합니다.
 
 ```bash
 npx @airepublic/pidash-skill-installer           # Claude Code, Codex, 또는 둘 다에 설치
 ```
 
-설치 프로그램은 대상(기본값: 모두)을 묻고 필요 시 GitHub에서 스킬을 가져옵니다. 클론이 필요 없습니다. 프롬프트를 건너뛰려면 `--all`, `--claude-code`, 또는 `--codex`를 전달하세요.
+설치 프로그램은 대상(기본값: 모두)을 묻습니다. 스킬은 npm 패키지에 포함되어 있어 클론이 필요 없습니다. 프롬프트를 건너뛰려면 `--all`, `--claude-code`, 또는 `--codex`를 전달하세요.
 
-Codex 사용자는 Codex 세션 내부에서 기본 제공되는 `$skill-installer`를 통해서도 설치할 수 있습니다. 환경 변수 재정의(`CLAUDE_HOME` / `CODEX_HOME`), 클론 기반 설치 방식, 기타 대안에 대해서는 [pi-dash-skill README](https://github.com/The-AI-Republic/pi-dash-skill#readme)를 참조하세요.
+Codex 사용자는 Codex 세션 내부에서 기본 제공되는 `$skill-installer`를 통해서도 설치할 수 있습니다. 환경 변수 재정의(`CLAUDE_HOME` / `CODEX_HOME`), 클론 기반 설치 방식, 기타 대안에 대해서는 [skill README](skill/README.md)를 참조하세요.
 
 ## ⚙️ 사용 기술
 

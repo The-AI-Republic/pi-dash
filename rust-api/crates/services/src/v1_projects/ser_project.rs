@@ -42,37 +42,28 @@ pub const EXECUTOR_MANAGED_RUNNER: &str = "managed_runner";
 pub const EXECUTOR_LOCAL_RUNNER: &str = "local_runner";
 
 /// Outcome of `_validate_default_agent_executor`
-/// (`serializers/project.py:24-48`).
+/// (`serializers/project.py:24-48`, #2903): the two refusals are gone;
+/// `default_agent_executor`, when present, is normalized (deprecated
+/// choices become `local_runner`) — never a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorCheck {
-    /// Either unset/any other kind, or the requested executor is available.
+    /// Either unset, any kind, or a deprecated kind (translates).
     Ok,
-    /// `cloud_agent` while `cloud_agent_is_configured()` is false: Python
-    /// raises `CloudAgentUnavailableAPI`, which propagates as its own 409
-    /// response, not a serializer 400.
+    /// Kept for shape parity; #2903 removes the cloud refusal.
     CloudUnavailable,
-    /// `managed_runner` while `managed_runner_is_enabled()` is false.
+    /// Kept for shape parity; #2903 removes the managed refusal.
     ManagedDisabled,
 }
 
-/// Ports `_validate_default_agent_executor(data)`: `executor` is the raw
-/// `default_agent_executor` input (`None` when absent), the booleans are the
-/// two instance kill switches. Anything other than the two gated kinds
-/// passes, exactly like the `if / elif` with no `else`.
+/// Ports the translation: `executor` is the raw
+/// `default_agent_executor` input (`None` when absent); the kill-switch
+/// boolean is ignored. Never refuses.
 pub fn check_default_agent_executor(
     executor: Option<&str>,
-    cloud_configured: bool,
-    managed_enabled: bool,
+    _managed_enabled: bool,
 ) -> ExecutorCheck {
-    match executor {
-        Some(e) if e == EXECUTOR_CLOUD_AGENT && !cloud_configured => {
-            ExecutorCheck::CloudUnavailable
-        }
-        Some(e) if e == EXECUTOR_MANAGED_RUNNER && !managed_enabled => {
-            ExecutorCheck::ManagedDisabled
-        }
-        _ => ExecutorCheck::Ok,
-    }
+    let _ = executor;
+    ExecutorCheck::Ok
 }
 
 /// `Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN`
@@ -211,6 +202,7 @@ pub const CREATE_META_FIELDS: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 /// `ProjectCreateSerializer.Meta.read_only_fields` (`:129-137`).
@@ -346,10 +338,12 @@ pub fn logo_props_default(icon_name: &str, icon_color: &str) -> LogoProps {
 /// shape the Django stack emits on the D-19 routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectSerError {
-    /// `cloud_agent` while unconfigured: `CloudAgentUnavailableAPI` 409.
+    /// #2903: retired — the cloud refusal is gone.
     CloudAgentUnavailable,
-    /// `managed_runner` while disabled: serializer 400.
+    /// #2903: retired — the managed refusal is gone.
     ManagedRunnerDisabled,
+    /// `default_work_type` is not a registered work type: serializer 400.
+    UnknownWorkType,
     /// Name holds a forbidden character.
     NameForbidden,
     /// Identifier holds a forbidden character.
@@ -385,9 +379,7 @@ impl ProjectSerError {
     /// HTTP status Django answers with.
     pub fn status(&self) -> u16 {
         match self {
-            ProjectSerError::CloudAgentUnavailable
-            | ProjectSerError::IdentifierRequired
-            | ProjectSerError::IdentifierTaken => 409,
+            ProjectSerError::IdentifierRequired | ProjectSerError::IdentifierTaken => 409,
             ProjectSerError::DescriptionHtmlNonDict => 500,
             _ => 400,
         }
@@ -398,6 +390,7 @@ impl ProjectSerError {
         match self {
             ProjectSerError::CloudAgentUnavailable => CLOUD_AGENT_UNAVAILABLE_BODY,
             ProjectSerError::ManagedRunnerDisabled => MANAGED_RUNNER_DISABLED_BODY,
+            ProjectSerError::UnknownWorkType => UNKNOWN_DEFAULT_WORK_TYPE_BODY.as_str(),
             ProjectSerError::NameForbidden => NAME_FORBIDDEN_BODY,
             ProjectSerError::IdentifierForbidden => IDENTIFIER_FORBIDDEN_BODY,
             ProjectSerError::ProjectLeadNotMember => PROJECT_LEAD_NOT_MEMBER_BODY,
@@ -472,9 +465,9 @@ pub fn check_description_html(
 pub struct SharedChecks<'a> {
     /// Raw `default_agent_executor` input.
     pub executor: Option<&'a str>,
-    /// `cloud_agent_is_configured()`.
-    pub cloud_configured: bool,
-    /// `managed_runner_is_enabled()`.
+    /// Raw `default_work_type` input (`_validate_default_work_type`).
+    pub work_type: Option<&'a str>,
+    /// `pidash_agent_is_enabled()`.
     pub managed_enabled: bool,
     /// Raw `name` input.
     pub name: Option<&'a str>,
@@ -485,6 +478,28 @@ pub struct SharedChecks<'a> {
     /// `WorkspaceMember` row for `default_assignee`, when supplied.
     pub default_assignee_is_member: Option<bool>,
 }
+
+/// Ports `_validate_default_work_type(data)` (PDASHOSS01-234): a truthy
+/// value must name a registered work type; blank passes (`Project.save`
+/// resolves it on create).
+pub fn check_default_work_type(work_type: Option<&str>) -> Result<(), ProjectSerError> {
+    match work_type {
+        Some(wt) if !wt.is_empty() && !crate::prompting::work_types::is_known(wt) => {
+            Err(ProjectSerError::UnknownWorkType)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `{"default_work_type": ["unknown work type; expected one of [...]"]}`:
+/// the dict `ValidationError` raised in `validate()`, list-wrapped by DRF.
+static UNKNOWN_DEFAULT_WORK_TYPE_BODY: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        serde_json::json!({
+            "default_work_type": [crate::prompting::work_types::unknown_work_type_message()]
+        })
+        .to_string()
+    });
 
 /// Name/identifier forbidden-character checks, in source order
 /// (`serializers/project.py:144-148,218-222,288-292`).
@@ -514,9 +529,9 @@ fn check_membership(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
 pub fn validate_shared(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
     Result::<(), ProjectSerError>::from(check_default_agent_executor(
         input.executor,
-        input.cloud_configured,
         input.managed_enabled,
     ))?;
+    check_default_work_type(input.work_type)?;
     check_name_identifier(input)?;
     check_membership(input)?;
     Ok(())
@@ -593,9 +608,9 @@ pub fn validate_read(
 ) -> Result<Option<String>, ProjectSerError> {
     Result::<(), ProjectSerError>::from(check_default_agent_executor(
         shared.executor,
-        shared.cloud_configured,
         shared.managed_enabled,
     ))?;
+    check_default_work_type(shared.work_type)?;
     check_name_identifier(shared)?;
     if instance_is_default == Some(true) && is_default == Some(false) {
         return Err(ProjectSerError::UnsetDefault);
@@ -636,7 +651,7 @@ mod tests {
     fn quiet_shared() -> SharedChecks<'static> {
         SharedChecks {
             executor: None,
-            cloud_configured: false,
+            work_type: None,
             managed_enabled: false,
             name: None,
             identifier: None,
@@ -647,50 +662,40 @@ mod tests {
 
     #[test]
     fn executor_gate_matches_helper_branches() {
-        // Fixture `executor_cloud_unconfigured`: 409 with its own body.
+        // #2903: both refusals are gone — every input passes, and
+        // deprecated values translate (normalize_executor_write).
         assert_eq!(
-            check_default_agent_executor(Some("cloud_agent"), false, false),
-            ExecutorCheck::CloudUnavailable
-        );
-        let err = ProjectSerError::CloudAgentUnavailable;
-        assert_eq!(err.status(), CLOUD_AGENT_UNAVAILABLE_STATUS);
-        assert_eq!(err.status(), 409);
-        assert_eq!(
-            err.body(),
-            r#"{"error":"Pi Dash Cloud Agent is not currently available","code":"cloud_agent_unavailable"}"#
-        );
-        // Configured cloud passes.
-        assert_eq!(
-            check_default_agent_executor(Some("cloud_agent"), true, false),
-            ExecutorCheck::Ok
-        );
-        // Fixture `executor_managed_disabled`: 400 list-wrapped body.
-        assert_eq!(
-            check_default_agent_executor(Some("managed_runner"), false, false),
-            ExecutorCheck::ManagedDisabled
-        );
-        let err = ProjectSerError::ManagedRunnerDisabled;
-        assert_eq!(err.status(), 400);
-        assert_eq!(
-            err.body(),
-            r#"{"default_agent_executor":["Pi Dash Agent is not enabled on this instance"]}"#
-        );
-        assert_eq!(
-            check_default_agent_executor(Some("managed_runner"), false, true),
-            ExecutorCheck::Ok
-        );
-        // Absent and ungated kinds pass.
-        assert_eq!(
-            check_default_agent_executor(None, false, false),
+            check_default_agent_executor(Some("cloud_agent"), false),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("local_runner"), false, false),
+            check_default_agent_executor(Some("cloud_agent"), true),
             ExecutorCheck::Ok
         );
         assert_eq!(
-            check_default_agent_executor(Some("other"), false, false),
+            check_default_agent_executor(Some("managed_runner"), false),
             ExecutorCheck::Ok
+        );
+        assert_eq!(
+            check_default_agent_executor(Some("managed_runner"), false),
+            ExecutorCheck::Ok
+        );
+        assert_eq!(check_default_agent_executor(None, false), ExecutorCheck::Ok);
+        assert_eq!(
+            check_default_agent_executor(Some("local_runner"), false),
+            ExecutorCheck::Ok
+        );
+        assert_eq!(
+            check_default_agent_executor(Some("other"), false),
+            ExecutorCheck::Ok
+        );
+        assert_eq!(
+            pidash_types::agent_runs::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
+        );
+        assert_eq!(
+            pidash_types::agent_runs::normalize_executor_write("managed_runner"),
+            Some(pidash_types::agent_runs::AgentExecutorKind::LocalRunner)
         );
     }
 
@@ -816,7 +821,6 @@ mod tests {
         let mut input = quiet_shared();
         input.name = Some("Engine");
         input.identifier = Some(" eng ");
-        input.cloud_configured = true;
         input.managed_enabled = true;
         assert!(validate_shared(&input).is_ok());
         // First failure wins, in source order: name beats lead.
@@ -824,14 +828,12 @@ mod tests {
         input.name = Some("Bad & Name");
         input.project_lead_is_member = Some(false);
         assert_eq!(validate_shared(&input), Err(ProjectSerError::NameForbidden));
-        // Executor gate runs before the name check.
+        // #2903: the executor never refuses — a deprecated value
+        // translates and validation proceeds to the name check.
         let mut input = quiet_shared();
         input.executor = Some("cloud_agent");
         input.name = Some("Bad & Name");
-        assert_eq!(
-            validate_shared(&input),
-            Err(ProjectSerError::CloudAgentUnavailable)
-        );
+        assert_eq!(validate_shared(&input), Err(ProjectSerError::NameForbidden));
         // Absent keys are skipped (partial-update parity).
         assert!(validate_shared(&quiet_shared()).is_ok());
     }
@@ -996,7 +998,8 @@ mod tests {
             ),
             Err(ProjectSerError::ProjectLeadNotMember)
         );
-        // Executor and name checks still run before the guard.
+        // The executor never refuses (#2903); the unset-default
+        // guard is the first failure.
         let mut shared = quiet_shared();
         shared.executor = Some("cloud_agent");
         shared.project_lead_is_member = Some(false);
@@ -1007,7 +1010,7 @@ mod tests {
                 Some(false),
                 DescriptionHtml::MissingOrFalsy
             ),
-            Err(ProjectSerError::CloudAgentUnavailable)
+            Err(ProjectSerError::UnsetDefault)
         );
         let mut shared = quiet_shared();
         shared.name = Some("Bad & Name");
@@ -1053,10 +1056,40 @@ mod tests {
     }
 
     #[test]
+    fn default_work_type_check_follows_registry() {
+        assert_eq!(check_default_work_type(None), Ok(()));
+        assert_eq!(check_default_work_type(Some("")), Ok(()));
+        assert_eq!(check_default_work_type(Some("general")), Ok(()));
+        assert_eq!(check_default_work_type(Some("software")), Ok(()));
+        let err = check_default_work_type(Some("bogus")).unwrap_err();
+        assert_eq!(err.status(), 400);
+        assert_eq!(
+            err.body(),
+            r#"{"default_work_type":["unknown work type; expected one of ['general', 'software']"]}"#
+        );
+        // Executor check runs first, then the work type, then the name.
+        let mut shared = quiet_shared();
+        shared.work_type = Some("bogus");
+        shared.name = Some("a&b");
+        assert_eq!(
+            validate_shared(&shared),
+            Err(ProjectSerError::UnknownWorkType)
+        );
+        // #2903: the executor check never fails now (no cloud/managed
+        // refusals); the work type still wins over the name.
+        shared.executor = Some("managed_runner");
+        assert_eq!(
+            validate_shared(&shared),
+            Err(ProjectSerError::UnknownWorkType)
+        );
+    }
+
+    #[test]
     fn shape_consts_match_python_source() {
-        assert_eq!(CREATE_META_FIELDS.len(), 26);
+        assert_eq!(CREATE_META_FIELDS.len(), 27);
         assert_eq!(CREATE_META_FIELDS[0], "name");
         assert_eq!(CREATE_META_FIELDS[25], "default_agent_executor");
+        assert_eq!(CREATE_META_FIELDS[26], "default_work_type");
         assert!(CREATE_META_FIELDS.contains(&"identifier"));
         assert_eq!(
             CREATE_META_READ_ONLY_FIELDS,

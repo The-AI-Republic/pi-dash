@@ -159,10 +159,12 @@ function BulkInstallForm({
   workspaceSlug,
   scheduler,
   onClose,
+  startsAtRef,
 }: {
   workspaceSlug: string;
   scheduler: Scheduler;
   onClose: () => void;
+  startsAtRef: React.Ref<HTMLInputElement>;
 }): React.ReactElement {
   const queryClient = useQueryClient();
   const projects = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
@@ -272,6 +274,7 @@ function BulkInstallForm({
 
       <ScheduleFields
         idPrefix="bulk-install"
+        startsAtRef={startsAtRef}
         value={schedule.value}
         errors={schedule.errors}
         disabled={submitting}
@@ -291,6 +294,13 @@ function BulkInstallForm({
 }
 
 export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkInstallDialogProps): React.ReactElement {
+  // The schedule's start field takes the dialog's open-time focus: it is
+  // the first control present the moment the dialog opens, while the
+  // projects picker waits on its read. Left to the kit's default, the
+  // deferred initial-focus pass picks the header's Close button and can
+  // land after the reader has clicked into a field, eating their input on a
+  // busy host (NEWFRONT-1055, 1058).
+  const startsAtRef = React.useRef<HTMLInputElement | null>(null);
   return (
     <Dialog
       open={scheduler !== null}
@@ -300,9 +310,16 @@ export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkIns
       title={scheduler === null ? "Install scheduler" : `Install ${scheduler.name}`}
       description="One schedule applies to every selected project."
       className="max-w-2xl"
+      initialFocus={startsAtRef}
     >
       {scheduler === null ? null : (
-        <BulkInstallForm key={scheduler.id} workspaceSlug={workspaceSlug} scheduler={scheduler} onClose={onClose} />
+        <BulkInstallForm
+          key={scheduler.id}
+          workspaceSlug={workspaceSlug}
+          scheduler={scheduler}
+          onClose={onClose}
+          startsAtRef={startsAtRef}
+        />
       )}
     </Dialog>
   );

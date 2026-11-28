@@ -190,6 +190,12 @@ SKIP_TABLES = frozenset(
         # compared through the jobs path (compare_jobs), not the DB path.
         "rust_job_queue",
         "rust_job_schedule",
+        # Rust-owned model catalog (runner_models/schema.rs,
+        # NEWPIDASH-169): created by the Rust server at boot, never by
+        # the Django schema. Replay sessions never write catalog rows,
+        # so the table stays empty on the rust side and absent on the
+        # django side — skipping is the same precedent as the queues.
+        "rust_runner_model_catalog",
     }
 )
 
@@ -271,6 +277,19 @@ TOPOLOGY_HOST_RE = re.compile(r"127\.0\.0\.1:\d+")
 # presence differs on bodyless requests). Single-quote repr form —
 # the payload is Python str(dict), never JSON.
 CONTENT_LENGTH_RE = re.compile(r"('Content-Length': ')[^']*(')")
+# DIFF-20 sensitive-header *values* inside the headers repr. The Rust
+# APITokenLogMiddleware redacts these to "[REDACTED]" (never logging an
+# issuable key); Django still stores the raw values. Canonicalise both
+# sides by redacting before compare so every other header still
+# compares strictly. Key markers mirror Rust's is_sensitive_header
+# (crates/api/src/middleware/logging.rs); "[REDACTED]" mirrors its
+# REDACTED_HEADER_VALUE so the already-redacted Rust side is unchanged.
+SENSITIVE_HEADER_VALUE_RE = re.compile(
+    r"('[^']*(?:authorization|api-key|apikey|cookie|token|secret|session"
+    r"|csrf|xsrf|auth|password)[^']*': ')[^']*(')",
+    re.IGNORECASE,
+)
+REDACTED_HEADER_VALUE = "[REDACTED]"
 
 
 def placeholder_for(value):

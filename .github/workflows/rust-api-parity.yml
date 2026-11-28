@@ -32,7 +32,7 @@ concurrency:
 jobs:
   parity:
     name: route + job parity vs EXPECTED.md
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test

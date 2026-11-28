@@ -44,6 +44,7 @@ import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { useCreateWorkItem } from "../api/create.js";
 import { executionTargetFieldError } from "../api/executionTarget.js";
 import { createStateRefusal, creationStateGate, stateOptionGate } from "../edition/workflow.js";
+import { useProjectWorkItemTypes } from "../edition/IssueTypePicker.js";
 import { DiscardDraftDialog } from "../create/DiscardDraftDialog.js";
 import {
   DRAFT_SAVE_FAILED_INLINE_TITLE,
@@ -80,6 +81,7 @@ import {
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
+  seedForForm,
   selectCreatableProjects,
   targetProjectId,
   toCreateProjectOption,
@@ -88,7 +90,7 @@ import {
   withDefaultExecution,
   type CreateFormInitialValues,
   type CreateFormState,
-  type CreateMembership,
+  type CreateSeed,
 } from "../create/createForm.js";
 import {
   baselineFor,
@@ -540,9 +542,10 @@ export function WorkItemCreateDialog({
   // The description panel keeps its own upload state out of `busy`, so it
   // reports whether a close may proceed (ISS-125).
   const [descriptionReady, setDescriptionReady] = React.useState(true);
-  // The memberships the route seeded for this visit: the discard guard
-  // treats them as context, not as something the user entered (ISS-124).
-  const routeMembership = React.useRef<CreateMembership>({ cycleId: null, moduleIds: [] });
+  // The form the opener seeded for this visit: the discard guard treats
+  // every seeded value as context, not as something the user entered
+  // (ISS-124, NEWPIDASH-143).
+  const routeSeed = React.useRef<CreateSeed>({ cycleId: null, moduleIds: [] });
   // The description the edit opened with, so a late detail read can tell
   // an untouched editor from one the user already typed into.
   const openedDescription = React.useRef<string | null>(null);
@@ -554,6 +557,11 @@ export function WorkItemCreateDialog({
   const openedType = React.useRef<string | null>(null);
   const adoptedType = React.useRef<string | null>(null);
   const baselineTypeId = React.useRef<string | null>(null);
+  // A create preselects the project's default type (NEWPIDASH-361): the
+  // first flag marks a pick the user made this visit (which a project
+  // switch keeps), the second the project already defaulted.
+  const typeTouched = React.useRef(false);
+  const typeDefaultedFor = React.useRef<string | null>(null);
   // The stored description already folded into the form; the detail read
   // may answer more than once (a refetch), and only the first fold needs
   // to rebuild the editor.
@@ -573,6 +581,10 @@ export function WorkItemCreateDialog({
   const submitting = React.useRef(false);
   const draftTargetId = editDraftId(edit, draftId);
   const issueType = getIssueTypeExtension();
+  // The type picker lives in the property chip row as its last button
+  // (NEWPIDASH-361); the template and extra-property slots keep their
+  // section above the title.
+  const TypePicker = issueType?.typePicker ?? null;
   const [typeId, setTypeId] = React.useState<string | null>(null);
   const [propertyValues, setPropertyValues] = React.useState<Record<string, unknown>>({});
 
@@ -626,7 +638,7 @@ export function WorkItemCreateDialog({
       seededCopyForm ??
       contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
-    routeMembership.current = membershipForForm(next);
+    routeSeed.current = seedForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
     openedBranch.current = starting?.gitWorkBranch ?? "";
     adoptedBranch.current = starting?.gitWorkBranch ?? "";
@@ -648,6 +660,8 @@ export function WorkItemCreateDialog({
     openedType.current = null;
     adoptedType.current = null;
     baselineTypeId.current = null;
+    typeTouched.current = false;
+    typeDefaultedFor.current = null;
     setPropertyValues({});
     setEditorGeneration((current) => current + 1);
     setFocusRequest((current) => current + 1);
@@ -777,26 +791,35 @@ export function WorkItemCreateDialog({
         ? stateOptionGate(projectId, baseline?.form.stateId ?? null)
         : creationStateGate(projectId);
   // A new item starts on the project's default pod, as the old create
-  // form did (NEWPIDASH-23): once the pods and the project's default
-  // executor load, an empty target takes the default pod (else the first
-  // pod). The reads key on the project, so a project switch or a Create
+  // form did (NEWPIDASH-23): once the pods load, an empty target takes
+  // the default pod (else the first pod). The reads key on the project, so a project switch or a Create
   // more reset, which both clear the target, fill it again from the new
   // project. An edit keeps the row's own target.
   const creating = open && !editing;
   const targetReads = creating && projectId !== "";
   const pods = usePickerPods(workspaceSlug, projectId, targetReads);
-  const targetProject = usePickerProject(workspaceSlug, projectId, targetReads);
   const seededExecution = React.useMemo(
-    () =>
-      creating && pods.data !== undefined && targetProject.data !== undefined
-        ? defaultExecutionSelection(pods.data, targetProject.data.default_agent_executor)
-        : null,
-    [creating, pods.data, targetProject.data]
+    () => (creating && pods.data !== undefined ? defaultExecutionSelection(pods.data) : null),
+    [creating, pods.data]
   );
   React.useEffect(() => {
     if (seededExecution === null) return;
     setForm((current) => withDefaultExecution(current, seededExecution));
   }, [seededExecution, form.execution]);
+  // A create preselects the project's default issue type (NEWPIDASH-361):
+  // the first loaded list carrying a default fills an untouched pick, a
+  // project switch re-defaults, and a user's pick always wins. The read
+  // shares the picker's query key, so it adds no second request.
+  const typeReads = creating && projectId !== "" && issueType !== null;
+  const projectTypes = useProjectWorkItemTypes(workspaceSlug, projectId, typeReads);
+  React.useEffect(() => {
+    if (!creating || issueType === null || projectId === "") return;
+    if (typeTouched.current || typeDefaultedFor.current === projectId) return;
+    if (projectTypes.data === undefined) return;
+    typeDefaultedFor.current = projectId;
+    const fallback = projectTypes.data.find((row) => row.isDefault)?.id ?? null;
+    if (fallback !== null) setTypeId(fallback);
+  }, [creating, issueType, projectId, projectTypes.data]);
   const busy =
     create.isPending ||
     writeEdit.isPending ||
@@ -820,6 +843,25 @@ export function WorkItemCreateDialog({
     patch({ gitWorkBranch: branch });
   }
 
+  /** A type pick the user made: marks the visit touched so the project
+   * default never overwrites it (NEWPIDASH-361). */
+  function handleTypeChange(next: string | null): void {
+    typeTouched.current = true;
+    setTypeId(next);
+  }
+
+  /** Fill the form from a template's prefill (ISS-129); a carried type
+   * counts as the user's pick for the default preselect. */
+  function applyTemplate(prefill: TemplatePrefill): void {
+    setForm((current) => applyTemplatePrefill(current, prefill));
+    if (prefill.typeId !== undefined) {
+      typeTouched.current = true;
+      setTypeId(prefill.typeId);
+    }
+    if (prefill.propertyValues !== undefined) setPropertyValues(prefill.propertyValues);
+    setEditorGeneration((current) => current + 1);
+  }
+
   function pickProject(nextProjectId: string): void {
     if (nextProjectId === form.projectId) return;
     // The form may only file where it holds create permission; a value
@@ -838,6 +880,13 @@ export function WorkItemCreateDialog({
     // editor, and keep the kept title/project draft in step. An edit is
     // pinned to its row's project instead.
     setForm(seededForm(nextProjectId, form.name));
+    // The type belongs to the old project too: clear the pick so the
+    // defaulting effect preselects the new project's default (NEWPIDASH-361).
+    // A pick from the old list may not exist in the new project, and the
+    // chip would otherwise show "No type" while the payload sends the stale id.
+    setTypeId(null);
+    typeTouched.current = false;
+    typeDefaultedFor.current = null;
     setFieldError(null);
     setExecutionError(null);
     setStateError(null);
@@ -865,7 +914,7 @@ export function WorkItemCreateDialog({
       return;
     }
     // An edit never prompts: there is a stored row to fall back on.
-    if (editing || !hasDraftWorthKeeping(form, routeMembership.current, seededExecution)) {
+    if (editing || !hasDraftWorthKeeping(form, routeSeed.current, seededExecution)) {
       finishClose();
       return;
     }
@@ -970,7 +1019,6 @@ export function WorkItemCreateDialog({
         },
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
-          onCreated?.(created.id);
           const membership = membershipForForm(named);
           if (hasMembership(membership)) {
             attachMembership.mutate(
@@ -986,16 +1034,27 @@ export function WorkItemCreateDialog({
             attachAssets.mutate({ projectId, issueId: created.id, assetIds });
           }
           if (!createMore) {
+            // Fired only when the dialog is actually finishing: the
+            // board/list parents unmount on it, so firing while Create
+            // more is on would drop the reset form below (ISS-119).
+            onCreated?.(created.id);
             finishClose();
             return;
           }
-          // Keep the project and the route's cycle/module context, then
-          // re-focus the title; everything else is a new item (ISS-119).
+          // Keep the project and the opener's seed, then re-focus the
+          // title; name and description are a new item (ISS-119). The
+          // seed is the listing prefill the dialog opened with plus the
+          // route cycle/module context, as contextForm built the opener.
           // A seeded parent stays attached to the next item (ISS-175).
+          const opener: CreateFormInitialValues = {
+            ...(initialValues ?? {}),
+            ...(context?.cycleId != null ? { cycleId: context.cycleId } : {}),
+            ...(context?.moduleId != null ? { moduleIds: [context.moduleId] } : {}),
+          };
           setForm(
             seededParent === null
-              ? resetForCreateMore(named)
-              : { ...resetForCreateMore(named), parentId: seededParent.id }
+              ? resetForCreateMore(named, "", opener)
+              : { ...resetForCreateMore(named, "", opener), parentId: seededParent.id }
           );
           setFieldError(null);
           setExecutionError(null);
@@ -1247,7 +1306,9 @@ export function WorkItemCreateDialog({
         open={open}
         onOpenChange={handleOpenChange}
         ignoreEscapeKey={busy}
-        className="max-w-2xl"
+        // NEWPIDASH-361: twice the old width (max-w-2xl is 42rem) and
+        // half again as tall, both capped at the viewport on small screens.
+        className="min-h-[min(44rem,calc(100dvh-2rem))] max-w-[min(84rem,calc(100vw-2rem))]"
         actions={
           <>
             <TabStop index={MODAL_TAB_ORDER.discard} label="Discard">
@@ -1308,11 +1369,15 @@ export function WorkItemCreateDialog({
               {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
             </FieldSlot>
           </div>
-          {/* The type slots need a stored row to seed from and an endpoint
-              that keeps the pick: drafts have neither (no type column),
-              so the picker shows for issue creates and issue edits only
-              (ISS-129). */}
-          {issueType === null || drafting || edit?.kind === "draft" ? null : (
+          {/* The template and extra-property slots need a stored row to
+              seed from and an endpoint that keeps the pick: drafts have
+              neither (no type column), so they show for issue creates
+              and issue edits only (ISS-129). The type picker itself
+              sits in the property chip row below (NEWPIDASH-361). */}
+          {issueType === null ||
+          drafting ||
+          edit?.kind === "draft" ||
+          (issueType.templatePicker === undefined && issueType.additionalProperties === undefined) ? null : (
             <IssueTypeSlots
               extension={issueType}
               workspaceSlug={workspaceSlug}
@@ -1320,14 +1385,9 @@ export function WorkItemCreateDialog({
               disabled={busy}
               typeId={typeId}
               propertyValues={propertyValues}
-              onTypeChange={setTypeId}
+              onTypeChange={handleTypeChange}
               onPropertyValuesChange={setPropertyValues}
-              onTemplateApply={(prefill) => {
-                setForm((current) => applyTemplatePrefill(current, prefill));
-                if (prefill.typeId !== undefined) setTypeId(prefill.typeId);
-                if (prefill.propertyValues !== undefined) setPropertyValues(prefill.propertyValues);
-                setEditorGeneration((current) => current + 1);
-              }}
+              onTemplateApply={applyTemplate}
             />
           )}
           <Input
@@ -1516,6 +1576,23 @@ export function WorkItemCreateDialog({
                 disabled={busy || lockedParent}
               />
             </TabStop>
+            {/* The issue type rides the property row as its last button
+                (NEWPIDASH-361): drafts have no type column, so the chip
+                shows for issue creates and issue edits only (ISS-129). */}
+            {TypePicker === null || drafting || edit?.kind === "draft" ? null : (
+              <div role="group" aria-label="Issue type" className="flex items-center">
+                <TypePicker
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  disabled={busy}
+                  typeId={typeId}
+                  propertyValues={propertyValues}
+                  onTypeChange={handleTypeChange}
+                  onPropertyValuesChange={setPropertyValues}
+                  onTemplateApply={applyTemplate}
+                />
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-(--space-2)">
             <Button
@@ -1582,21 +1659,16 @@ function applyTemplatePrefill(form: CreateFormState, prefill: TemplatePrefill): 
   };
 }
 
-/** The cloud trio (ISS-129): type, template and extra properties. */
+/** The cloud template and extra-property slots (ISS-129): the type
+ * picker left this section for the property chip row (NEWPIDASH-361). */
 function IssueTypeSlots({
   extension,
   ...props
 }: IssueTypeExtensionProps & { extension: IssueTypeExtension }): React.ReactElement {
-  const TypePicker = extension.typePicker;
   const TemplatePicker = extension.templatePicker;
   const AdditionalProperties = extension.additionalProperties;
   return (
     <div className="flex flex-col gap-(--space-4)">
-      {TypePicker === undefined ? null : (
-        <FieldSlot label="Issue type">
-          <TypePicker {...props} />
-        </FieldSlot>
-      )}
       {TemplatePicker === undefined ? null : (
         <FieldSlot label="Template">
           <TemplatePicker {...props} />

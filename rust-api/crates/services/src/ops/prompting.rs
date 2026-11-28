@@ -1,11 +1,9 @@
-//! Prompting ops decisions: reseed + revalidate orchestration (D-37, stage 7).
+//! Prompting ops decisions: revalidate orchestration (D-37, stage 7).
 //!
 //! Ports the `handle()` logic of
-//! `apps/api/pi_dash/prompting/management/commands/reseed_{default,review,test}_template.py`
-//! (`seed_*(force)` + the `"<name> template: <result>"` line) and
-//! `revalidate_section_overrides.py` (scan active rows, flag-or-clear
-//! `needs_attention`, print the summary). Fixture F37-09
-//! (`rust-api/fixtures/ops/commands/prompting.golden.json`).
+//! `apps/api/pi_dash/prompting/management/commands/revalidate_section_overrides.py`
+//! (scan active rows, flag-or-clear `needs_attention`, print the summary).
+//! Fixture F37-09 (`rust-api/fixtures/ops/commands/prompting.golden.json`).
 //!
 //! Pure decisions only — this module holds no database handle, so no
 //! `sqlx` here. The DB edge (`pidash_db::ops::prompting`) preloads rows
@@ -16,94 +14,20 @@
 //!
 //! Ported behaviors (translate, don't redesign — same as the kernels):
 //!
-//! * `force` with an unchanged body reports `skipped` (no write).
 //! * A revalidate row with `user_id=NULL` renders as the literal string
 //!   `None` in the flagged line (Python f-string of `None`).
 //! * An unknown section key is broken *without* rendering
 //!   (`revalidate_section_overrides.py:40-41`).
 //! * An already-flagged broken row stays flagged silently (no recount);
 //!   a clean flagged row only clears under `--clear`.
+//! * A core stage section override that renders cleanly but carries
+//!   software/git/PR wording is flagged with the neutrality detail
+//!   (`prompting::neutrality`, PDASHOSS01-234).
 //! * Validation runs against the initial snapshot: flagging only flips
 //!   `needs_attention`, which the validator never reads, so planning the
 //!   whole scan before writing matches Python's row-by-row loop exactly.
 
-use super::super::prompting::{composer, seed};
-
-/// The three global templates the reseed commands own
-/// (`seed.py:29,99` + `models.py:20`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemplateKind {
-    Default,
-    Review,
-    Test,
-}
-
-impl TemplateKind {
-    /// The `PromptTemplate.name` row this kind seeds
-    /// (`coding-task` / `review` / `test`).
-    pub fn name(self) -> &'static str {
-        match self {
-            TemplateKind::Default => seed::DEFAULT_TEMPLATE_NAME,
-            TemplateKind::Review => seed::REVIEW_TEMPLATE_NAME,
-            TemplateKind::Test => seed::TEST_TEMPLATE_NAME,
-        }
-    }
-
-    /// The command-output word (`default` / `review` / `test` in
-    /// `"<name> template: <result>"`).
-    pub fn label(self) -> &'static str {
-        match self {
-            TemplateKind::Default => "default",
-            TemplateKind::Review => "review",
-            TemplateKind::Test => "test",
-        }
-    }
-
-    /// The fresh body for this kind: the assembled fragments for
-    /// `default`, the embedded const bodies for `review` / `test`
-    /// (`seed.py:200-212`). The fragment sources are the same
-    /// `NN_*.md` mirrors the prompting domain embeds — this module
-    /// reads them through the kernels, never from its own copies.
-    pub fn body(self) -> String {
-        match self {
-            TemplateKind::Default => seed::read_default_body(),
-            TemplateKind::Review => seed::read_review_body().to_owned(),
-            TemplateKind::Test => seed::read_test_body().to_owned(),
-        }
-    }
-}
-
-/// The planned reseed: what to write (if anything) and what to print.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReseedPlan {
-    /// The fresh body the edge inserts or refreshes with.
-    pub body: String,
-    pub outcome: seed::SeedOutcome,
-    /// The version to write: `Some(1)` on create, the bumped version on
-    /// refresh, `None` when nothing is written.
-    pub version: Option<i32>,
-    /// The stdout line: `"<label> template: <result>"`.
-    pub line: String,
-}
-
-/// Pure half of `reseed_*_template.handle` (`seed.py:215-308` + the
-/// command's stdout line): decide from the preloaded global row (or
-/// `None`), the fresh body and the `--force` flag.
-pub fn plan_reseed(
-    kind: TemplateKind,
-    existing: Option<&seed::ExistingTemplate>,
-    force: bool,
-) -> ReseedPlan {
-    let body = kind.body();
-    let (outcome, version) = seed::decide_seed(existing, &body, force);
-    let line = seed::reseed_message(kind.label(), outcome);
-    ReseedPlan {
-        body,
-        outcome,
-        version,
-        line,
-    }
-}
+use super::super::prompting::{composer, neutrality, seed};
 
 /// One active override row as handed over by the DB edge: the columns
 /// the revalidate loop reads, with ids as strings (UUID text, exactly
@@ -202,6 +126,22 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
             ) {
                 broken = true;
                 detail = err.message().to_owned();
+            } else if let Some(issue) =
+                neutrality::override_neutrality_issue(&row.section_key, &row.body)
+            {
+                // A core stage section override carrying work-type-specific
+                // wording would leak into every work type
+                // (`revalidate_section_overrides.py`, PDASHOSS01-234).
+                broken = true;
+                detail = issue;
+            } else if let Some(rewritten) =
+                seed::rewritten_section_detail(&row.section_key, &row.body)
+            {
+                // The lean workflow change rewrote this section; an override
+                // written against the old procedure needs an admin's review
+                // (design §9.5).
+                broken = true;
+                detail = rewritten.to_owned();
             }
         }
         let action = seed::decide_revalidate(broken, row.needs_attention, clear);
@@ -241,72 +181,6 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
 mod tests {
     use super::*;
 
-    fn existing(body: &str, version: i32) -> seed::ExistingTemplate {
-        seed::ExistingTemplate {
-            body: body.to_owned(),
-            version: Some(version),
-        }
-    }
-
-    /// `seed.py:215-308` decision table, per kind: missing → created v1;
-    /// present → skipped; force + different → refreshed v+1; force +
-    /// identical → skipped (the quirk).
-    #[test]
-    fn reseed_decision_table_per_kind() {
-        for kind in [
-            TemplateKind::Default,
-            TemplateKind::Review,
-            TemplateKind::Test,
-        ] {
-            let body = kind.body();
-            let plan = plan_reseed(kind, None, false);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Created);
-            assert_eq!(plan.version, Some(1));
-            assert_eq!(plan.body, body);
-
-            let same = existing(&body, 3);
-            for force in [false, true] {
-                let plan = plan_reseed(kind, Some(&same), force);
-                assert_eq!(
-                    plan.outcome,
-                    seed::SeedOutcome::Skipped,
-                    "{kind:?} force={force}"
-                );
-                assert_eq!(plan.version, None);
-            }
-
-            let stale = existing("stale body", 3);
-            let plan = plan_reseed(kind, Some(&stale), false);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Skipped);
-            assert_eq!(plan.version, None);
-            let plan = plan_reseed(kind, Some(&stale), true);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Refreshed);
-            assert_eq!(plan.version, Some(4));
-        }
-    }
-
-    #[test]
-    fn reseed_line_names_kind_and_outcome() {
-        for (kind, label) in [
-            (TemplateKind::Default, "default"),
-            (TemplateKind::Review, "review"),
-            (TemplateKind::Test, "test"),
-        ] {
-            assert_eq!(kind.name(), kind_name(kind));
-            assert_eq!(kind.label(), label);
-            let plan = plan_reseed(kind, None, false);
-            assert_eq!(plan.line, format!("{label} template: created"));
-        }
-    }
-
-    fn kind_name(kind: TemplateKind) -> &'static str {
-        match kind {
-            TemplateKind::Default => "coding-task",
-            TemplateKind::Review => "review",
-            TemplateKind::Test => "test",
-        }
-    }
-
     fn active_override(section_key: &str, body: &str) -> ActiveOverride {
         ActiveOverride {
             id: "00000000-0000-0000-0000-000000000001".to_owned(),
@@ -321,13 +195,20 @@ mod tests {
 
     /// A section key the embedded registry really carries that is also
     /// usable in a recipe (unlocked, and referenced by at least one kind
-    /// so validation does not fail closed on the no-recipe rule).
+    /// so validation does not fail closed on the no-recipe rule), and
+    /// whose override is not flagged for dropping a required step.
     fn known_key() -> String {
         use crate::prompting::{registry, validation};
         let sections = registry::all_sections();
         let section = sections
             .iter()
-            .find(|s| !s.is_locked() && !validation::kinds_for_section(s.key).is_empty())
+            .find(|s| {
+                !s.is_locked()
+                    && !validation::kinds_for_section(s.key).is_empty()
+                    && !seed::LEAN_WORKFLOW_REQUIRED_STEPS
+                        .iter()
+                        .any(|(key, _)| *key == s.key)
+            })
             .expect("registry carries a usable section");
         section.key.to_owned()
     }
@@ -344,6 +225,99 @@ mod tests {
     }
 
     /// Unknown keys flag without rendering (`:40-41`); the literal
+    /// A renderable core-section override that still carries git/PR
+    /// wording is flagged with the neutrality detail; a work-type
+    /// section override with the same body is not a neutrality problem
+    /// (PDASHOSS01-234) — it is flagged only because it still uses the
+    /// procedure the lean workflow change retired (design §9.5).
+    #[test]
+    fn non_neutral_core_override_flags_with_neutrality_detail() {
+        let body = "Commit and push the branch, then open a PR.";
+        let mut work_type_row = active_override(
+            "software.execute",
+            "Commit and push the branch, open a PR, then `pidash run yield --outcome done`.",
+        );
+        work_type_row.id = "00000000-0000-0000-0000-000000000003".to_owned();
+        let plan = plan_revalidate(
+            &[active_override("implementation", body), work_type_row],
+            false,
+        );
+        assert_eq!(plan.flagged, 2);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
+        let line = plan.steps[0].line.as_deref().expect("flagged line");
+        assert!(
+            line.ends_with(
+                "override for core section 'implementation' carries work-type-specific wording \
+                 ('branch', 'Commit', 'push', 'PR'); core sections are shared by every work type, \
+                 so move that guidance into a work-type section (e.g. 'software.execute')"
+            ),
+            "{line}"
+        );
+        assert_eq!(plan.steps[1].action, seed::RevalidateAction::Flag);
+        assert!(plan.steps[1]
+            .line
+            .as_deref()
+            .expect("flagged line")
+            .ends_with(seed::LEAN_WORKFLOW_REWRITTEN_DETAIL));
+    }
+
+    /// Overrides on sections the lean workflow change rewrote are flagged
+    /// while they still use the retired procedure; once an admin rewrites
+    /// one, it is no longer flagged and `--clear` clears the old flag
+    /// (design §9.5). An override on a new section key is kept.
+    #[test]
+    fn rewritten_section_overrides_flag_for_review() {
+        let old = "When done, run `pidash run yield --outcome done --stop-ticking`.";
+        // Up to date: no retired wording, and keeps the workpad step that
+        // only `implementation` carries.
+        let rewritten = "Plain text with no Jinja. Note it in the workpad's Keep in mind.";
+        for key in seed::LEAN_WORKFLOW_REWRITTEN_KEYS {
+            let plan = plan_revalidate(&[active_override(key, old)], false);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag, "{key}");
+            assert_eq!(
+                plan.steps[0].line.as_deref(),
+                Some(
+                    format!(
+                        "flagged 00000000-0000-0000-0000-000000000002/{key} (user=None): \
+                         section rewritten by the lean workflow change; review this override"
+                    )
+                    .as_str()
+                ),
+            );
+            // Still old and already flagged: `--clear` keeps the flag.
+            let mut flagged = active_override(key, old);
+            flagged.needs_attention = true;
+            let plan = plan_revalidate(&[flagged], true);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep, "{key}");
+            // Rewritten by an admin: not flagged again...
+            let plan = plan_revalidate(&[active_override(key, rewritten)], false);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep, "{key}");
+            // ...and an old flag on it clears with `--clear`.
+            let mut stale = active_override(key, rewritten);
+            stale.needs_attention = true;
+            let plan = plan_revalidate(&[stale], true);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Clear, "{key}");
+        }
+        let plan = plan_revalidate(&[active_override("review", rewritten)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
+        // An override still teaching the removed hand-off is flagged.
+        let handoff = "Write the hand-off and pass it with --handoff-file.";
+        let plan = plan_revalidate(&[active_override("review", handoff)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
+    }
+
+    /// An `implementation` override with its own guidelines and none of
+    /// the retired wording still drops the workpad step, so it is flagged.
+    #[test]
+    fn implementation_override_without_the_workpad_note_is_flagged() {
+        let custom = "Follow our team guidelines: small steps, checks first.";
+        let plan = plan_revalidate(&[active_override("implementation", custom)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
+        // Other rewritten sections have no such step: the same body is kept.
+        let plan = plan_revalidate(&[active_override("autonomy", custom)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
+    }
+
     /// `None` user matches Python's f-string of `None`.
     #[test]
     fn unknown_section_key_flags_without_rendering() {

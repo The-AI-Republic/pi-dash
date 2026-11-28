@@ -18,4 +18,10 @@ export type {
   DictationTranscriber,
   UseDictationOptions,
 } from "./useDictation.js";
-export { dictationOffered, sttConfigKeys, sttConfigQueryOptions, useDictationConfig } from "./config.js";
+export {
+  DICTATION_UI_ENABLED,
+  dictationOffered,
+  sttConfigKeys,
+  sttConfigQueryOptions,
+  useDictationConfig,
+} from "./config.js";

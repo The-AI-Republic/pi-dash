@@ -309,7 +309,7 @@ pub const PROVIDER_ACCOUNT_SCOPE_SQL: &str = "workspace_id = $1 AND provider = $
 /// `resolve_provider_account_repository` (`.order_by("created_at")`,
 /// `services.py:169-175`); the single-row `select` path narrows with
 /// [`PROVIDER_ACCOUNT_GET_SQL`].
-pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
+pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
 
 /// Scoped single-account fetch (`services.py:127`
 /// `queryset.filter(id=…).first()`).
@@ -317,7 +317,7 @@ pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, 
 /// Parameters: `$1` workspace id, `$2` provider key, `$3` normalized
 /// host, `$4` account id. Django's `first()` on an unordered queryset
 /// orders by pk; the id predicate already yields at most one row.
-pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
+pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
 
 /// `INSERT` for `create_provider_account` (`services.py:95-114`).
 ///
@@ -417,10 +417,9 @@ pub trait GitStore {
     ) -> Result<Option<super::repositories::ProjectRef>, StoreError>;
 
     /// The binding section of `bind_repository` as one transaction:
-    /// delete the existing project binding (hard), delete the project's
-    /// `GithubRepositorySync` rows (hard), insert the new binding, apply
-    /// the project `repo_url`/`base_branch` updates. `BINDING_*_SQL`,
-    /// `GITHUB_SYNC_DELETE_SQL`, `PROJECT_REPO_UPDATE_SQL`.
+    /// delete the existing project binding (hard), insert the new
+    /// binding, apply the project `repo_url`/`base_branch` updates.
+    /// `BINDING_*_SQL`, `PROJECT_REPO_UPDATE_SQL`.
     async fn apply_bind(
         &self,
         plan: super::repositories::BindPlan,
@@ -448,21 +447,8 @@ pub trait GitStore {
         StoreError,
     >;
 
-    /// `set_binding_sync_enabled` Github mirror
-    /// (`GITHUB_SYNC_SET_ENABLED_SQL`); returns rows updated.
-    async fn set_github_syncs_enabled(
-        &self,
-        project_id: Uuid,
-        workspace_slug: &str,
-        enabled: bool,
-    ) -> Result<u64, StoreError>;
-
     /// Hard-delete one binding by id (`BINDING_DELETE_ONE_SQL`).
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), StoreError>;
-
-    /// Hard-delete a project's `GithubRepositorySync` rows
-    /// (`GITHUB_SYNC_DELETE_SQL`); returns rows deleted.
-    async fn delete_github_syncs_for_project(&self, project_id: Uuid) -> Result<u64, StoreError>;
 }
 
 /// Insert plan for `create_provider_account` (`services.py:95-114`).
@@ -875,6 +861,150 @@ pub async fn resolve_provider_account_repository<S: GitStore>(
     .into())
 }
 
+/// SeaORM twins of the provider-account statements above
+/// (`PROVIDER_ACCOUNT_LIST_SQL`, `PROVIDER_ACCOUNT_GET_SQL`,
+/// `PROVIDER_ACCOUNT_INSERT_SQL`), for store implementations that run on
+/// a SeaORM connection. Same filters, ordering and column sets.
+pub mod orm {
+    use pidash_db::entity::{git_provider_accounts, workspaces};
+    use pidash_db::integrations::git_models::git_provider_account::GitProviderAccount;
+    use sea_orm::sea_query::{Expr, Query, SimpleExpr};
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    };
+    use uuid::Uuid;
+
+    use super::NewProviderAccount;
+
+    /// `workspace_id = (SELECT id FROM workspaces WHERE slug = $slug)`'s
+    /// right side: the scalar slug subquery (unscoped, as the SQL forms are).
+    pub fn workspace_id_of_slug(slug: &str) -> SimpleExpr {
+        SimpleExpr::SubQuery(
+            None,
+            Box::new(
+                Query::select()
+                    .column((workspaces::Entity, workspaces::Column::Id))
+                    .from(workspaces::Entity)
+                    .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+                    .to_owned()
+                    .into_sub_query_statement(),
+            ),
+        )
+    }
+
+    /// Select every column of `E` aliased `<prefix><column>`, so a joined
+    /// row decodes by name through `E::Model::from_query_result(row, prefix)`
+    /// and no output name can collide with another table's.
+    pub fn select_prefixed<E, S>(mut select: S, prefix: &str) -> S
+    where
+        E: EntityTrait,
+        S: QuerySelect,
+    {
+        use sea_orm::{IdenStatic, Iterable};
+        for column in E::Column::iter() {
+            select = select.column_as(column, format!("{prefix}{}", column.as_str()));
+        }
+        select
+    }
+
+    /// The usable-account scope: workspace, provider, host, a connected or
+    /// degraded status, live rows.
+    fn usable(
+        workspace_id: Uuid,
+        provider: &str,
+        host_url: &str,
+    ) -> sea_orm::Select<git_provider_accounts::Entity> {
+        git_provider_accounts::Entity::find()
+            .filter(git_provider_accounts::Column::WorkspaceId.eq(workspace_id))
+            .filter(git_provider_accounts::Column::Provider.eq(provider))
+            .filter(git_provider_accounts::Column::HostUrl.eq(host_url))
+            .filter(git_provider_accounts::Column::Status.is_in(["connected", "degraded"]))
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+    }
+
+    /// `PROVIDER_ACCOUNT_LIST_SQL`: usable accounts, oldest first.
+    pub async fn list_provider_accounts(
+        db: &impl ConnectionTrait,
+        workspace_id: Uuid,
+        provider: &str,
+        host_url: &str,
+    ) -> Result<Vec<GitProviderAccount>, DbErr> {
+        let rows = usable(workspace_id, provider, host_url)
+            .order_by_asc(git_provider_accounts::Column::CreatedAt)
+            .all(db)
+            .await?;
+        Ok(rows.into_iter().map(GitProviderAccount::from).collect())
+    }
+
+    /// `PROVIDER_ACCOUNT_GET_SQL`: one usable account by id.
+    pub async fn get_provider_account(
+        db: &impl ConnectionTrait,
+        workspace_id: Uuid,
+        provider: &str,
+        host_url: &str,
+        account_id: Uuid,
+    ) -> Result<Option<GitProviderAccount>, DbErr> {
+        let row = usable(workspace_id, provider, host_url)
+            .filter(git_provider_accounts::Column::Id.eq(account_id))
+            .order_by_asc(git_provider_accounts::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitProviderAccount::from))
+    }
+
+    /// `PROVIDER_ACCOUNT_INSERT_SQL`: the 17 explicit columns;
+    /// `deleted_at`, `workspace_integration_id` and `last_check_error`
+    /// keep their column defaults.
+    pub async fn insert_provider_account(
+        db: &impl ConnectionTrait,
+        row: &NewProviderAccount,
+    ) -> Result<(), DbErr> {
+        git_provider_accounts::Entity::insert(git_provider_accounts::ActiveModel {
+            id: Set(row.id),
+            created_at: Set(row.created_at.into()),
+            updated_at: Set(row.updated_at.into()),
+            created_by_id: Set(row.created_by_id),
+            updated_by_id: Set(row.updated_by_id),
+            workspace_id: Set(row.workspace_id),
+            provider: Set(row.provider.clone()),
+            host_url: Set(row.host_url.clone()),
+            auth_type: Set(row.auth_type.clone()),
+            external_account_id: Set(row.external_account_id.clone()),
+            external_account_login: Set(row.external_account_login.clone()),
+            display_name: Set(row.display_name.clone()),
+            capabilities: Set(row.capabilities.clone()),
+            credential_config: Set(row.credential_config.clone()),
+            status: Set(row.status.clone()),
+            verified_at: Set(Some(row.verified_at.into())),
+            metadata: Set(row.metadata.clone()),
+            ..Default::default()
+        })
+        .exec_without_returning(db)
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sea_orm::{DbBackend, QueryTrait};
+
+        #[test]
+        fn list_statement_pins_scope_and_order() {
+            let sql = usable(Uuid::nil(), "github", "https://github.com")
+                .order_by_asc(git_provider_accounts::Column::CreatedAt)
+                .build(DbBackend::Postgres)
+                .to_string();
+            assert!(
+                sql.contains(r#""git_provider_accounts"."status" IN ('connected', 'degraded')"#)
+            );
+            assert!(sql.contains(r#""git_provider_accounts"."deleted_at" IS NULL"#));
+            assert!(sql.ends_with(r#"ORDER BY "git_provider_accounts"."created_at" ASC"#));
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fakes {
     use super::*;
@@ -1082,6 +1212,8 @@ pub(crate) mod fakes {
                 workspace_integration_id: None,
                 status: row.status,
                 verified_at: Some(row.verified_at),
+                suspended_at: None,
+                last_checked_at: None,
                 last_check_error: String::new(),
                 metadata: row.metadata,
             };
@@ -1173,23 +1305,7 @@ pub(crate) mod fakes {
             unimplemented!("repositories tests provide the full fake")
         }
 
-        async fn set_github_syncs_enabled(
-            &self,
-            _project_id: Uuid,
-            _workspace_slug: &str,
-            _enabled: bool,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
         async fn delete_binding(&self, _binding_id: Uuid) -> Result<(), StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
-        async fn delete_github_syncs_for_project(
-            &self,
-            _project_id: Uuid,
-        ) -> Result<u64, StoreError> {
             unimplemented!("repositories tests provide the full fake")
         }
     }
@@ -1241,6 +1357,8 @@ pub(crate) mod fakes {
             workspace_integration_id: None,
             status: git_provider_account::STATUS_CONNECTED.into(),
             verified_at: Some(created_at),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: serde_json::json!({}),
         }

@@ -13,14 +13,8 @@
   "method": "Admission allow/deny/cache-down + cloud checks E001/E002/E005/E007/E008 + IsDesktopSession denial branches: executed against the real code offline (locmem cache, sqlite :memory: for on_commit, override_settings). Bucket/retry_after values are time-shaped (bucket=now//60, retry=60-now%60); shapes recorded with the live example. Managed checks E001..E004 recorded verbatim from source (import requires the full app registry: orchestration.agent_phases + prompting.recipes pull db models).",
   "cloud_admission_error_shape": {
     "class": "RuntimeError subclass",
-    "attrs": [
-      "code",
-      "retry_after_seconds"
-    ],
-    "codes": [
-      "run_quota_exceeded",
-      "admission_unavailable"
-    ]
+    "attrs": ["code", "retry_after_seconds"],
+    "codes": ["run_quota_exceeded", "admission_unavailable"]
   },
   "admission_key_shapes": {
     "workspace_key": "cloud-agent:admission:workspace:<workspace_id>:29845934",
@@ -61,40 +55,17 @@
   },
   "cloud_agent_configuration_check": {
     "clean": [],
-    "E001": [
-      [
-        "cloud_agent.E001",
-        "DEFAULT_AGENT_EXECUTOR is invalid"
-      ]
-    ],
-    "E002": [
-      [
-        "cloud_agent.E002",
-        "Cloud default requires CLOUD_AGENT_ENABLED"
-      ]
-    ],
-    "E005": [
-      [
-        "cloud_agent.E005",
-        "CLOUD_AGENT_DISABLED_TOOLS contains unknown names: nope_tool"
-      ]
-    ],
+    "E001": [["cloud_agent.E001", "DEFAULT_AGENT_EXECUTOR is invalid"]],
+    "E002": [["cloud_agent.E002", "Cloud default requires CLOUD_AGENT_ENABLED"]],
+    "E005": [["cloud_agent.E005", "CLOUD_AGENT_DISABLED_TOOLS contains unknown names: nope_tool"]],
     "E007": [
-      [
-        "cloud_agent.E007",
-        "Cloud Agent execution, soft, and hard timeouts must be positive and strictly increasing"
-      ]
+      ["cloud_agent.E007", "Cloud Agent execution, soft, and hard timeouts must be positive and strictly increasing"]
     ],
-    "E008": [
-      [
-        "cloud_agent.E008",
-        "Cloud Agent limits must be positive: CLOUD_AGENT_TOOL_CALL_LIMIT"
-      ]
-    ],
+    "E008": [["cloud_agent.E008", "Cloud Agent limits must be positive: CLOUD_AGENT_TOOL_CALL_LIMIT"]],
     "retired": "E002/E003/E004/E006 covered platform model settings and are retired (checks.py:15-17); active ids are E001/E002/E005/E007/E008"
   },
   "managed_runner_configuration_check": {
-    "E001": "DEFAULT_AGENT_EXECUTOR=managed_runner requires MANAGED_RUNNER_ENABLED",
+    "W001": "DEFAULT_AGENT_EXECUTOR='managed_runner' is ignored: new projects always use local_runner",
     "E002": "one per orchestration phase whose template_name is missing from prompting.recipes.MANAGED_RECIPES",
     "E003": "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)",
     "E004": "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive (<= 0)"

@@ -398,6 +398,14 @@
           ],
           "choices_truncated": false,
           "choices_count": 3
+        },
+        {
+          "name": "default_work_type",
+          "column": "default_work_type",
+          "type": "CharField",
+          "max_length": 32,
+          "blank": true,
+          "default": ""
         }
       ],
       "meta": {

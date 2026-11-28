@@ -142,6 +142,12 @@ pub const MACHINE_TRIGGERS: &[&str] = &[TRIGGER_TICK];
 pub const RUN_AI_ACTIVE_RUN_EXISTS: &str = "active_run_exists";
 pub const RUN_AI_NO_POD: &str = "no_pod";
 pub const RUN_AI_NO_ELIGIBLE_RUNNER: &str = "no_eligible_runner";
+pub const RUN_AI_DEDICATED_RUNNER_OFFLINE: &str = "assigned_runner_offline";
+pub const RUN_AI_DEDICATED_RUNNER_PAUSED: &str = "assigned_runner_paused";
+pub const RUN_AI_DEDICATED_NOT_OWNER: &str = "assigned_runner_not_owner";
+pub const RUN_AI_POD_ONCE_NOT_ALLOWED: &str = "pod_once_not_allowed";
+pub const RUN_AI_POD_ONCE_NOT_APPLICABLE: &str = "pod_once_not_applicable";
+pub const RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD: &str = "no_eligible_runner_in_pod";
 
 /// `wait_ticker` results (`scheduling.py:742-751`).
 pub const WAIT_GRANTED: &str = "waited";
@@ -162,12 +168,12 @@ pub const PAUSED_STATE_NAME: &str = "Paused";
 
 /// DEPRECATED (`scheduling.py:54`): retained only for backward
 /// compatibility with external importers.
-#[deprecated(note = "use phases::is_ticking_state / phases::phase_config_for")]
+#[deprecated(note = "use phases::phase_config_for / phases::stage_runs_automatically")]
 pub const SCHEDULING_DELEGATION_STATE_NAME: &str = "In Progress";
 
 /// DEPRECATED (`service.py:64`): retained only for backward compatibility
 /// with external importers.
-#[deprecated(note = "use phases::is_ticking_state / phases::phase_config_for")]
+#[deprecated(note = "use phases::phase_config_for / phases::stage_runs_automatically")]
 pub const SERVICE_DELEGATION_STATE_NAME: &str = "In Progress";
 
 /// What `handle_issue_state_transition` decided to do (`service.py:67-72`).

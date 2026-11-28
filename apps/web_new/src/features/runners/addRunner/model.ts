@@ -52,7 +52,8 @@ export function emptyValues(): AddRunnerValues {
 
 /** The name rule: blank auto-assigns; otherwise start alnum/underscore, then a bounded safe run. */
 const NAME_WHITESPACE = /\s/;
-const NAME_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+/** Runner names the server accepts (`runner_name_is_valid`). */
+export const NAME_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 export const NAME_RULE_TEXT =
   "Names can't contain spaces. Start with a letter, digit, or underscore, then use only those plus dot and dash.";

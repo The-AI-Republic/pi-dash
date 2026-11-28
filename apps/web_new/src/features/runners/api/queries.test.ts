@@ -54,14 +54,14 @@ describe("runnersQueryOptions", () => {
     expect(options.refetchInterval).toBe(RUNNERS_POLL_INTERVAL_MS);
     expect(options.staleTime).toBe(0);
     await options.queryFn?.({} as never);
-    expect(contractMocks.listRunners).toHaveBeenCalledWith(client, "ws-id", {});
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(client, "ws-id", { includeBundled: true });
   });
 
   it("narrows to the project scope", async () => {
     contractMocks.listRunners.mockResolvedValue([]);
     const options = runnersQueryOptions(client, "acme", "ws-id", "p-1");
     await options.queryFn?.({} as never);
-    expect(contractMocks.listRunners).toHaveBeenCalledWith(client, "ws-id", { projectId: "p-1" });
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(client, "ws-id", { projectId: "p-1", includeBundled: true });
   });
 });
 
@@ -98,11 +98,14 @@ describe("useRunners / useRunnersPods", () => {
 
     const workspaceList = renderHook(() => useRunners("acme", "ws-id", null), { wrapper });
     await waitFor(() => expect(workspaceList.result.current.isSuccess).toBe(true));
-    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", {});
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", { includeBundled: true });
 
     const projectList = renderHook(() => useRunners("acme", "ws-id", "p-1"), { wrapper });
     await waitFor(() => expect(projectList.result.current.isSuccess).toBe(true));
-    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", { projectId: "p-1" });
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", {
+      projectId: "p-1",
+      includeBundled: true,
+    });
 
     const pods = renderHook(() => useRunnersPods("acme", "ws-id", null), { wrapper });
     await waitFor(() => expect(pods.result.current.isSuccess).toBe(true));

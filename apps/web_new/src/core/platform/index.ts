@@ -7,13 +7,33 @@
 // branch on the target themselves.
 
 export type {
-  AgentEngineProfile,
-  AgentHostCheck,
+  AboutApi,
+  AboutInfo,
+  AgentAppIdentity,
   AgentRuntimeApi,
+  AuthSyncEvent,
+  AuthSyncRecord,
+  BundledNotice,
+  DesktopNotices,
   CliInstallProgress,
   CliSetupApi,
   CliStatus,
+  DaemonAuthEvent,
+  DaemonAuthState,
+  DaemonCliInfo,
+  DaemonDiscovery,
+  DaemonPidashAgentRunner,
+  DaemonPidashAgentSignInState,
+  DaemonPidashAgentState,
+  DaemonPidashAgentStatus,
+  DaemonHello,
+  DaemonLocalRunner,
   DeepLinkApi,
+  LegacyPidashAgentRunner,
+  LegacyFolderNotice,
+  LegacyTree,
+  NoticesView,
+  PodMemberNotice,
   EventStream,
   FetchInit,
   KeyValueStore,
@@ -37,6 +57,7 @@ export type {
   UpdaterApi,
 } from "./types.js";
 export { platform } from "@pidash/platform-target";
+
 export {
   bakedHostedOrigin,
   desktopShareUrl,

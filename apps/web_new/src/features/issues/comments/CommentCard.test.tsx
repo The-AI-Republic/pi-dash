@@ -362,7 +362,7 @@ describe("CommentCard", () => {
     });
     expect(screen.queryByText("This comment has no text.")).not.toBeInTheDocument();
     expect(
-      view.container.querySelector('img[src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"]')
+      view.container.querySelector('img[src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"]')
     ).not.toBeNull();
   });
 
@@ -453,6 +453,30 @@ describe("CommentCard", () => {
     const first = folded[0];
     if (first !== undefined && "onSelect" in first) first.onSelect();
     expect(handlers.onToggleFold).toHaveBeenCalled();
+  });
+
+  it("hangs a speech-bubble badge on the rail with the body in a bordered card", () => {
+    renderCard();
+    expect(screen.getByRole("img", { name: "Comment" })).toBeInTheDocument();
+    const card = document.getElementById(commentDomId(comment().id)) as HTMLElement;
+    expect(card.tagName).toBe("ARTICLE");
+    expect(card.className).toContain("border-(--border)");
+    expect(card.className).toContain("bg-(--surface)");
+    // The avatar stays in the card header; the badge carries the rail.
+    expect(card.querySelector('[aria-label="Ada L"]')).not.toBeNull();
+  });
+
+  it("trims the rail at the first and last cards", () => {
+    const { view } = renderCard({ position: "first" });
+    // The article sits in the rail row's content cell; the row is its parent.
+    const row = document.getElementById(commentDomId(comment().id))?.parentElement?.parentElement as HTMLElement;
+    expect(row.className).toContain("pb-(--space-2)");
+    expect(row.className).not.toContain("pt-(--space-2)");
+    view.unmount();
+    renderCard({ position: "last" });
+    const lastRow = document.getElementById(commentDomId(comment().id))?.parentElement?.parentElement as HTMLElement;
+    expect(lastRow.className).toContain("pt-(--space-2)");
+    expect(lastRow.className).not.toContain("pb-(--space-2)");
   });
 
   it("cancels an edit opened from the menu", async () => {

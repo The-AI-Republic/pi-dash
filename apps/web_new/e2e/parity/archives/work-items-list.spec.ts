@@ -23,6 +23,7 @@ import {
   serverIssue,
   serverPatchIssue,
   serverPatchProject,
+  serverPatchState,
   serverProjectStates,
   serverSessionUserId,
   serverUnarchiveIssue,
@@ -543,7 +544,67 @@ test(
 );
 
 test(
-  specTitle(["ARCH-007"], "peek locks every field and carries the selection in the address"),
+  specTitle(["ARCH-006"], "state sections follow the workflow order"),
+  { tag: specTags(["ARCH-006"]) },
+  async ({ driver, seed }) => {
+    // NEWPIDASH-46: sections read in workflow order (state group, then
+    // sequence), whatever order the grouped response lists its buckets in.
+    const tag = `NF222 order ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N222"),
+      {},
+      session
+    );
+    // Created in reverse workflow order so creation order cannot pass for workflow order.
+    // Archiving requires a completed/cancelled state (the API 400s otherwise),
+    // so all three start completed and two states move groups after archiving.
+    const doneId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} shipped`, "completed", session);
+    const startedId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} doing`, "completed", session);
+    const backlogId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} someday`, "completed", session);
+    const first = await archiveNamedIssue(seed, projectId, `${tag} alpha`, doneId, session);
+    const second = await archiveNamedIssue(seed, projectId, `${tag} beta`, startedId, session);
+    const third = await archiveNamedIssue(seed, projectId, `${tag} gamma`, backlogId, session);
+    await serverPatchState(seed.workspaceSlug, projectId, startedId, { group: "started" }, session);
+    await serverPatchState(seed.workspaceSlug, projectId, backlogId, { group: "backlog" }, session);
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
+      await expect
+        .poll(() => driver.archivesVisibleIssueNames(), LIST_POLL)
+        .toEqual(expect.arrayContaining([first.name, second.name, third.name]));
+      await driver.openDisplayOptions();
+      await driver.setDisplayGroupBy("States");
+      // The three created states sit in distinct groups, so group rank
+      // alone decides their relative order on both apps.
+      await expect
+        .poll(
+          async () => {
+            const headings = await driver.archivesGroupHeadings();
+            const somedayAt = headings.indexOf(`${tag} someday`);
+            const doingAt = headings.indexOf(`${tag} doing`);
+            const shippedAt = headings.indexOf(`${tag} shipped`);
+            return somedayAt !== -1 && somedayAt < doingAt && doingAt < shippedAt;
+          },
+          { timeout: 120_000 }
+        )
+        .toBe(true);
+    } finally {
+      await cleanupArchivedFixture(
+        seed,
+        projectId,
+        [first.id, second.id, third.id],
+        [doneId, startedId, backlogId],
+        session
+      );
+    }
+  }
+);
+
+test(
+  specTitle(["ARCH-007"], "peek locks every field, offers the archived quick actions, and carries the selection"),
   { tag: specTags(["ARCH-007"]) },
   async ({ driver, seed }) => {
     const tag = `NF222 peek ${Date.now()}`;
@@ -560,6 +621,9 @@ test(
     const issue = await archiveNamedIssue(seed, projectId, `${tag} item`, done.id, session, {
       description_html: `<p>${body}</p>`,
     });
+    // A second archived item for the peek-restore step, so restoring it
+    // cannot disturb the first item's address assertions above.
+    const restoreIssue = await archiveNamedIssue(seed, projectId, `${tag} restore me`, done.id, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
@@ -601,8 +665,45 @@ test(
         expect(params.project).toBeNull();
         expect(params.nesting).toBeNull();
       });
+
+      await test.step("the peek header offers the archived quick actions", async () => {
+        await driver.clickListRow(issue.name);
+        await expect.poll(() => driver.archivesPeekTitle(), LIST_POLL).toBe(issue.name);
+        const entries = await driver.archivesPeekQuickActionNames();
+        // Both apps offer Restore to an editor here. The new app's peek
+        // menu additionally offers Copy link; the old peek offers copy
+        // only through its header control, so the menu assertion stays at
+        // Restore — exact order and the surrounding entries are pinned by
+        // the row-menu scenarios, not here.
+        expect(entries).toContain("Restore");
+      });
+
+      await test.step("copy-link copies the archived address", async () => {
+        // Both editions copy the archived address through the peek header
+        // control (the old peek menu has no copy entry at all).
+        await driver.archivesPeekCopyLink();
+        await expect.poll(() => driver.sawToast("Link copied"), { timeout: 60_000 }).toBe(true);
+        expect(await driver.readClipboard()).toContain(`/archives/issues/${issue.id}`);
+      });
+
+      await test.step("restore from the peek removes the item from the archived list", async () => {
+        await driver.archivesPeekClose();
+        await driver.clickListRow(restoreIssue.name);
+        await expect.poll(() => driver.archivesPeekTitle(), LIST_POLL).toBe(restoreIssue.name);
+        await driver.archivesPeekChoose("Restore");
+        await expect.poll(() => driver.sawToast("Restore success"), { timeout: 60_000 }).toBe(true);
+        // Both apps close the peek once its item leaves the archive.
+        await expect.poll(() => driver.archivesPeekVisible(), LIST_POLL).toBe(false);
+        await expect.poll(() => driver.archivesVisibleIssueNames(), LIST_POLL).not.toContain(restoreIssue.name);
+        expect((await serverIssue(seed.workspaceSlug, projectId, restoreIssue.id, session)).archived_at).toBeNull();
+      });
+
+      // Guest gating (no Restore, copy only) is pinned by the
+      // ArchivedIssuePeek component tests: the server refuses guest
+      // archived reads with 403 (see the PERMISSIONS_GUEST scenario), so a
+      // guest can never open this peek through the UI.
     } finally {
-      await cleanupArchivedFixture(seed, projectId, [issue.id], [done.owned], session);
+      await cleanupArchivedFixture(seed, projectId, [issue.id, restoreIssue.id], [done.owned], session);
     }
   }
 );

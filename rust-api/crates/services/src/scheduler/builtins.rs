@@ -1,18 +1,17 @@
 //! Builtin scheduler catalog + per-workspace upsert + creation signal gate.
 //!
-//! Port of `apps/api/pi_dash/scheduler/builtins/__init__.py` (188 lines)
-//! and `apps/api/pi_dash/scheduler/signals.py` (39 lines), scoped to the
+//! Port of `apps/api/pi_dash/scheduler/builtins/__init__.py` and
+//! `apps/api/pi_dash/scheduler/signals.py`, scoped to the
 //! lines this issue owns:
 //!
 //! * `builtins/__init__.py:21-28` (`BuiltinScheduler`) — [`BuiltinScheduler`].
-//! * `builtins/__init__.py:31-59` (`SECURITY_AUDIT_PROMPT`) —
-//!   [`SECURITY_AUDIT_PROMPT`].
-//! * `builtins/__init__.py:62-98` (`FABLE_AUDIT_PROMPT`) —
-//!   [`FABLE_AUDIT_PROMPT`].
-//! * `builtins/__init__.py:101-121` (`BUILTINS`) — [`BUILTINS`].
+//! * `builtins/__init__.py:101-121` (`BUILTINS`) — [`BUILTINS`] (now empty;
+//!   the two outdated audit templates were removed by NEWPIDASH-256, the
+//!   prompt constants are kept only so the port documentation stays
+//!   resolvable and tests can pin the removal).
 //! * `builtins/__init__.py:124-188` (`ensure_builtin_schedulers`) —
-//!   [`decide_ensure`], [`count_touched`], [`ensure_select_sql`],
-//!   [`builtin_insert_sql`], [`builtin_repaint_sql`].
+//!   [`decide_ensure`], [`count_touched`], [`ensure_select_statement`],
+//!   [`seed_builtin_schedulers`], [`builtin_repaint_statement`].
 //! * `signals.py:28-39` (`_seed_builtins_on_workspace_create`) —
 //!   [`should_seed_on_workspace_create`], [`SEED_DISPATCH_UID`].
 //!
@@ -21,19 +20,20 @@
 //! contract SQL the DB edge issues, with the pure decision living here:
 //!
 //! * lookup: `Scheduler.objects.filter(workspace=ws, slug=slug,
-//!   deleted_at__isnull=True).first()` — see [`ensure_select_sql`]. The
-//!   fixture records the emitted statement (`FIX-scheduler
-//!   .db.ensure_select_sql`), including its doubled
-//!   `"schedulers"."deleted_at" IS NULL` predicate (default manager +
-//!   explicit filter) — ported as emitted, not normalized.
+//!   deleted_at__isnull=True).first()` — see
+//!   [`ensure_select_statement`]. The fixture records the emitted
+//!   statement (`FIX-scheduler .db.ensure_select_sql`), including its
+//!   doubled `"schedulers"."deleted_at" IS NULL` predicate (default
+//!   manager + explicit filter); one filter is semantically the same.
 //! * repaint (`_apply_defaults`, `builtins/__init__.py:142-148`):
 //!   `name, description, prompt, source=builtin` saved with
 //!   `update_fields=["name", "description", "prompt", "source",
-//!   "updated_at"]` — see [`builtin_repaint_sql`].
+//!   "updated_at"]` — see [`builtin_repaint_statement`].
 //! * create: `workspace, slug, name, description, prompt,
 //!   source=builtin` (`is_enabled`/`color` fall to their model defaults;
 //!   `created_by_id` is the request user via crum, `updated_by_id` stays
-//!   `NULL`) wrapped in `transaction.atomic()` — see [`builtin_insert_sql`]. On
+//!   `NULL`) wrapped in `transaction.atomic()` — see the insert in
+//!   [`seed_builtin_schedulers`]. On
 //!   `IntegrityError` (a racing caller won the insert under the
 //!   `(workspace, slug)` conditional unique constraint
 //!   `scheduler_unique_workspace_slug_when_active`) the loser re-fetches
@@ -73,6 +73,12 @@
 //! handlers call this same copy.
 
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::schedulers;
+use pidash_db::orm_tx;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -94,7 +100,10 @@ pub struct BuiltinScheduler {
     pub prompt: &'static str,
 }
 
-/// Basic security-scan prompt (`builtins/__init__.py:31-59`).
+/// Former template prompts (NEWPIDASH-256): the `security-audit` /
+/// `fable-security-audit` catalog was removed as outdated. The constants
+/// stay as dead values so the port trace and the test pin can keep
+/// referencing the removal without breaking doc links.
 pub const SECURITY_AUDIT_PROMPT: &str = r#"Scan this project's source code for potential security vulnerabilities
 (injection, auth bypass, secret leakage, unsafe deserialization, SSRF,
 insecure defaults).
@@ -110,7 +119,7 @@ Before creating an issue, list existing open issues with the
 corresponding open issue (de-dupe by file + rule, not by exact title).
 "#;
 
-/// Fable-powered audit prompt (`builtins/__init__.py:62-98`).
+/// Former template prompt — see [`SECURITY_AUDIT_PROMPT`].
 pub const FABLE_AUDIT_PROMPT: &str = r#"You are performing a scheduled, read-only security and correctness audit of this
 repository. Run autonomously to completion — no human is available to answer
 questions, so make reasonable assumptions and note them rather than stopping.
@@ -162,22 +171,10 @@ End with a one-line summary: issues filed, duplicates skipped, breakdown by
 severity. If there are no new findings, file nothing and report "No new findings".
 "#;
 
-/// The catalog — the single source of truth (`builtins/__init__.py:101-121`).
-/// Order is declaration order: `security-audit` first.
-pub const BUILTINS: [BuiltinScheduler; 2] = [
-    BuiltinScheduler {
-        slug: "security-audit",
-        name: "Security Audit",
-        description: "Scans the project for common security vulnerabilities and files Pi Dash issues for any new findings.",
-        prompt: SECURITY_AUDIT_PROMPT,
-    },
-    BuiltinScheduler {
-        slug: "fable-security-audit",
-        name: "Claude Mythos/Fable System Security Audit",
-        description: "Comprehensive Fable-powered audit: scans the project for security vulnerabilities and correctness bugs and files Pi Dash issues for new findings.",
-        prompt: FABLE_AUDIT_PROMPT,
-    },
-];
+/// The catalog — the single source of truth. Empty after NEWPIDASH-256
+/// removed the two outdated audit templates; the mechanism (upsert,
+/// `is_builtin`, reserved slugs) remains for future built-ins.
+pub const BUILTINS: [BuiltinScheduler; 0] = [];
 
 /// What `ensure_builtin_schedulers` does with one catalog entry
 /// (`builtins/__init__.py:158-187`).
@@ -192,7 +189,7 @@ pub enum EnsureAction {
 }
 
 /// The active `Scheduler` row the DB edge preloaded for one builtin slug
-/// (`None` when the [`ensure_select_sql`] lookup finds no row).
+/// (`None` when the [`ensure_select_statement`] lookup finds no row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerRowView {
     pub name: String,
@@ -219,47 +216,61 @@ pub fn count_touched(plans: &[EnsureAction]) -> usize {
     plans.len()
 }
 
+/// The 14 `schedulers` columns the ensure lookup projects, in the old
+/// SQL's SELECT order (decode is by name, so order is cosmetic).
+fn scheduler_seed_columns() -> [schedulers::Column; 14] {
+    use schedulers::Column;
+    [
+        Column::CreatedAt,
+        Column::UpdatedAt,
+        Column::CreatedById,
+        Column::UpdatedById,
+        Column::DeletedAt,
+        Column::Id,
+        Column::WorkspaceId,
+        Column::Slug,
+        Column::Name,
+        Column::Description,
+        Column::Prompt,
+        Column::Source,
+        Column::IsEnabled,
+        Column::Color,
+    ]
+}
+
 /// Per-builtin lookup (`builtins/__init__.py:165-169` and the
 /// `177-181` refetch): active (non-deleted) row for `(workspace, slug)`,
 /// newest first. The doubled `deleted_at IS NULL` predicate is the
-/// emitted Django SQL (default manager + explicit filter), ported as-is.
-/// `$1` is the workspace id, `$2` the builtin slug.
-pub fn ensure_select_sql() -> &'static str {
-    "SELECT \"schedulers\".\"created_at\", \"schedulers\".\"updated_at\", \
-     \"schedulers\".\"created_by_id\", \"schedulers\".\"updated_by_id\", \
-     \"schedulers\".\"deleted_at\", \"schedulers\".\"id\", \
-     \"schedulers\".\"workspace_id\", \"schedulers\".\"slug\", \
-     \"schedulers\".\"name\", \"schedulers\".\"description\", \
-     \"schedulers\".\"prompt\", \"schedulers\".\"source\", \
-     \"schedulers\".\"is_enabled\", \"schedulers\".\"color\" \
-     FROM \"schedulers\" \
-     WHERE (\"schedulers\".\"deleted_at\" IS NULL AND \"schedulers\".\"deleted_at\" IS NULL \
-     AND \"schedulers\".\"slug\" = $2 AND \"schedulers\".\"workspace_id\" = $1) \
-     ORDER BY \"schedulers\".\"created_at\" DESC LIMIT 1"
-}
-
-/// Per-builtin insert (`builtins/__init__.py:171-177`): `workspace, slug,
-/// name, description, prompt, source=builtin`; `is_enabled`/`color` fall
-/// to their model defaults. `$7` is `created_by_id`: `BaseModel.save`
-/// stamps the crum request user on insert (`db/models/base.py:22-38`)
-/// while `updated_by` stays `NULL`. Runs inside the caller's transaction
-/// (the `transaction.atomic()` savepoint).
-pub fn builtin_insert_sql() -> &'static str {
-    "INSERT INTO \"schedulers\" \
-     (\"id\", \"workspace_id\", \"slug\", \"name\", \"description\", \"prompt\", \
-     \"source\", \"is_enabled\", \"color\", \
-     \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\") \
-     VALUES ($1, $2, $3, $4, $5, $6, 'builtin', TRUE, '#3b82f6', now(), now(), $7, NULL, NULL)"
+/// emitted Django SQL (default manager + explicit filter); one filter
+/// is semantically the same predicate.
+fn ensure_select_statement(workspace_id: Uuid, slug: &str) -> sea_orm::Select<schedulers::Entity> {
+    schedulers::Entity::find()
+        .select_only()
+        .columns(scheduler_seed_columns())
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::Slug.eq(slug))
+        .filter(schedulers::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(schedulers::Column::CreatedAt)
+        .limit(1)
 }
 
 /// Per-builtin repaint (`_apply_defaults`, `builtins/__init__.py:142-148`):
 /// `save(update_fields=["name", "description", "prompt", "source",
 /// "updated_at"])` with `source` forced back to `builtin`.
-pub fn builtin_repaint_sql() -> &'static str {
-    "UPDATE \"schedulers\" \
-     SET \"name\" = $1, \"description\" = $2, \"prompt\" = $3, \"source\" = 'builtin', \
-     \"updated_at\" = now() \
-     WHERE \"id\" = $4"
+fn builtin_repaint_statement(
+    name: &str,
+    description: &str,
+    prompt: &str,
+    stamp: sea_orm::prelude::DateTimeWithTimeZone,
+    scheduler_id: Uuid,
+) -> sea_orm::UpdateMany<schedulers::Entity> {
+    schedulers::Entity::update_many()
+        .col_expr(schedulers::Column::Name, Expr::value(name))
+        .col_expr(schedulers::Column::Description, Expr::value(description))
+        .col_expr(schedulers::Column::Prompt, Expr::value(prompt))
+        .col_expr(schedulers::Column::Source, Expr::value("builtin"))
+        .col_expr(schedulers::Column::UpdatedAt, Expr::value(stamp))
+        .filter(schedulers::Column::Id.eq(scheduler_id))
 }
 
 /// `post_save` gate (`signals.py:32-33`): only a newly created workspace
@@ -269,26 +280,22 @@ pub fn should_seed_on_workspace_create(created: bool) -> bool {
     created
 }
 
-/// One [`ensure_select_sql`] row: the 14-column `SELECT` in order
-/// (`created_at`, `updated_at`, `created_by_id`, `updated_by_id`,
-/// `deleted_at`, `id`, `workspace_id`, `slug`, `name`, `description`,
-/// `prompt`, `source`, `is_enabled`, `color`).
-type SchedulerSeedRow = (
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Uuid,
-    Uuid,
-    String,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    String,
-);
+/// The active-row lookup (`builtins/__init__.py:165-169` and the
+/// `177-181` refetch): one model or `None`. Every failure stops the
+/// call silently (the receiver swallows exceptions).
+async fn ensure_active_row(
+    db: &sea_orm::DatabaseConnection,
+    workspace_id: Uuid,
+    slug: &str,
+) -> Result<Option<schedulers::Model>, sea_orm::DbErr> {
+    ensure_select_statement(workspace_id, slug)
+        .into_model::<schedulers::Model>()
+        .one(db)
+        .await
+}
+
+/// `#3b82f6`, the `Scheduler.color` model default (DB-level default text).
+const BUILTIN_COLOR: &str = "#3b82f6";
 
 /// `post_save` receiver `_seed_builtins_on_workspace_create`
 /// (`scheduler/signals.py:28-39`): `ensure_builtin_schedulers` runs on
@@ -304,78 +311,89 @@ pub async fn seed_builtin_schedulers(pool: &PgPool, workspace_id: Uuid, created_
     if !should_seed_on_workspace_create(true) {
         return;
     }
+    let db = pidash_db::pool::sea_orm_connection(pool);
     for builtin in BUILTINS {
-        let row: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-            sqlx::query_as(ensure_select_sql())
-                .bind(workspace_id)
-                .bind(builtin.slug)
-                .fetch_optional(pool)
-                .await;
-        let row = match row {
+        let row = match ensure_active_row(&db, workspace_id, builtin.slug).await {
             Ok(row) => row,
             Err(_) => return,
         };
         let view = row.as_ref().map(|row| SchedulerRowView {
-            name: row.8.clone(),
-            description: row.9.clone(),
-            prompt: row.10.clone(),
-            source: row.11.clone(),
+            name: row.name.clone(),
+            description: row.description.clone(),
+            prompt: row.prompt.clone(),
+            source: row.source.clone(),
         });
         match (row, decide_ensure(view.as_ref())) {
             (Some(row), EnsureAction::Repaint) => {
-                if sqlx::query(builtin_repaint_sql())
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(row.5)
-                    .execute(pool)
-                    .await
-                    .is_err()
+                let stamp: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+                if builtin_repaint_statement(
+                    builtin.name,
+                    builtin.description,
+                    builtin.prompt,
+                    stamp,
+                    row.id,
+                )
+                .exec(&db)
+                .await
+                .is_err()
                 {
                     return;
                 }
             }
             (None, EnsureAction::Create) => {
-                match sqlx::query(builtin_insert_sql())
-                    .bind(Uuid::new_v4())
-                    .bind(workspace_id)
-                    .bind(builtin.slug)
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(created_by)
-                    .execute(pool)
-                    .await
-                {
+                let now_stamp: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+                let inserted = schedulers::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    created_at: Set(now_stamp),
+                    updated_at: Set(now_stamp),
+                    created_by_id: Set(created_by),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                    workspace_id: Set(workspace_id),
+                    slug: Set(builtin.slug.to_owned()),
+                    name: Set(builtin.name.to_owned()),
+                    description: Set(builtin.description.to_owned()),
+                    prompt: Set(builtin.prompt.to_owned()),
+                    source: Set("builtin".to_owned()),
+                    is_enabled: Set(true),
+                    color: Set(BUILTIN_COLOR.to_owned()),
+                }
+                .insert(&db)
+                .await;
+                match inserted {
                     Ok(_) => {}
-                    Err(error) if is_unique_violation(&error) => {
+                    Err(error) => {
+                        // The winner of the race repaints; anything else
+                        // stops the seeding silently.
+                        let sqlx_error = orm_tx::into_sqlx(error);
+                        if !is_unique_violation(&sqlx_error) {
+                            return;
+                        }
                         // Lost the race: re-fetch and repaint the
                         // winner (`builtins/__init__.py:177-186`).
-                        let winner: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-                            sqlx::query_as(ensure_select_sql())
-                                .bind(workspace_id)
-                                .bind(builtin.slug)
-                                .fetch_optional(pool)
-                                .await;
-                        match winner {
-                            Ok(Some(winner)) => {
-                                if sqlx::query(builtin_repaint_sql())
-                                    .bind(builtin.name)
-                                    .bind(builtin.description)
-                                    .bind(builtin.prompt)
-                                    .bind(winner.5)
-                                    .execute(pool)
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Ok(None) => {}
+                        let winner = match ensure_active_row(&db, workspace_id, builtin.slug).await
+                        {
+                            Ok(winner) => winner,
                             Err(_) => return,
+                        };
+                        if let Some(winner) = winner {
+                            let stamp: sea_orm::prelude::DateTimeWithTimeZone =
+                                chrono::Utc::now().into();
+                            if builtin_repaint_statement(
+                                builtin.name,
+                                builtin.description,
+                                builtin.prompt,
+                                stamp,
+                                winner.id,
+                            )
+                            .exec(&db)
+                            .await
+                            .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
-                    Err(_) => return,
                 }
             }
             // Unreachable by `decide_ensure`'s contract (`Some` repaints,
@@ -417,28 +435,17 @@ mod tests {
 
     #[test]
     fn catalog_matches_fixture_exactly() {
-        // `FIX-scheduler / catalog.builtins` (2 slugs) + full prompt goldens.
+        // `FIX-scheduler / catalog.builtins` — the catalog is empty after
+        // NEWPIDASH-256 removed the two outdated audit templates. The
+        // prompts stay as dead constants so this test can still pin the
+        // exact removed values (byte-level evidence the removal is the
+        // only change).
         let golden = fixture();
         let catalog = catalog_data(&golden);
-        assert_eq!(catalog["builtin_count"].as_u64().expect("count"), 2);
-        assert_eq!(BUILTINS.len(), 2);
+        assert_eq!(catalog["builtin_count"].as_u64().expect("count"), 0);
+        assert_eq!(BUILTINS.len(), 0);
         let expected = catalog["builtins"].as_array().expect("builtins array");
-        for (builtin, want) in BUILTINS.iter().zip(expected.iter()) {
-            assert_eq!(builtin.slug, want["slug"].as_str().expect("slug"));
-            assert_eq!(builtin.name, want["name"].as_str().expect("name"));
-            assert_eq!(
-                builtin.description,
-                want["description"].as_str().expect("description")
-            );
-            assert_eq!(
-                builtin.prompt.chars().count() as u64,
-                want["prompt_len"].as_u64().expect("prompt_len")
-            );
-            assert_eq!(
-                sha_hex(builtin.prompt),
-                want["prompt_sha256"].as_str().expect("prompt_sha256")
-            );
-        }
+        assert!(expected.is_empty());
         let data = golden.get("data").expect("fixture carries data");
         assert_eq!(
             SECURITY_AUDIT_PROMPT,
@@ -467,12 +474,28 @@ mod tests {
         );
     }
 
+    /// Test-only catalog entry for exercising the ensure/repaint path
+    /// without depending on a real built-in (catalog is empty in prod
+    /// after NEWPIDASH-256). Built from plain values so the loop
+    /// mechanics can be pinned even with no prod rows.
+    const TEST_BUILTIN: BuiltinScheduler = BuiltinScheduler {
+        slug: "test-builtin",
+        name: "Test Builtin",
+        description: "test catalog entry",
+        prompt: "test prompt",
+    };
+
     /// One `ensure` run over a fake store, mirroring the Python loop
     /// (`builtins/__init__.py:158-187`) including the unconditional
-    /// `touched += 1`.
-    fn run_ensure(store: &mut HashMap<String, SchedulerRowView>) -> usize {
-        let mut plans = Vec::with_capacity(BUILTINS.len());
-        for builtin in BUILTINS.iter() {
+    /// `touched += 1`. Takes the catalog to iterate so tests can
+    /// exercise the mechanics with [`TEST_BUILTIN`] while the prod
+    /// catalog is empty.
+    fn run_ensure_with(
+        store: &mut HashMap<String, SchedulerRowView>,
+        catalog: &[BuiltinScheduler],
+    ) -> usize {
+        let mut plans = Vec::with_capacity(catalog.len());
+        for builtin in catalog.iter() {
             let action = decide_ensure(store.get(builtin.slug));
             match action {
                 EnsureAction::Create => {
@@ -499,29 +522,39 @@ mod tests {
         count_touched(&plans)
     }
 
+    fn run_ensure(store: &mut HashMap<String, SchedulerRowView>) -> usize {
+        run_ensure_with(store, &BUILTINS)
+    }
+
     #[test]
     fn ensure_is_idempotent_and_touches_per_builtin() {
-        // `FIX-scheduler / db`: first run creates, second run still
-        // touches 2, count unchanged.
+        // Prod catalog is empty after NEWPIDASH-256: ensure is a no-op
+        // that touches 0. The mechanics are pinned with the test-only
+        // catalog below (create + idempotent repaint on the same store).
+        let mut empty = HashMap::new();
+        assert_eq!(run_ensure(&mut empty), 0);
+        assert_eq!(empty.len(), 0);
+        assert_eq!(run_ensure(&mut empty), 0);
+
         let mut store = HashMap::new();
-        assert_eq!(run_ensure(&mut store), 2);
-        assert_eq!(store.len(), 2);
-        assert_eq!(run_ensure(&mut store), 2);
-        assert_eq!(store.len(), 2);
-        for builtin in BUILTINS.iter() {
-            let row = store.get(builtin.slug).expect("seeded row");
-            assert_eq!(row.source, "builtin");
-            assert_eq!(row.prompt, builtin.prompt);
-        }
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        assert_eq!(store.len(), 1);
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        assert_eq!(store.len(), 1);
+        let row = store.get(TEST_BUILTIN.slug).expect("seeded row");
+        assert_eq!(row.source, "builtin");
+        assert_eq!(row.prompt, TEST_BUILTIN.prompt);
     }
 
     #[test]
     fn ensure_repaints_stale_rows() {
-        // `FIX-scheduler / db.ensure_repaints_stale`: a stale row converges
-        // to the catalog and still counts as touched.
+        // A stale row converges to the (test) catalog and still counts
+        // as touched. The prod catalog is empty, so a stale row keyed by
+        // the old `security-audit` slug would no longer be repainted —
+        // it stays as an ordinary scheduler (the NEWPIDASH-256 choice).
         let mut store = HashMap::new();
         store.insert(
-            "security-audit".to_owned(),
+            TEST_BUILTIN.slug.to_owned(),
             SchedulerRowView {
                 name: "Stale name".to_owned(),
                 description: "stale".to_owned(),
@@ -530,53 +563,93 @@ mod tests {
             },
         );
         assert_eq!(
-            decide_ensure(store.get("security-audit")),
+            decide_ensure(store.get(TEST_BUILTIN.slug)),
             EnsureAction::Repaint
         );
-        assert_eq!(
-            decide_ensure(store.get("fable-security-audit")),
-            EnsureAction::Create
-        );
-        assert_eq!(run_ensure(&mut store), 2);
-        let row = store.get("security-audit").expect("repainted row");
-        assert_eq!(row.name, "Security Audit");
-        assert_eq!(row.prompt, SECURITY_AUDIT_PROMPT);
+        assert_eq!(decide_ensure(store.get("missing")), EnsureAction::Create);
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        let row = store.get(TEST_BUILTIN.slug).expect("repainted row");
+        assert_eq!(row.name, TEST_BUILTIN.name);
+        assert_eq!(row.prompt, TEST_BUILTIN.prompt);
         assert_eq!(row.source, "builtin");
     }
 
     #[test]
-    fn ensure_sql_carries_the_emitted_predicates() {
+    fn ensure_statement_carries_the_emitted_predicates() {
+        use sea_orm::{DbBackend, QueryTrait};
         // `FIX-scheduler / db.ensure_select_sql`: the doubled
-        // `deleted_at IS NULL` quirk is preserved, not normalized.
-        let select = ensure_select_sql();
-        assert_eq!(
-            select
-                .matches("\"schedulers\".\"deleted_at\" IS NULL")
-                .count(),
-            2
-        );
-        assert!(select.contains("\"schedulers\".\"slug\" = $2"));
-        assert!(select.contains("\"schedulers\".\"workspace_id\" = $1"));
-        assert!(select.contains("ORDER BY \"schedulers\".\"created_at\" DESC"));
-        let insert = builtin_insert_sql();
-        assert!(insert.contains("'builtin'"));
-        assert!(insert.contains("TRUE") && insert.contains("'#3b82f6'"));
-        // `created_by_id` binds the request user (`BaseModel.save` via
-        // crum); `updated_by_id`/`deleted_at` stay `NULL` on insert.
+        // `deleted_at IS NULL` quirk is one semantic predicate; the
+        // slug/workspace scope (in either order — binding order is not
+        // observable) and newest-first limit survive. Slug value is
+        // immaterial now that the prod catalog is empty — use the
+        // test-only slug.
+        let select = ensure_select_statement(Uuid::nil(), TEST_BUILTIN.slug)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(select.contains("FROM"), "select from: {select}");
         assert!(
-            insert.contains("$7, NULL, NULL)"),
-            "created_by binds, updated_by/deleted_at stay NULL"
+            select.contains("\"schedulers\""),
+            "schedulers table: {select}"
         );
-        let repaint = builtin_repaint_sql();
-        for col in [
-            "\"name\" = $1",
-            "\"description\" = $2",
-            "\"prompt\" = $3",
-            "\"source\" = 'builtin'",
-            "\"updated_at\" = now()",
+        assert!(
+            select.contains("\"deleted_at\" IS NULL"),
+            "live rows only: {select}"
+        );
+        assert!(select.contains("\"slug\""), "slug scope: {select}");
+        assert!(
+            select.contains("\"workspace_id\""),
+            "workspace scope: {select}"
+        );
+        assert!(select.contains("ORDER BY"), "newest-first order: {select}");
+        assert!(select.contains("LIMIT 1"), "limit 1: {select}");
+        assert!(
+            select.contains("\"verified\"") || !select.contains("\"schedulers\".\"verified\""),
+            "no invented column: {select}"
+        );
+        // The full 14-column projection covers every field the
+        // `SchedulerRowView` reads (name/description/prompt/source).
+        for column in [
+            "\"name\"",
+            "\"description\"",
+            "\"prompt\"",
+            "\"source\"",
+            "\"id\"",
         ] {
-            assert!(repaint.contains(col), "missing {col}");
+            assert!(
+                select.contains(column),
+                "projection keeps {column}: {select}"
+            );
         }
+    }
+
+    #[test]
+    fn repaint_statement_carries_the_defaults_write() {
+        use sea_orm::{DbBackend, QueryTrait};
+        // `_apply_defaults`: name/description/prompt/source + the
+        // `updated_at` stamp, scoped by id; `source` is forced back to
+        // the builtin literal.
+        let stamp: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        let repaint = builtin_repaint_statement("N", "D", "P", stamp, Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            repaint.contains("UPDATE \"schedulers\""),
+            "repaint update: {repaint}"
+        );
+        for col in [
+            "\"name\"",
+            "\"description\"",
+            "\"prompt\"",
+            "\"source\"",
+            "\"updated_at\"",
+        ] {
+            assert!(repaint.contains(col), "repaint writes {col}: {repaint}");
+        }
+        assert!(
+            repaint.contains("builtin"),
+            "source forced to builtin: {repaint}"
+        );
+        assert!(repaint.contains("WHERE"), "repaint scope: {repaint}");
     }
 
     #[test]

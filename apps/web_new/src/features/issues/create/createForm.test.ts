@@ -186,13 +186,6 @@ describe("buildCreatePayload", () => {
     });
   });
 
-  it("pins an agent executor with no pod", () => {
-    const payload = buildCreatePayload(form({ name: "Agent", execution: { type: "agent", executor: "cloud_agent" } }));
-    expect(payload.assigned_pod_id).toBeNull();
-    expect(payload.assigned_runner_id).toBeNull();
-    expect(payload.agent_executor).toBe("cloud_agent");
-  });
-
   it("pins a runner inside its pod", () => {
     const payload = buildCreatePayload(
       form({ name: "Runner", execution: { type: "runner", runnerId: "runner-1", podId: "pod" } })
@@ -325,6 +318,45 @@ describe("hasDraftWorthKeeping", () => {
   it.each(dirty)("counts %s", (_label, override) => {
     expect(hasDraftWorthKeeping(form(override))).toBe(true);
   });
+
+  it("does not count a listing prefill the opener seeded (NEWPIDASH-143)", () => {
+    const opener = {
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      targetDate: "2026-12-01",
+    };
+    const opened = initialCreateForm(PROJECT, opener);
+    expect(hasDraftWorthKeeping(opened, opened)).toBe(false);
+    expect(hasDraftWorthKeeping({ ...opened, stateId: "state-2" }, opened)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...opened, priority: "urgent" }, opened)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...opened, assigneeIds: ["member-1", "member-2"] }, opened)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...opened, targetDate: "2026-12-02" }, opened)).toBe(true);
+  });
+
+  it("does not count a fully seeded form the opener handed in (NEWPIDASH-143)", () => {
+    const seeded = form({
+      name: "Seeded title",
+      descriptionHtml: "<p>Seeded body</p>",
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      startDate: "2026-01-01",
+      targetDate: "2026-12-01",
+      estimatePoint: "point-1",
+      parentId: "parent-1",
+      gitWorkBranch: "feature/seeded",
+    });
+    expect(hasDraftWorthKeeping(seeded, seeded)).toBe(false);
+    expect(hasDraftWorthKeeping({ ...seeded, name: "Edited title" }, seeded)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...seeded, descriptionHtml: "<p>Edited body</p>" }, seeded)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...seeded, startDate: "2026-01-02" }, seeded)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...seeded, estimatePoint: "point-2" }, seeded)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...seeded, parentId: "parent-2" }, seeded)).toBe(true);
+    expect(hasDraftWorthKeeping({ ...seeded, gitWorkBranch: "feature/edited" }, seeded)).toBe(true);
+  });
 });
 
 describe("selectCreatableWorkItemProjects", () => {
@@ -388,6 +420,42 @@ describe("resetForCreateMore", () => {
     expect(next.moduleIds).toEqual(["module"]);
     expect(next.name).toBe("");
   });
+
+  it("restores the opener prefill even when the submitted item was edited away", () => {
+    const filled = form({
+      name: "First",
+      stateId: "state-2",
+      priority: "urgent",
+      assigneeIds: ["member-2"],
+      labelIds: ["label-2"],
+      targetDate: "2027-01-01",
+    });
+    const next = resetForCreateMore(filled, "", {
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      targetDate: "2026-12-01",
+    });
+    expect(next).toMatchObject({
+      projectId: PROJECT,
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      targetDate: "2026-12-01",
+    });
+    expect(next.name).toBe("");
+    expect(next.descriptionHtml).toBe("");
+  });
+
+  it("lets the opener's cycle and modules win over the submitted form's", () => {
+    const filled = form({ name: "First", cycleId: "cycle-2", moduleIds: ["module-2"] });
+    const next = resetForCreateMore(filled, "", { cycleId: "cycle-1", moduleIds: ["module-1"] });
+    expect(next.cycleId).toBe("cycle-1");
+    expect(next.moduleIds).toEqual(["module-1"]);
+    expect(next.name).toBe("");
+  });
 });
 
 describe("initialCreateForm", () => {
@@ -430,19 +498,13 @@ describe("default execution target (NEWPIDASH-23)", () => {
     expect(defaultExecutionSelection([])).toBeNull();
   });
 
-  it("starts on no pick when the project runs on an agent by default", () => {
-    expect(defaultExecutionSelection(pods, "cloud_agent")).toBeNull();
-    expect(defaultExecutionSelection(pods, "managed_runner")).toBeNull();
-    expect(defaultExecutionSelection(pods, "local_runner")).toEqual({ type: "pod", podId: "pod-b" });
-  });
-
   it("fills only an empty target", () => {
     const fallback = defaultExecutionSelection(pods);
     const blank = emptyCreateForm(PROJECT);
     expect(withDefaultExecution(blank, fallback).execution).toEqual({ type: "pod", podId: "pod-b" });
     expect(withDefaultExecution(blank, null)).toBe(blank);
-    const agent = { ...blank, execution: { type: "agent", executor: "cloud_agent" } as const };
-    expect(withDefaultExecution(agent, fallback)).toBe(agent);
+    const runner = { ...blank, execution: { type: "runner", runnerId: "runner-1", podId: "pod-a" } as const };
+    expect(withDefaultExecution(runner, fallback)).toBe(runner);
   });
 
   it("sends the preselected pod with the create", () => {

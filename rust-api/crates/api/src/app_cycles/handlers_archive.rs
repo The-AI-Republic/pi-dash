@@ -51,8 +51,9 @@
 //!   (the URL kwarg never reaches the view signature).
 //! - Q2: `end_date = None` on POST raises `TypeError` (`None >= now`)
 //!   → generic 500, not the 400 guard.
-//! - Q3: the archived `total_issues` count and `assignee_ids` omit the
-//!   bridge `deleted_at` guard the base queryset has (F-C27-04 R2/R4).
+//! - Q3 (fixed by NEWPIDASH-219, DIFF-19): the archived `total_issues`
+//!   count and `assignee_ids` now carry the bridge `deleted_at` guards
+//!   the base queryset has; the ported omission (F-C27-04 R2/R4) is gone.
 //! - Q4: archived detail of a missing row is a 500 (`None[...]`),
 //!   unlike the base retrieve's `{"error":"Cycle not found"}` 404.
 //! - Q5: the estimate subqueries run on `Issue.issue_objects`, so the
@@ -74,6 +75,11 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+    QueryTrait, RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::Row;
 
@@ -81,10 +87,27 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
-use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_auth::permissions::ROLE_ADMIN;
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_db::entity::{cycles, project_members, projects, workspace_members, workspaces};
 use pidash_types::WorkspaceId;
+
+#[derive(Debug, FromQueryResult)]
+struct ProjectIdRow {
+    id: uuid::Uuid,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct RoleRow {
+    role: i16,
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct EndDateRow {
+    end_date: Option<DateTime<Utc>>,
+}
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -269,16 +292,19 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Identifier.eq(&upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .column(projects::Column::Id)
+        .into_model::<ProjectIdRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|r| r.id).ok_or(Denial::ProjectNotFound)
 }
 
 /// Membership roles for the archive gates, resolved with the same row
@@ -296,40 +322,52 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Membership, Denial> {
-    let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace_role_row = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role_row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(project_members::Column::Role)
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(Membership {
-        // `role` is non-nullable; the outer Option is row presence.
-        workspace_role: workspace_role.and_then(|row| row.0),
-        project_role: row.and_then(|row| row.0),
+        workspace_role: workspace_role_row.map(|r| r.role),
+        project_role: project_role_row.map(|r| r.role),
     })
 }
 
-/// Build the gate facts for an archive route: ADMIN/MEMBER project gate,
-/// no creator bypass (`archive.py:271/:586/:606`, F-C27-07).
-fn archive_facts(slug: &str, member: &Membership) -> AllowFacts {
-    let allowed =
-        |role: Option<i16>| matches!(role.map(i32::from), Some(ROLE_ADMIN) | Some(ROLE_MEMBER));
+/// Build the gate facts for an archive route against the row's allowed
+/// roles: ADMIN/MEMBER/GUEST for the GET reads (PDASHOSS01-323),
+/// ADMIN/MEMBER for the writes; no creator bypass (`archive.py:271/:586/:606`,
+/// F-C27-07).
+fn archive_facts(slug: &str, member: &Membership, roles: &[i32]) -> AllowFacts {
+    let allowed = |role: Option<i16>| role.is_some_and(|role| roles.contains(&i32::from(role)));
     AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -347,8 +385,12 @@ fn archive_facts(slug: &str, member: &Membership) -> AllowFacts {
 /// 403.
 fn check_gate(method: &str, path: &str, slug: &str, member: &Membership) -> Result<(), Denial> {
     let row = super::gates::gate_for(method, path).ok_or(Denial::ServerError)?;
+    let roles = match row.gate {
+        super::gates::Gate::Project { roles } => roles,
+        _ => return Err(Denial::ServerError),
+    };
     let scope = super::gates::tenant_context(slug);
-    match super::gates::decide_gate(&row.gate, &scope, &archive_facts(slug, member)) {
+    match super::gates::decide_gate(&row.gate, &scope, &archive_facts(slug, member, roles)) {
         super::gates::GateOutcome::Allow => Ok(()),
         _ => Err(Denial::Forbidden),
     }
@@ -411,21 +453,21 @@ const FLOAT_KEYS: &[&str] = &[
 
 /// Render one float-typed value: integral JSON numbers gain the `.0`
 /// DRF emits; fractional numbers splice verbatim.
-fn render_float_value(value: &Value) -> String {
+fn render_float_value(value: &Value) -> Result<String, Denial> {
     match value {
         Value::Number(number) => {
             if let Some(int) = number.as_i64() {
-                format!("{int}.0")
+                Ok(format!("{int}.0"))
             } else if let Some(uint) = number.as_u64() {
-                format!("{uint}.0")
+                Ok(format!("{uint}.0"))
             } else if let Some(float) = number.as_f64() {
                 render_float(float)
             } else {
-                "null".to_owned()
+                Ok("null".to_owned())
             }
         }
-        Value::Null => "null".to_owned(),
-        _ => serde_json::to_string(value).expect("row value"),
+        Value::Null => Ok("null".to_owned()),
+        _ => Ok(serde_json::to_string(value).expect("row value")),
     }
 }
 
@@ -433,18 +475,18 @@ fn render_float_value(value: &Value) -> String {
 /// per [`render_stored_datetime`]) on the named keys and float columns
 /// (re-rendered per [`render_float_value`]). Strings, bools, nulls,
 /// arrays and objects pass through untouched.
-fn splice_value(key: &str, value: &Value, datetime_keys: &[&str]) -> String {
+fn splice_value(key: &str, value: &Value, datetime_keys: &[&str]) -> Result<String, Denial> {
     if datetime_keys.contains(&key) {
-        return render_stored_datetime(value);
+        return Ok(render_stored_datetime(value));
     }
     if FLOAT_KEYS.contains(&key) {
         return render_float_value(value);
     }
     match value {
-        Value::Null => "null".to_owned(),
-        Value::String(_) => json_string(value.as_str().expect("string")),
+        Value::Null => Ok("null".to_owned()),
+        Value::String(_) => Ok(json_string(value.as_str().expect("string"))),
         Value::Number(_) | Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
-            serde_json::to_string(value).expect("row value")
+            Ok(serde_json::to_string(value).expect("row value"))
         }
     }
 }
@@ -542,25 +584,29 @@ fn group_predicate(group: &str) -> String {
 }
 
 /// One group-count annotation over the archived bridge. The bridge
-/// `deleted_at` guard the base queryset has is OMITTED (ported quirk Q3);
-/// the issue archived/draft/deleted guards stay.
+/// `deleted_at` guard the base queryset has is present (NEWPIDASH-219,
+/// DIFF-19); the issue archived/draft/deleted guards stay.
 fn count_annotation(group: Option<&str>) -> String {
     let predicate = group.map(group_predicate).unwrap_or_default();
     format!(
         "(SELECT COUNT(DISTINCT i.id) FROM cycle_issues ci \
           JOIN issues i ON i.id = ci.issue_id \
           LEFT JOIN states st ON st.id = i.state_id \
-         WHERE ci.cycle_id = c.id \
+         WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL \
            AND i.archived_at IS NULL AND i.is_draft = FALSE AND i.deleted_at IS NULL \
            {predicate})"
     )
 }
 
-/// `assignee_ids` annotation (`archive.py:224-233`): no bridge or issue
-/// guards at all — only the `NOT NULL` filter (ported quirk Q3).
+/// `assignee_ids` annotation (`archive.py:224-233`): the assignee bridge
+/// carries the `deleted_at IS NULL` guard the base queryset has
+/// (NEWPIDASH-219, DIFF-19). The cycle-bridge side stays without an
+/// explicit guard exactly like the live annotation (neither Django's
+/// `ArrayAgg` nor `SELECT_BASE` filters `ci.deleted_at` here), so
+/// archived `assignee_ids` answers what the live detail answered.
 fn assignee_ids_annotation() -> String {
     "(SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id) \
-       FILTER (WHERE ia.assignee_id IS NOT NULL), '{}') \
+       FILTER (WHERE ia.assignee_id IS NOT NULL AND ia.deleted_at IS NULL), '{}') \
       FROM cycle_issues ci \
       JOIN issues i ON i.id = ci.issue_id \
       JOIN issue_assignees ia ON ia.issue_id = i.id \
@@ -726,6 +772,7 @@ async fn fetch_rows(
     now: &DateTime<Utc>,
     extra: Option<&uuid::Uuid>,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
+    // raw-sql: annotated row_to_json wrapper with GROUP BY, COUNT FILTER, ARRAY_AGG, CASE status and EXISTS subqueries; builder would duplicate Postgres float and JSON bytes and need Expr::cust.
     let mut query = sqlx::query(sql)
         .bind(slug)
         .bind(project_id)
@@ -849,13 +896,13 @@ fn estimate_left_join() -> String {
 
 /// Assignee estimate distribution (`archive.py:367-419`): one row per
 /// assignee (plus the NULL row for unassigned issues), ordered by
-/// display name. The joins are LEFT (annotation-side) with no
-/// soft-delete guards — ported as observed.
+/// display name. The joins are LEFT (annotation-side) with
+/// `ia.deleted_at IS NULL` (DIFF-21, NEWPIDASH-220).
 fn assignee_estimate_sql() -> String {
     format!(
         "SELECT u.display_name, u.id AS assignee_id, {avatar} AS avatar_url, {sums} \
          {from} \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
+         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          {est} \
          WHERE {scope} \
@@ -875,7 +922,7 @@ fn label_estimate_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, {sums} \
          {from} \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
+         LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL \
          LEFT JOIN labels l ON l.id = il.label_id \
          {est} \
          WHERE {scope} \
@@ -895,7 +942,7 @@ fn assignee_count_sql() -> String {
         "SELECT u.first_name, u.last_name, u.id AS assignee_id, \
            {avatar} AS avatar_url, u.display_name, {counts} \
          {from} \
-         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
+         LEFT JOIN issue_assignees ia ON ia.issue_id = i.id AND ia.deleted_at IS NULL \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          WHERE {scope} \
          GROUP BY u.first_name, u.last_name, u.id, ({avatar}), u.display_name \
@@ -913,7 +960,7 @@ fn label_count_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, {counts} \
          {from} \
-         LEFT JOIN issue_labels il ON il.issue_id = i.id \
+         LEFT JOIN issue_labels il ON il.issue_id = i.id AND il.deleted_at IS NULL \
          LEFT JOIN labels l ON l.id = il.label_id \
          WHERE {scope} \
          GROUP BY l.name, l.color, l.id \
@@ -932,19 +979,33 @@ async fn project_estimates_points(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM projects p \
-           JOIN workspaces w ON w.id = p.workspace_id \
-           JOIN estimates e ON e.id = p.estimate_id \
-          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points' \
-            AND p.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0).unwrap_or(false))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    use pidash_db::entity::estimates;
+    #[derive(sea_orm::FromQueryResult)]
+    struct ProjectEstimateId {
+        estimate_id: Option<uuid::Uuid>,
+    }
+    let row = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::EstimateId)
+        .into_model::<ProjectEstimateId>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(estimate_id) = row.and_then(|r| r.estimate_id) else {
+        return Ok(false);
+    };
+    let count = estimates::Entity::find()
+        .filter(estimates::Column::Id.eq(estimate_id))
+        .filter(estimates::Column::Type.eq("points"))
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,14 +1064,20 @@ fn render_opt_uuid(value: Option<uuid::Uuid>) -> String {
     }
 }
 
-fn render_float(value: f64) -> String {
-    serde_json::to_string(&serde_json::Number::from_f64(value).expect("finite")).expect("float")
+/// Render one float. A non-finite value (NaN/inf from
+/// `SUM(CAST(value AS FLOAT))` over a `NaN`/`inf` estimate point) is the
+/// generic 500 — Django raises `ValueError` in DRF's JSON renderer and
+/// answers 500; this used to `expect("finite")` and panic the task,
+/// dropping the connection with no HTTP response (NEWPIDASH-216).
+fn render_float(value: f64) -> Result<String, Denial> {
+    let number = serde_json::Number::from_f64(value).ok_or(Denial::ServerError)?;
+    serde_json::to_string(&number).map_err(|_| Denial::ServerError)
 }
 
-fn render_opt_float(value: Option<f64>) -> String {
+fn render_opt_float(value: Option<f64>) -> Result<String, Denial> {
     match value {
         Some(number) => render_float(number),
-        None => "null".to_owned(),
+        None => Ok("null".to_owned()),
     }
 }
 
@@ -1031,6 +1098,7 @@ async fn fetch_estimate_rows(
     cycle_id: &uuid::Uuid,
     assignee: bool,
 ) -> Result<Vec<EstimateRows>, Denial> {
+    // raw-sql: SUM FILTER (WHERE ...) with CASE avatar_url and GROUP BY distribution; FILTER and AT TIME ZONE truncation not expressible via builder without Expr::cust and would shift query count.
     let rows = sqlx::query(sql)
         .bind(slug)
         .bind(project_id)
@@ -1083,31 +1151,31 @@ async fn fetch_estimate_rows(
 /// (`archive.py:367-454`): assignees are `display_name, assignee_id,
 /// avatar_url` (`:375`); labels are `label_name, color, label_id`
 /// (`:431`) — annotation-definition order in both cases.
-fn shape_estimate_row(row: &EstimateRows, assignee: bool) -> String {
+fn shape_estimate_row(row: &EstimateRows, assignee: bool) -> Result<String, Denial> {
     if assignee {
-        format!(
+        Ok(format!(
             "{{\"display_name\":{},\"assignee_id\":{},\"avatar_url\":{},\
               \"total_estimates\":{},\"completed_estimates\":{},\
               \"pending_estimates\":{}}}",
             render_opt_str(row.display.clone()),
             render_opt_uuid(row.ident),
             render_opt_str(row.avatar.clone()),
-            render_opt_float(row.total),
-            render_opt_float(row.completed),
-            render_opt_float(row.pending),
-        )
+            render_opt_float(row.total)?,
+            render_opt_float(row.completed)?,
+            render_opt_float(row.pending)?,
+        ))
     } else {
-        format!(
+        Ok(format!(
             "{{\"label_name\":{},\"color\":{},\"label_id\":{},\
               \"total_estimates\":{},\"completed_estimates\":{},\
               \"pending_estimates\":{}}}",
             render_opt_str(row.display.clone()),
             render_opt_str(row.avatar.clone()),
             render_opt_uuid(row.ident),
-            render_opt_float(row.total),
-            render_opt_float(row.completed),
-            render_opt_float(row.pending),
-        )
+            render_opt_float(row.total)?,
+            render_opt_float(row.completed)?,
+            render_opt_float(row.pending)?,
+        ))
     }
 }
 
@@ -1128,6 +1196,7 @@ async fn fetch_assignee_counts(
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
 ) -> Result<Vec<CountRows>, Denial> {
+    // raw-sql: COUNT i64 FILTER (WHERE ...) with CASE avatar_url and GROUP BY assignee; FILTER not buildable without Expr::cust and duplicate-column guard.
     let rows = sqlx::query(&assignee_count_sql())
         .bind(slug)
         .bind(project_id)
@@ -1194,6 +1263,7 @@ async fn fetch_label_counts(
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
 ) -> Result<Vec<LabelCountRows>, Denial> {
+    // raw-sql: COUNT FILTER distribution GROUP BY label; same FILTER limitation as assignee counts, duplicate-column guard applies.
     let rows = sqlx::query(&label_count_sql())
         .bind(slug)
         .bind(project_id)
@@ -1250,11 +1320,11 @@ enum ChartValue {
     Null,
 }
 
-fn render_chart_value(value: ChartValue) -> String {
+fn render_chart_value(value: ChartValue) -> Result<String, Denial> {
     match value {
-        ChartValue::Int(number) => number.to_string(),
+        ChartValue::Int(number) => Ok(number.to_string()),
         ChartValue::Float(number) => render_float(number),
-        ChartValue::Null => "null".to_owned(),
+        ChartValue::Null => Ok("null".to_owned()),
     }
 }
 
@@ -1290,7 +1360,7 @@ fn burndown_chart(
     start: NaiveDate,
     end: NaiveDate,
     today: NaiveDate,
-) -> String {
+) -> Result<String, Denial> {
     let mut out = String::from("{");
     let mut first = true;
     let mut date = start;
@@ -1316,11 +1386,11 @@ fn burndown_chart(
         } else {
             pending
         };
-        out.push_str(&format!("\"{}\":{}", date, render_chart_value(value)));
+        out.push_str(&format!("\"{}\":{}", date, render_chart_value(value)?));
         date = date.succ_opt().expect("date range");
     }
     out.push('}');
-    out
+    Ok(out)
 }
 
 fn parse_utc(value: &Value) -> Option<DateTime<Utc>> {
@@ -1339,6 +1409,7 @@ async fn fetch_burndown_points(
     cycle_id: &uuid::Uuid,
     timezone: &str,
 ) -> Result<Vec<(Option<NaiveDate>, ChartValue)>, Denial> {
+    // raw-sql: AT TIME ZONE $4 truncation with ctid order and distribution join; AT TIME ZONE with parameter and TruncDate not buildable via sea-query without Expr::cust.
     let rows = sqlx::query(&burndown_points_sql())
         .bind(slug)
         .bind(project_id)
@@ -1365,6 +1436,7 @@ async fn fetch_burndown_issues(
     cycle_id: &uuid::Uuid,
     timezone: &str,
 ) -> Result<Vec<(Option<NaiveDate>, ChartValue)>, Denial> {
+    // raw-sql: AT TIME ZONE $4 with GROUP BY date and distribution join; timezone truncation not expressible via sea-query builder.
     let rows = sqlx::query(&burndown_issues_sql())
         .bind(slug)
         .bind(project_id)
@@ -1400,7 +1472,7 @@ fn shape_object(
         out.push_str(&format!(
             "\"{}\":{}",
             key,
-            splice_value(key, value, datetime_keys)
+            splice_value(key, value, datetime_keys)?
         ));
     }
     out.push('}');
@@ -1515,14 +1587,14 @@ async fn archived_retrieve(
             let total = points
                 .iter()
                 .fold(ChartValue::Int(0), |acc, (_, value)| chart_add(acc, *value));
-            chart = burndown_chart(total, &points, start.date_naive(), end.date_naive(), today);
+            chart = burndown_chart(total, &points, start.date_naive(), end.date_naive(), today)?;
         }
         let mut assignees_out = String::from("[");
         for (index, row) in assignees.iter().enumerate() {
             if index > 0 {
                 assignees_out.push(',');
             }
-            assignees_out.push_str(&shape_estimate_row(row, true));
+            assignees_out.push_str(&shape_estimate_row(row, true)?);
         }
         assignees_out.push(']');
         let mut labels_out = String::from("[");
@@ -1530,7 +1602,7 @@ async fn archived_retrieve(
             if index > 0 {
                 labels_out.push(',');
             }
-            labels_out.push_str(&shape_estimate_row(row, false));
+            labels_out.push_str(&shape_estimate_row(row, false)?);
         }
         labels_out.push(']');
         estimate_distribution = format!(
@@ -1551,7 +1623,7 @@ async fn archived_retrieve(
             start.date_naive(),
             end.date_naive(),
             today,
-        );
+        )?;
     }
     let mut assignees_out = String::from("[");
     for (index, row) in assignees.iter().enumerate() {
@@ -1607,22 +1679,20 @@ async fn fetch_cycle_for_write(
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
 ) -> Result<Option<DateTime<Utc>>, Denial> {
-    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-        "SELECT c.end_date FROM cycles c \
-         JOIN workspaces w ON w.id = c.workspace_id \
-         WHERE c.id = $1 AND c.project_id = $2 AND w.slug = $3 \
-           AND c.deleted_at IS NULL",
-    )
-    .bind(cycle_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    match row {
-        None => Err(Denial::NotFound),
-        Some((end_date,)) => Ok(end_date),
-    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = cycles::Entity::find()
+        .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+        .filter(cycles::Column::Id.eq(*cycle_id))
+        .filter(cycles::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(cycles::Column::DeletedAt.is_null())
+        .select_only()
+        .column(cycles::Column::EndDate)
+        .into_model::<EndDateRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|r| r.end_date).ok_or(Denial::NotFound)
 }
 
 /// `POST cycles/<cycle_id>/archive/` (`archive.py:586-604`).
@@ -1650,33 +1720,34 @@ async fn archive_post(
     if end_date >= now {
         return Err(Denial::ArchiveRefused);
     }
-    sqlx::query(
-        "UPDATE cycles SET archived_at = $1, updated_at = $1, updated_by_id = $2 \
-         WHERE id = $3",
-    )
-    .bind(now)
-    .bind(resolved.id)
-    .bind(cycle_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    cycles::Entity::update_many()
+        .col_expr(cycles::Column::ArchivedAt, Expr::value(Some(now_tz)))
+        .col_expr(cycles::Column::UpdatedAt, Expr::value(now_tz))
+        .col_expr(cycles::Column::UpdatedById, Expr::value(Some(resolved.id)))
+        .filter(cycles::Column::Id.eq(cycle_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // The soft-deletion manager's queryset `delete()` (`db/mixins.py:48-53`):
     // `UPDATE deleted_at`, not a hard delete.
-    sqlx::query(
-        "UPDATE user_favorites SET deleted_at = $1 FROM workspaces w \
-         WHERE user_favorites.workspace_id = w.id AND w.slug = $2 \
-           AND user_favorites.entity_type = 'cycle' \
-           AND user_favorites.entity_identifier = $3 \
-           AND user_favorites.project_id = $4 \
-           AND user_favorites.deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(&slug)
-    .bind(cycle_id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{user_favorites, workspaces as ws_table};
+    let workspace_id_sub = ws_table::Entity::find()
+        .filter(ws_table::Column::Slug.eq(slug.as_str()))
+        .select_only()
+        .column(ws_table::Column::Id)
+        .into_query();
+    user_favorites::Entity::update_many()
+        .col_expr(user_favorites::Column::DeletedAt, Expr::value(Some(now_tz)))
+        .filter(user_favorites::Column::WorkspaceId.in_subquery(workspace_id_sub))
+        .filter(user_favorites::Column::EntityType.eq("cycle"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(cycle_id)))
+        .filter(user_favorites::Column::ProjectId.eq(project_id))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(json_response(
         StatusCode::OK,
         format!(
@@ -1707,17 +1778,20 @@ async fn unarchive_delete(
     check_gate("DELETE", PATH_ARCHIVE, &slug, &member)?;
     // The `.get()` still runs (and 404s when missing) before the save.
     fetch_cycle_for_write(&pool, &slug, &project_id, &cycle_id).await?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
     let now = utc_now_micros();
-    sqlx::query(
-        "UPDATE cycles SET archived_at = NULL, updated_at = $1, updated_by_id = $2 \
-         WHERE id = $3",
-    )
-    .bind(now)
-    .bind(resolved.id)
-    .bind(cycle_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    cycles::Entity::update_many()
+        .col_expr(
+            cycles::Column::ArchivedAt,
+            Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+        )
+        .col_expr(cycles::Column::UpdatedAt, Expr::value(now_tz))
+        .col_expr(cycles::Column::UpdatedById, Expr::value(Some(resolved.id)))
+        .filter(cycles::Column::Id.eq(cycle_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::NO_CONTENT, String::new()))
 }
 
@@ -1725,6 +1799,7 @@ async fn unarchive_delete(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
+    use pidash_auth::permissions::{ROLE_GUEST, ROLE_MEMBER};
 
     fn utc(
         year: i32,
@@ -1743,19 +1818,28 @@ mod tests {
 
     #[test]
     fn gate_table_covers_all_five_archive_rows() {
-        // Every owned method+path resolves, all ADMIN/MEMBER project gates
-        // (F-C27-07: `archive.py:271/:586/:606`).
-        for (method, path) in [
-            ("POST", PATH_ARCHIVE),
-            ("DELETE", PATH_ARCHIVE),
-            ("GET", PATH_ARCHIVED_LIST),
-            ("GET", PATH_ARCHIVED_DETAIL),
+        // Every owned method+path resolves to a project gate: the writes
+        // ADMIN/MEMBER, the GET reads ADMIN/MEMBER/GUEST (F-C27-07:
+        // `archive.py:271/:586/:606`; PDASHOSS01-323).
+        for (method, path, expected) in [
+            ("POST", PATH_ARCHIVE, &[ROLE_ADMIN, ROLE_MEMBER][..]),
+            ("DELETE", PATH_ARCHIVE, &[ROLE_ADMIN, ROLE_MEMBER][..]),
+            (
+                "GET",
+                PATH_ARCHIVED_LIST,
+                &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST][..],
+            ),
+            (
+                "GET",
+                PATH_ARCHIVED_DETAIL,
+                &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST][..],
+            ),
         ] {
             let row = super::super::gates::gate_for(method, path)
                 .unwrap_or_else(|| panic!("gate row {method} {path}"));
             match row.gate {
                 super::super::gates::Gate::Project { roles } => {
-                    assert_eq!(roles, &[ROLE_ADMIN, ROLE_MEMBER], "{method} {path}");
+                    assert_eq!(roles, expected, "{method} {path}");
                 }
                 other => panic!("unexpected gate {other:?} for {method} {path}"),
             }
@@ -1778,7 +1862,7 @@ mod tests {
                     roles: &[ROLE_ADMIN, ROLE_MEMBER],
                 },
                 &scope,
-                &archive_facts("acme", &member),
+                &archive_facts("acme", &member, &[ROLE_ADMIN, ROLE_MEMBER]),
             )
         };
         use super::super::gates::GateOutcome as O;
@@ -1803,10 +1887,35 @@ mod tests {
                     roles: &[ROLE_ADMIN, ROLE_MEMBER],
                 },
                 &other,
-                &archive_facts("acme", &member),
+                &archive_facts("acme", &member, &[ROLE_ADMIN, ROLE_MEMBER]),
             ),
             O::Deny
         );
+    }
+
+    #[test]
+    fn archive_read_facts_allow_guest() {
+        // The GET reads allow project guests (PDASHOSS01-323); a
+        // workspace member without a project row is still denied.
+        let scope = super::super::gates::tenant_context("acme");
+        let reads = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
+        let allow = |workspace_role, project_role| {
+            let member = Membership {
+                workspace_role,
+                project_role,
+            };
+            super::super::gates::decide_gate(
+                &super::super::gates::Gate::Project { roles: reads },
+                &scope,
+                &archive_facts("acme", &member, reads),
+            )
+        };
+        use super::super::gates::GateOutcome as O;
+        assert_eq!(allow(Some(5), Some(5)), O::Allow);
+        assert_eq!(allow(Some(15), Some(5)), O::Allow);
+        assert_eq!(allow(Some(20), Some(20)), O::Allow);
+        assert_eq!(allow(Some(15), None), O::Deny);
+        assert_eq!(allow(Some(5), None), O::Deny);
     }
 
     #[test]
@@ -1887,11 +1996,37 @@ mod tests {
     fn integral_floats_gain_dot_zero() {
         // Postgres `float8`/`numeric` text has no fraction on integral
         // values; DRF renders the Python float with one.
-        let int = |n: i64| render_float_value(&serde_json::json!(n));
+        let int = |n: i64| render_float_value(&serde_json::json!(n)).expect("finite");
         assert_eq!(int(65535), "65535.0");
         assert_eq!(int(0), "0.0");
-        assert_eq!(render_float_value(&serde_json::json!(21.5)), "21.5");
-        assert_eq!(render_float_value(&Value::Null), "null");
+        assert_eq!(
+            render_float_value(&serde_json::json!(21.5)).expect("finite"),
+            "21.5"
+        );
+        assert_eq!(render_float_value(&Value::Null).expect("finite"), "null");
+    }
+
+    #[test]
+    fn non_finite_floats_are_server_errors_not_panics() {
+        // NEWPIDASH-216: a `NaN`/`inf` estimate point value poisons every
+        // `SUM(CAST(...))`; Django 500s, Rust must not panic.
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(render_float(value), Err(Denial::ServerError)),
+                "render_float({value})"
+            );
+            assert!(
+                matches!(render_opt_float(Some(value)), Err(Denial::ServerError)),
+                "render_opt_float({value})"
+            );
+            assert!(
+                matches!(
+                    render_chart_value(ChartValue::Float(value)),
+                    Err(Denial::ServerError)
+                ),
+                "render_chart_value({value})"
+            );
+        }
     }
 
     #[test]
@@ -1945,7 +2080,8 @@ mod tests {
                 day(2026, 9, 2),
                 day(2026, 9, 1),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{}"
         );
         // Issues path: ints throughout; future dates null.
@@ -1957,7 +2093,8 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 3),
                 day(2026, 9, 2)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":5,\"2026-09-02\":5,\"2026-09-03\":null}"
         );
         // Points path with no estimates: int zeros, never 0.0.
@@ -1968,7 +2105,8 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 1),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":0}"
         );
         // Points path with estimates: floats; uncompleted (`None` date)
@@ -1984,9 +2122,21 @@ mod tests {
                 day(2026, 9, 1),
                 day(2026, 9, 2),
                 day(2026, 9, 30)
-            ),
+            )
+            .expect("finite chart"),
             "{\"2026-09-01\":3.0,\"2026-09-02\":3.0}"
         );
+        // NEWPIDASH-216: a non-finite burndown value is the generic 500.
+        assert!(matches!(
+            burndown_chart(
+                ChartValue::Float(f64::NAN),
+                &[],
+                day(2026, 9, 1),
+                day(2026, 9, 2),
+                day(2026, 9, 30)
+            ),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
@@ -2023,8 +2173,10 @@ mod tests {
 
     #[test]
     fn sql_ports_the_archive_asymmetries() {
-        // Q3: no bridge deleted guard on the archive counts / arrays.
-        assert!(!archived_list_sql().contains("ci.deleted_at"));
+        // Q3-removed (NEWPIDASH-219, DIFF-19): archive counts carry the
+        // cycle-bridge guard and assignee_ids the assignee-bridge guard.
+        assert!(archived_list_sql().contains("ci.deleted_at IS NULL"));
+        assert!(archived_list_sql().contains("ia.deleted_at IS NULL"));
         // The estimate subqueries keep the live-bridge guard they always had.
         assert!(estimate_annotation(None, "x").contains("ci.deleted_at IS NULL"));
         // Q5: the `issue_objects` manager exclusions on the estimate path,
@@ -2060,6 +2212,69 @@ mod tests {
             ARCHIVE_REFUSED_BODY,
             "{\"error\":\"Only completed cycles can be archived\"}"
         );
+    }
+
+    #[test]
+    fn statement_shape_archive_membership_joins() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let stmt = workspace_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(workspace_members::Column::MemberId.eq(uuid::Uuid::nil()))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .select_only()
+            .column(workspace_members::Column::Role)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"workspace_members\""));
+        assert!(stmt.contains("JOIN \"workspaces\"") || stmt.contains("INNER JOIN"));
+        assert!(stmt.contains("\"is_active\""));
+        assert!(stmt.contains("\"deleted_at\" IS NULL"));
+    }
+
+    #[test]
+    fn statement_shape_archive_cycle_for_write() {
+        use sea_orm::{DbBackend, QuerySelect};
+        let stmt = cycles::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                cycles::Relation::Workspaces.def(),
+            )
+            .filter(cycles::Column::Id.eq(uuid::Uuid::nil()))
+            .filter(cycles::Column::ProjectId.eq(uuid::Uuid::nil()))
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .select_only()
+            .column(cycles::Column::EndDate)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("\"cycles\""));
+        assert!(stmt.contains("\"end_date\""));
+        assert!(stmt.contains("\"deleted_at\" IS NULL"));
+    }
+
+    #[test]
+    fn statement_shape_archive_update_many() {
+        use sea_orm::{sea_query::Expr, DbBackend};
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(chrono::Utc::now());
+        let stmt = cycles::Entity::update_many()
+            .col_expr(cycles::Column::ArchivedAt, Expr::value(Some(now_tz)))
+            .col_expr(cycles::Column::UpdatedAt, Expr::value(now_tz))
+            .col_expr(
+                cycles::Column::UpdatedById,
+                Expr::value(Some(uuid::Uuid::nil())),
+            )
+            .filter(cycles::Column::Id.eq(uuid::Uuid::nil()))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt.contains("UPDATE \"cycles\""));
+        assert!(stmt.contains("\"archived_at\""));
+        assert!(stmt.contains("\"updated_at\""));
     }
 }
 

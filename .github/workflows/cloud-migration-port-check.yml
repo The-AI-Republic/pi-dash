@@ -1,0 +1,72 @@
+name: cloud-migration-port-check
+
+# Pi Dash Cloud applies Django schema changes through its own native
+# migrator, which keeps a reviewed port (and a fingerprint) of every Django
+# migration file in the apps below. A PR that adds, edits, renames or
+# deletes one of those files needs a matching cloud port, or the next cloud
+# release stops at its pin check (v2026.11.18 stopped on db/0182 this way).
+#
+# This check fails such a PR until it carries the `cloud-port-tracked`
+# label, which says the cloud port is written or scheduled. The port itself
+# lands after this PR merges, since the cloud verifies against merged
+# source; the label keeps it from being forgotten until release day.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "apps/api/pi_dash/db/migrations/**"
+      - "apps/api/pi_dash/runner/migrations/**"
+      - "apps/api/pi_dash/assistant/migrations/**"
+      - "apps/api/pi_dash/license/migrations/**"
+      - "apps/api/pi_dash/prompting/migrations/**"
+      - ".github/workflows/cloud-migration-port-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cloud-migration-port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a tracked cloud port for Django migration changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TRACKED: ${{ contains(github.event.pull_request.labels.*.name, 'cloud-port-tracked') }}
+        run: |
+          set -euo pipefail
+          CHANGED=$(git diff --name-status --no-renames "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" "$HEAD_SHA" -- \
+            'apps/api/pi_dash/db/migrations/*.py' \
+            'apps/api/pi_dash/runner/migrations/*.py' \
+            'apps/api/pi_dash/assistant/migrations/*.py' \
+            'apps/api/pi_dash/license/migrations/*.py' \
+            'apps/api/pi_dash/prompting/migrations/*.py' \
+            | grep -v '/__init__\.py$' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No Django migration files changed."
+            exit 0
+          fi
+          {
+            echo "## Django migration changes"
+            echo
+            echo '```'
+            echo "$CHANGED"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$TRACKED" = "true" ]; then
+            echo "Labelled cloud-port-tracked; the cloud port is tracked." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "$CHANGED"
+          MSG="This PR changes Django migrations that Pi Dash Cloud must port to its native migrator before its next release. Write or schedule the cloud port, then add the 'cloud-port-tracked' label."
+          echo "::error::$MSG"
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

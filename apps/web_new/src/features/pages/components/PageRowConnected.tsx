@@ -104,6 +104,9 @@ export function PageRowConnected({
     })
   );
   const deleteCount = rehomedCount ?? directChildren.data?.length;
+  // A rejected children read is not a pending one: the dialog stays
+  // confirmable and names the failure instead of counting forever.
+  const deleteCountFailed = rehomedCount === undefined && directChildren.isError;
 
   return (
     <>
@@ -139,6 +142,7 @@ export function PageRowConnected({
         onOpenChange={setDeleteOpen}
         pageName={page.name}
         {...(deleteCount === undefined ? {} : { rehomedCount: deleteCount })}
+        {...(deleteCountFailed ? { countFailed: true, onRetryCount: () => void directChildren.refetch() } : {})}
         pending={deletion.pending}
         onConfirm={() => {
           deletion.remove({

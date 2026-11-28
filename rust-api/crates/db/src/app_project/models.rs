@@ -208,6 +208,7 @@ pub mod project {
         "agent_test_default_interval_seconds",
         "agent_ticking_enabled",
         "default_agent_executor",
+        "default_work_type",
     ];
 
     /// Partial unique index names (`Meta.constraints`, `:233-249`).
@@ -313,12 +314,16 @@ pub mod project {
     pub const DEFAULT_AGENT_TICKING_ENABLED: bool = true;
 
     /// `AgentExecutorKind` values
-    /// (`core/agent_execution.py:7-16`, ported as-is).
+    /// (`core/agent_execution.py:7-16`, ported as-is). P6: the
+    /// `ManagedRunner` variant is `PidashAgent` (stored value stays
+    /// `managed_runner` per section 8).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum AgentExecutorKind {
         LocalRunner,
-        CloudAgent,
-        ManagedRunner,
+        /// The retired cloud executor (§5.4): stored value stays
+        /// `cloud_agent`.
+        RetiredCloudRun,
+        PidashAgent,
     }
 
     impl AgentExecutorKind {
@@ -326,8 +331,8 @@ pub mod project {
         pub fn as_str(self) -> &'static str {
             match self {
                 AgentExecutorKind::LocalRunner => "local_runner",
-                AgentExecutorKind::CloudAgent => "cloud_agent",
-                AgentExecutorKind::ManagedRunner => "managed_runner",
+                AgentExecutorKind::RetiredCloudRun => "cloud_agent",
+                AgentExecutorKind::PidashAgent => "managed_runner",
             }
         }
 
@@ -515,6 +520,9 @@ pub mod project {
         pub agent_test_default_interval_seconds: i64,
         pub agent_ticking_enabled: bool,
         pub default_agent_executor: String,
+        /// `CharField(max_length=32, blank=True)`; NOT NULL, no DB default
+        /// (PDASHOSS01-234).
+        pub default_work_type: String,
     }
 
     /// Outcome of `Project.resolve` input classification
@@ -1311,6 +1319,7 @@ pub mod state {
         ("In Progress", "#F59E0B", 35000.0, "started", false),
         ("In Review", "#5B5BD6", 40000.0, "review", false),
         ("In Test", "#14B8A6", 42500.0, "test", false),
+        ("AI Completed", "#30A46C", 43750.0, "completed", false),
         ("Done", "#46A758", 45000.0, "completed", false),
         ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false),
         ("Triage", "#4E5355", 65000.0, "triage", false),
@@ -1650,6 +1659,7 @@ mod tests {
                 "agent_test_default_interval_seconds",
                 "agent_ticking_enabled",
                 "default_agent_executor",
+                "default_work_type",
             ]
         );
         assert_eq!(project::TABLE, "projects");
@@ -2000,6 +2010,7 @@ mod tests {
                 ("In Progress", "#F59E0B", 35000.0, "started", false),
                 ("In Review", "#5B5BD6", 40000.0, "review", false),
                 ("In Test", "#14B8A6", 42500.0, "test", false),
+                ("AI Completed", "#30A46C", 43750.0, "completed", false),
                 ("Done", "#46A758", 45000.0, "completed", false),
                 ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false),
                 ("Triage", "#4E5355", 65000.0, "triage", false),

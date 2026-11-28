@@ -11,10 +11,11 @@
 // is observed through the queued email-log rows the fan-out writes per
 // topic preference — the same rows the mailer later sends.
 //
-// The comment and state topics do NOT gate independently: the fan-out's
-// property_change catch-all re-enables their emails (bug NEWFRONT-215,
-// pinned by the second scenario), so the property topic carries the
-// row's disable/resume proof.
+// The comment and state topics did not gate independently on the old
+// stack: the fan-out's property_change catch-all re-enabled their
+// emails (NEWPIDASH-271, pinned by the second scenario), so the
+// property topic carries the row's disable/resume proof. The new stack
+// gates each topic independently (DIFF-28).
 import { test, expect } from "../fixtures";
 import {
   requireMentionMember,
@@ -86,11 +87,13 @@ test(
   }
 );
 
-// The fan-out's property_change catch-all re-enables comment emails even
-// while the comment topic is off. This scenario pins that observed leak;
-// the row records the intended independent gating with the linked issue.
+// The fan-out's property_change catch-all re-enabled comment emails even
+// while the comment topic was off (NEWPIDASH-271, DIFF-28: old stack
+// only; the new stack gates each topic independently). This scenario
+// pins the observed leak on the old stack and the independent gating
+// on the new one; the row records the intended behavior.
 test(
-  specTitle(ROWS, "bug: NEWFRONT-215 comment emails still queue while comment is off"),
+  specTitle(ROWS, "bug: NEWPIDASH-271 comment emails still queue while comment is off"),
   { tag: specTags(ROWS) },
   async ({ driver, seed }) => {
     const member = requireMentionMember(seed);
@@ -130,11 +133,16 @@ test(
         { timeout: 90_000 }
       )
       .toBe(1);
-    // Intended: no queued email while the topic is off. Observed: it queues
-    // (NEWFRONT-215). The mailer reads the stored flags server-side, so both
-    // frontends share this outcome; the client's job stops at persisting the
-    // toggle (spec 10, 12).
-    await expect.poll(() => serverEmailLogCount(seed.email, issueId), { timeout: 90_000 }).toBeGreaterThanOrEqual(1);
+    // Intended: no queued email while the topic is off. Old stack: it
+    // queues (NEWPIDASH-271). New stack: it stays empty (DIFF-28). The
+    // mailer reads the stored flags server-side, so both frontends share
+    // this outcome; the client's job stops at persisting the toggle
+    // (spec 10, 12).
+    if (driver.target === "web_new") {
+      expect(await serverEmailLogCount(seed.email, issueId)).toBe(0);
+    } else {
+      await expect.poll(() => serverEmailLogCount(seed.email, issueId), { timeout: 90_000 }).toBeGreaterThanOrEqual(1);
+    }
 
     await test.step("restore the comment topic", async () => {
       await driver.notificationsEmailPreferencesToggle("comment");

@@ -35,10 +35,10 @@
 //!   session issuance, 302s).
 //!
 //! The three plain-view POSTs sit behind `CsrfViewMiddleware` (unlike the
-//! DRF units, which use the CSRF-exempt session auth): a missing cookie
-//! or token answers the 200 `csrf_failure` page, never the view. The gate
-//! mirrors `auth_session/email.rs` and renders the shared
-//! [`crate::auth_session::render::render_csrf_failure`] page.
+//! DRF units, which use the CSRF-exempt session auth): a foreign Origin
+//! or a missing cookie or token answers the 200 `csrf_failure` page,
+//! never the view. The gate mirrors `auth_session/email.rs` and renders
+//! the shared [`crate::auth_session::render::render_csrf_failure`] page.
 //!
 //! Layering: this module owns the HTTP shell (routes, session auth, the
 //! `InstanceAdminPermission` gate, SQL text, row fetching). Output shapes
@@ -93,6 +93,7 @@ use super::form_body::{
 };
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
+use crate::auth_session::csrf_origin_gate;
 use crate::auth_session::multipart::parse_fields;
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
@@ -105,6 +106,10 @@ use crate::uuid_path::is_canonical_uuid;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_compat::response::{
     json_response as json_response_text, json_value as json_response, redirect_found_cookies,
+};
+use pidash_db::entity::{file_assets, instance_admins, instances, sessions, users, workspaces};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 /// Register the seven owned endpoints. Cutover granularity is the
@@ -315,15 +320,16 @@ async fn verified_actor(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
-    let row: Option<(String, bool)> =
-        sqlx::query_as("SELECT password, is_active FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((password, true)) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find_by_id(id)
+        .filter(users::Column::IsActive.eq(true))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(user) = row else {
         return Ok(None);
     };
+    let password = user.password;
     if session_hash.is_empty() || !super::verify_session_hash(&session_hash, &password, secret_key)
     {
         return Ok(None);
@@ -348,13 +354,14 @@ async fn authed_user(
 /// `Instance.objects.first()`: `Meta.ordering = ("-created_at",)` over the
 /// soft-deletion manager (`queries/instance_first`; every view here uses it).
 async fn instance_first(pool: &PgPool) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM instances WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instances::Entity::find()
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| row.id))
 }
 
 /// `InstanceAdminPermission.has_permission` (`permissions/instance.py`):
@@ -367,14 +374,16 @@ async fn require_instance_admin(pool: &PgPool, user_id: &Uuid) -> Result<Uuid, D
     let Some(instance_id) = instance_first(pool).await? else {
         return Err(Denial::DefaultForbidden);
     };
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM instance_admins WHERE instance_id = $1 AND user_id = $2 AND role >= 15 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(instance_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instance_admins::Entity::find()
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(instance_admins::Column::UserId.eq(*user_id))
+        .filter(instance_admins::Column::Role.gte(15))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if row.is_none() {
         return Err(Denial::DefaultForbidden);
     }
@@ -386,13 +395,15 @@ async fn require_instance_admin(pool: &PgPool, user_id: &Uuid) -> Result<Uuid, D
 /// not parse fails the request; Django raises out of `initial` into the
 /// generic 500 branch.
 async fn actor_timezone(pool: &PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(*user_id)
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (zone,) = row.ok_or(Denial::ServerError)?;
-    zone.parse::<Tz>().map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    user.user_timezone
+        .parse::<Tz>()
+        .map_err(|_| Denial::ServerError)
 }
 
 fn pools(state: &AppState) -> Result<&PgPool, Denial> {
@@ -909,14 +920,16 @@ async fn create_admin(
 
     // `User.objects.get(email=email)`: exact match, no manager filter
     // (stock Django `UserManager`); `DoesNotExist` → 404 branch.
-    let user_row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user_row = users::Entity::find()
+        .filter(users::Column::Email.eq(&email))
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let Some((user_id,)) = user_row else {
+    let Some(user_row) = user_row else {
         return Err(Denial::NotFound);
     };
+    let user_id = user_row.id;
 
     // The role is parsed here, after the user lookup, because Django only
     // touches it inside `.create()`: an unknown email 404s no matter how
@@ -926,32 +939,33 @@ async fn create_admin(
     // `InstanceAdmin.objects.create(...)`: `BaseModel.save` stamps
     // `created_by` from the request user and leaves `updated_by` null.
     // `unique_together(instance, user)` violations → 400 invalid-payload.
-    // The id renders server-side (`gen_random_uuid()` is uuid4, like
-    // Django's default) so no uuid RNG feature is needed client-side.
+    // The id is generated client-side as UUID4, like Django's default.
     let now = Utc::now();
-    let created: Result<(Uuid,), sqlx::Error> = sqlx::query_as(
-        "INSERT INTO instance_admins (id, created_at, updated_at, deleted_at, role, is_verified, created_by_id, updated_by_id, user_id, instance_id) VALUES (gen_random_uuid(), $1, $2, NULL, $3, FALSE, $4, NULL, $5, $6) RETURNING id",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(role)
-    .bind(actor)
-    .bind(user_id)
-    .bind(instance_id)
-    .fetch_one(pool)
+    let created = instance_admins::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(now.fixed_offset()),
+        updated_at: Set(now.fixed_offset()),
+        deleted_at: Set(None),
+        role: Set(role),
+        is_verified: Set(false),
+        created_by_id: Set(Some(actor)),
+        updated_by_id: Set(None),
+        user_id: Set(Some(user_id)),
+        instance_id: Set(instance_id),
+    }
+    .insert(&db)
     .await;
     let admin_id = match created {
-        Ok((id,)) => id,
-        // `23505` is the `unique_together(instance, user)` violation;
-        // `23514` is the `PositiveIntegerField` CHECK (`role >= 0`). Both
-        // are `IntegrityError` → invalid-payload 400; nothing else on this
-        // INSERT can raise a CHECK.
-        Err(sqlx::Error::Database(db))
-            if matches!(db.code().as_deref(), Some("23505" | "23514")) =>
-        {
-            return Err(Denial::InvalidPayload);
+        Ok(model) => model.id,
+        Err(e) => {
+            let sqlx_err = pidash_db::orm_tx::into_sqlx(e);
+            if let sqlx::Error::Database(db_err) = &sqlx_err {
+                if matches!(db_err.code().as_deref(), Some("23505" | "23514")) {
+                    return Err(Denial::InvalidPayload);
+                }
+            }
+            return Err(Denial::ServerError);
         }
-        Err(_) => return Err(Denial::ServerError),
     };
 
     let user = fetch_user(pool, &user_id)
@@ -1000,84 +1014,124 @@ async fn list_admins(
         return Err(Denial::NoInstance);
     }
 
-    /// One list row: the admin columns plus the nested user's lite
-    /// columns. Aliases must match these field names (`FromRow` by name).
-    #[derive(Debug, Clone, sqlx::FromRow)]
-    struct AdminListRow {
-        id: Uuid,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-        deleted_at: Option<DateTime<Utc>>,
-        role: i32,
-        is_verified: bool,
-        created_by_id: Option<Uuid>,
-        updated_by_id: Option<Uuid>,
-        user_id: Option<Uuid>,
-        instance_id: Uuid,
-        u_id: Option<Uuid>,
-        u_first_name: Option<String>,
-        u_last_name: Option<String>,
-        u_avatar: Option<String>,
-        u_avatar_asset_id: Option<Uuid>,
-        u_avatar_asset_row: Option<Uuid>,
-        u_avatar_asset_entity: Option<String>,
-        u_avatar_asset_workspace: Option<Uuid>,
-        u_avatar_asset_project: Option<Uuid>,
-        u_avatar_asset_issue: Option<Uuid>,
-        u_avatar_asset_workspace_slug: Option<String>,
-        u_is_bot: Option<bool>,
-        u_display_name: Option<String>,
-        u_email: Option<String>,
-        u_last_login_medium: Option<String>,
-    }
+    // SeaORM: fetch admins, then users/assets/workspaces via is_in to
+    // avoid the big hand-written JOIN while preserving the same wire
+    // shape. Asset joins stay unscoped as before.
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let admins = instance_admins::Entity::find()
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .order_by_desc(instance_admins::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let user_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = admins.iter().filter_map(|a| a.user_id).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let users_by_id: std::collections::HashMap<Uuid, users::Model> = if user_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let rows = users::Entity::find()
+            .filter(users::Column::Id.is_in(user_ids.iter().copied()))
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        rows.into_iter().map(|u| (u.id, u)).collect()
+    };
+    let asset_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = users_by_id
+            .values()
+            .filter_map(|u| u.avatar_asset_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let assets_by_id: std::collections::HashMap<Uuid, file_assets::Model> = if asset_ids.is_empty()
+    {
+        std::collections::HashMap::new()
+    } else {
+        let rows = file_assets::Entity::find()
+            .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        rows.into_iter().map(|a| (a.id, a)).collect()
+    };
+    let workspace_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = assets_by_id
+            .values()
+            .filter_map(|a| a.workspace_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let workspaces_by_id: std::collections::HashMap<Uuid, workspaces::Model> =
+        if workspace_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let rows = workspaces::Entity::find()
+                .filter(workspaces::Column::Id.is_in(workspace_ids.iter().copied()))
+                .all(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            rows.into_iter().map(|w| (w.id, w)).collect()
+        };
 
-    // The asset joins are deliberately unscoped (see `fetch_user`): the
-    // forward-FK descriptor reads through `_base_manager`.
-    let rows: Vec<AdminListRow> = sqlx::query_as(
-        "SELECT a.id AS id, a.created_at AS created_at, a.updated_at AS updated_at, a.deleted_at AS deleted_at, a.role AS role, a.is_verified AS is_verified, a.created_by_id AS created_by_id, a.updated_by_id AS updated_by_id, a.user_id AS user_id, a.instance_id AS instance_id, u.id AS u_id, u.first_name AS u_first_name, u.last_name AS u_last_name, u.avatar AS u_avatar, u.avatar_asset_id AS u_avatar_asset_id, fa.id AS u_avatar_asset_row, fa.entity_type AS u_avatar_asset_entity, fa.workspace_id AS u_avatar_asset_workspace, fa.project_id AS u_avatar_asset_project, fa.issue_id AS u_avatar_asset_issue, w.slug AS u_avatar_asset_workspace_slug, u.is_bot AS u_is_bot, u.display_name AS u_display_name, u.email AS u_email, u.last_login_medium AS u_last_login_medium FROM instance_admins a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id LEFT JOIN workspaces w ON w.id = fa.workspace_id WHERE a.instance_id = $1 AND a.deleted_at IS NULL ORDER BY a.created_at DESC",
-    )
-    .bind(instance_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let user = row.u_id.map(|uid| UserShape {
-            id: Some(uid),
-            first_name: row.u_first_name.clone(),
-            last_name: row.u_last_name.clone(),
-            avatar: row.u_avatar.clone(),
-            avatar_asset_id: row.u_avatar_asset_id,
-            avatar_asset_row: row.u_avatar_asset_row,
-            avatar_asset_entity: row.u_avatar_asset_entity.clone(),
-            avatar_asset_workspace: row.u_avatar_asset_workspace,
-            avatar_asset_project: row.u_avatar_asset_project,
-            avatar_asset_issue: row.u_avatar_asset_issue,
-            avatar_asset_workspace_slug: row.u_avatar_asset_workspace_slug.clone(),
-            cover_image: None,
-            date_joined: None,
-            display_name: row.u_display_name.clone(),
-            email: row.u_email.clone(),
-            is_active: None,
-            is_bot: row.u_is_bot,
-            is_email_verified: None,
-            user_timezone: None,
-            username: None,
-            is_password_autoset: None,
-            last_login_medium: row.u_last_login_medium.clone(),
-        });
+    let mut items = Vec::with_capacity(admins.len());
+    for admin in &admins {
+        let user = admin
+            .user_id
+            .and_then(|uid| users_by_id.get(&uid))
+            .map(|u| {
+                let asset = u.avatar_asset_id.and_then(|aid| assets_by_id.get(&aid));
+                let slug = asset
+                    .and_then(|a| a.workspace_id)
+                    .and_then(|wid| workspaces_by_id.get(&wid).map(|w| w.slug.clone()));
+                UserShape {
+                    id: Some(u.id),
+                    first_name: Some(u.first_name.clone()),
+                    last_name: Some(u.last_name.clone()),
+                    avatar: Some(u.avatar.clone()),
+                    avatar_asset_id: u.avatar_asset_id,
+                    avatar_asset_row: asset.map(|a| a.id),
+                    avatar_asset_entity: asset.and_then(|a| a.entity_type.clone()),
+                    avatar_asset_workspace: asset.and_then(|a| a.workspace_id),
+                    avatar_asset_project: asset.and_then(|a| a.project_id),
+                    avatar_asset_issue: asset.and_then(|a| a.issue_id),
+                    avatar_asset_workspace_slug: slug,
+                    cover_image: None,
+                    date_joined: None,
+                    display_name: Some(u.display_name.clone()),
+                    email: Some(u.email.clone().unwrap_or_default()),
+                    is_active: None,
+                    is_bot: Some(u.is_bot),
+                    is_email_verified: None,
+                    user_timezone: None,
+                    username: None,
+                    is_password_autoset: None,
+                    last_login_medium: Some(u.last_login_medium.clone()),
+                }
+            });
         items.push(render_admin(
-            &row.id,
-            &row.created_at,
-            &row.updated_at,
-            row.deleted_at.as_ref(),
-            row.role,
-            row.is_verified,
-            row.created_by_id,
-            row.updated_by_id,
-            row.user_id,
-            &row.instance_id,
+            &admin.id,
+            &admin.created_at.with_timezone(&Utc),
+            &admin.updated_at.with_timezone(&Utc),
+            admin
+                .deleted_at
+                .as_ref()
+                .map(|d| d.with_timezone(&Utc))
+                .as_ref(),
+            admin.role,
+            admin.is_verified,
+            admin.created_by_id,
+            admin.updated_by_id,
+            admin.user_id,
+            &admin.instance_id,
             user.as_ref(),
             &tz,
         )?);
@@ -1129,15 +1183,19 @@ async fn delete_admin(
     // no `updated_at` touch, no signals, and no `soft_delete_related_objects`
     // publish — that `.delay` only fires in the instance `delete()` path, so
     // there is nothing to skip.
-    sqlx::query(
-        "UPDATE instance_admins SET deleted_at = $1 WHERE instance_id = $2 AND id = $3 AND deleted_at IS NULL",
-    )
-    .bind(Utc::now())
-    .bind(instance_id)
-    .bind(admin_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let now = Utc::now().fixed_offset();
+    instance_admins::Entity::update_many()
+        .col_expr(
+            instance_admins::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(instance_admins::Column::Id.eq(admin_id))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1184,13 +1242,14 @@ async fn session(
                 .unwrap_or("UTC")
                 .parse()
                 .map_err(|_| Denial::ServerError)?;
-            let row: Option<(i32,)> = sqlx::query_as(
-                "SELECT 1 FROM instance_admins WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1",
-            )
-            .bind(actor)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row = instance_admins::Entity::find()
+                .filter(instance_admins::Column::UserId.eq(actor))
+                .filter(instance_admins::Column::DeletedAt.is_null())
+                .limit(1)
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             if row.is_some() {
                 let mut data = serde_json::Map::with_capacity(2);
                 data.insert("is_authenticated".to_owned(), Value::Bool(true));
@@ -1203,20 +1262,6 @@ async fn session(
         StatusCode::OK,
         serde_json::json!({"is_authenticated": false}),
     ))
-}
-
-/// Client IP (`ip_address.py:get_client_ip`): first `X-Forwarded-For`
-/// entry, else the peer address — which axum handlers do not see without
-/// `ConnectInfo`, so absent means empty (sign-out is untested; the shape
-/// of the stamp matters, not the value).
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|forwarded| forwarded.split(',').next())
-        .map(str::trim)
-        .unwrap_or("")
-        .to_owned()
 }
 
 /// Safe sign-out target (`host.py:base_host` with `is_admin=True` through
@@ -1253,13 +1298,31 @@ fn sign_out_redirect(
 async fn sign_out(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    req: Request,
 ) -> Result<Response, Denial> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
+    // `ConnectInfo` peer for the `get_client_ip` fallback (NEWPIDASH-42):
+    // without it a direct sign-out stamped `last_logout_ip = ''` where
+    // Django stamps `REMOTE_ADDR`.
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
     // `CsrfViewMiddleware` runs before the view body: a token-less POST
-    // never reaches `admin.py:385`.
-    let pairs = form_pairs(content_type_of(&headers), &body);
-    if csrf_gate(&headers, &pairs).is_err() {
+    // never reaches `admin.py:385`. Origin/Referer first, before the
+    // cookie and token checks (`process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
+    let pairs = form_pairs(content_type_of(headers), &body);
+    if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
             &failure_root_url(&state),
         )));
@@ -1281,10 +1344,16 @@ async fn sign_out(
             .await?
             .ok_or(Denial::ServerError)?;
         let now = Utc::now();
-        let ip = client_ip(&headers);
-        identity::stamp_logout(pool, actor, Some(ip.as_str()), now)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let ip = forms::client_ip(forwarded, peer.as_deref());
+        identity::stamp_logout(
+            &pidash_db::pool::sea_orm_connection(pool),
+            actor,
+            ip.as_deref(),
+            now,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
@@ -1298,9 +1367,10 @@ async fn sign_out(
         if let Some(key) =
             session_kernel::cookie_value(cookie_header, session_kernel::ADMIN_SESSION_COOKIE_NAME)
         {
-            sqlx::query("DELETE FROM sessions WHERE session_key = $1")
-                .bind(key)
-                .execute(pool)
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            sessions::Entity::delete_many()
+                .filter(sessions::Column::SessionKey.eq(key))
+                .exec(&db)
                 .await
                 .map_err(|_| Denial::ServerError)?;
         }
@@ -1614,14 +1684,17 @@ async fn issue_admin_session(
     let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key, age_secs);
     let user_id_str = user_id.to_string();
     let expire_unix = now_unix + age_secs;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // SeaORM replacement for the hand-written SELECT with EXTRACT(EPOCH):
+    // fetch the row and compute the epoch in Rust.
     if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {
-        let row: Option<(String, i64)> = sqlx::query_as(
-            r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
-        )
-        .bind(old)
-        .fetch_optional(pool)
-        .await?;
-        if let Some((session_data, expire_date_unix)) = row {
+        let row = sessions::Entity::find_by_id(old)
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        if let Some(model) = row {
+            let session_data = model.session_data.clone();
+            let expire_date_unix = model.expire_date.timestamp();
             if !session_kernel::is_expired(expire_date_unix, now_unix) {
                 let unwrapped: Option<serde_json::Map<String, serde_json::Value>> =
                     signer.unsign_object(&session_data).ok();
@@ -1639,19 +1712,16 @@ async fn issue_admin_session(
                         let session_data = signer
                             .sign_object(&payload, now_unix as u64)
                             .map_err(|_| sqlx::Error::RowNotFound)?;
-                        sqlx::query(
-                            r#"UPDATE "sessions" SET "session_data" = $2,
-                               "expire_date" = to_timestamp($3::DOUBLE PRECISION),
-                               "user_id" = $4, "device_info" = $5
-                               WHERE "session_key" = $1"#,
-                        )
-                        .bind(old)
-                        .bind(&session_data)
-                        .bind(expire_unix as f64)
-                        .bind(user_id.to_string())
-                        .bind(sqlx::types::Json(device_info.clone()))
-                        .execute(pool)
-                        .await?;
+                        let expire_dt =
+                            chrono::DateTime::<chrono::Utc>::from_timestamp(expire_unix, 0)
+                                .expect("valid expire")
+                                .fixed_offset();
+                        let mut am: sessions::ActiveModel = model.into();
+                        am.session_data = Set(session_data);
+                        am.expire_date = Set(expire_dt);
+                        am.user_id = Set(Some(user_id.to_string()));
+                        am.device_info = Set(Some(device_info.clone()));
+                        am.update(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?;
                         return Ok(vec![
                             session_set_cookie(old, ctx, age_secs, now_unix),
                             csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
@@ -1659,10 +1729,10 @@ async fn issue_admin_session(
                     }
                 }
             }
-            sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
-                .bind(old)
-                .execute(pool)
-                .await?;
+            sessions::Entity::delete_by_id(old)
+                .exec(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?;
         }
     }
     let mut payload = serde_json::Map::new();
@@ -1674,19 +1744,26 @@ async fn issue_admin_session(
         .map_err(|_| sqlx::Error::RowNotFound)?;
     let key = loop {
         let key = session_kernel::generate_session_key();
-        let inserted = sqlx::query(
-            r#"INSERT INTO "sessions" ("session_key", "session_data", "expire_date", "user_id", "device_info")
-               VALUES ($1, $2, to_timestamp($3::DOUBLE PRECISION), $4, $5)
-               ON CONFLICT ("session_key") DO NOTHING"#,
-        )
-        .bind(&key)
-        .bind(&session_data)
-        .bind(expire_unix as f64)
-        .bind(user_id.to_string())
-        .bind(sqlx::types::Json(device_info.clone()))
-        .execute(pool)
-        .await?;
-        if inserted.rows_affected() > 0 {
+        let expire_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(expire_unix, 0)
+            .expect("valid expire")
+            .fixed_offset();
+        let model = sessions::ActiveModel {
+            session_key: Set(key.clone()),
+            session_data: Set(session_data.clone()),
+            expire_date: Set(expire_dt),
+            user_id: Set(Some(user_id.to_string())),
+            device_info: Set(Some(device_info.clone())),
+        };
+        use sea_orm::sea_query::OnConflict;
+        let inserted = sessions::Entity::insert_many([model])
+            .on_conflict(
+                OnConflict::column(sessions::Column::SessionKey)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_without_returning(&db)
+            .await;
+        if inserted.is_ok() {
             break key;
         }
     };
@@ -1698,19 +1775,23 @@ async fn issue_admin_session(
 
 /// `InstanceAdmin.objects.first()` existence (`admin.py:108`): any live row.
 async fn any_admin_exists(pool: &PgPool) -> Result<bool, Denial> {
-    let row: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM instance_admins WHERE deleted_at IS NULL LIMIT 1")
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instance_admins::Entity::find()
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
 /// `User.objects.filter(email).exists()` (`admin.py:173`).
 async fn user_exists_by_email(pool: &PgPool, email: &str) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE email = $1 LIMIT 1")
-        .bind(email)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
@@ -1722,13 +1803,15 @@ async fn signin_user_lookup(
     pool: &PgPool,
     email: &str,
 ) -> Result<Option<(Uuid, bool, String)>, Denial> {
-    sqlx::query_as(
-        "SELECT id, is_active, password FROM users WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(user.map(|u| (u.id, u.is_active, u.password)))
 }
 
 /// `InstanceAdmin.objects.filter(instance, user)` existence (`admin.py:335`):
@@ -1738,14 +1821,15 @@ async fn is_instance_admin(
     instance_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM instance_admins WHERE instance_id = $1 AND user_id = $2 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(instance_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = instance_admins::Entity::find()
+        .filter(instance_admins::Column::InstanceId.eq(*instance_id))
+        .filter(instance_admins::Column::UserId.eq(*user_id))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -1767,7 +1851,7 @@ async fn apply_login_stamps(
 ) -> Result<(), Denial> {
     let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         *user_id,
         &identity::LoginStamps {
             // The license stamps never assign the medium (it keeps the
@@ -1812,7 +1896,7 @@ fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Opt
 /// `user_login` replay) so both success paths and that failure path
 /// match.
 async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
-    identity::stamp_last_login(pool, *user_id, now)
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), *user_id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1826,14 +1910,20 @@ async fn insert_signup_admin(
     user_id: &Uuid,
     instance_id: &Uuid,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO instance_admins (id, created_at, updated_at, deleted_at, role, is_verified, created_by_id, updated_by_id, user_id, instance_id) VALUES ($1, $2, $2, NULL, 20, FALSE, NULL, NULL, $3, $4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(instance_id)
-    .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    instance_admins::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(now.fixed_offset()),
+        updated_at: Set(now.fixed_offset()),
+        deleted_at: Set(None),
+        role: Set(20),
+        is_verified: Set(false),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        user_id: Set(Some(*user_id)),
+        instance_id: Set(*instance_id),
+    }
+    .insert(&db)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1851,16 +1941,36 @@ async fn apply_instance_setup(
     company_name: &str,
     telemetry: bool,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE instances SET is_setup_done = TRUE, instance_name = $1, is_telemetry_enabled = $2, updated_at = $3, created_by_id = NULL, updated_by_id = NULL WHERE id = $4",
-    )
-    .bind(company_name)
-    .bind(telemetry)
-    .bind(now)
-    .bind(instance_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    instances::Entity::update_many()
+        .col_expr(
+            instances::Column::IsSetupDone,
+            sea_orm::sea_query::Expr::value(true),
+        )
+        .col_expr(
+            instances::Column::InstanceName,
+            sea_orm::sea_query::Expr::value(company_name),
+        )
+        .col_expr(
+            instances::Column::IsTelemetryEnabled,
+            sea_orm::sea_query::Expr::value(telemetry),
+        )
+        .col_expr(
+            instances::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now.fixed_offset()),
+        )
+        .col_expr(
+            instances::Column::CreatedById,
+            sea_orm::sea_query::Expr::value(None::<Uuid>),
+        )
+        .col_expr(
+            instances::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(None::<Uuid>),
+        )
+        .filter(instances::Column::Id.eq(*instance_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1925,6 +2035,13 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -2049,6 +2166,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -2095,9 +2219,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
                 if let Some(new_hash) =
                     pidash_auth::password::rehash_if_outdated(candidate, password_field)
                 {
-                    identity::rehash_password(pool, *id, &new_hash)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
+                    identity::rehash_password(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        *id,
+                        &new_hash,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
                     *password_field = new_hash;
                 }
             }
@@ -2416,17 +2544,6 @@ mod tests {
         );
         // No base anywhere: Python raises `TypeError` out of the view (500).
         assert!(sign_out_redirect(None, Some(""), None, "/god-mode/").is_err());
-    }
-
-    #[test]
-    fn client_ip_prefers_first_forwarded_entry() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            "203.0.113.7, 70.41.3.18".parse().unwrap(),
-        );
-        assert_eq!(client_ip(&headers), "203.0.113.7");
-        assert_eq!(client_ip(&HeaderMap::new()), "");
     }
 
     #[test]

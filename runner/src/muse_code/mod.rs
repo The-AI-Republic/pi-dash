@@ -16,6 +16,7 @@
 //!   that is not a record envelope at all, so an upstream envelope change
 //!   surfaces immediately instead of as a misleading crash at EOF.
 
+pub mod auth;
 pub mod bridge;
 pub mod process;
 pub mod schema;

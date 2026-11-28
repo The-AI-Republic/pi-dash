@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   web-edge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -187,7 +187,14 @@ jobs:
       AWS_S3_ENDPOINT_URL: http://localhost:4566
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
-      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      # NEWPIDASH-158 (same family as NEWPIDASH-147): the task-oracle
+      # harness only speaks the redis broker protocol and raises on amqp.
+      # AMQP_URL mirrors CELERY_BROKER_URL so the Django worker/beat
+      # (which read AMQP_URL via settings) consume the same redis broker
+      # the harness publishes to. DB 1 keeps the broker off the cache
+      # DB 0 (REDIS_URL / CONTRACT_REDIS_URL).
+      AMQP_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/1
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
       # NEWPIDASH-30: suites that mint sessions (rrule parity) read the
@@ -201,6 +208,16 @@ jobs:
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # NEWPIDASH-176: the cloud-agent dispatch oracle (NEWPIDASH-54) needs
+      # CLOUD_AGENT_ENABLED=true on the Django leg, mirroring
+      # rust-api-contract-tests-dispatch-rust.yml. Without it
+      # cloud_agent_is_configured() is false and run_cloud_agent fails fast
+      # with cloud_agent_disabled instead of reaching the provider.
+      # Loopback stubs need the SSRF guards off (see dispatch README).
+      ASSISTANT_BLOCK_PRIVATE_URLS: "False"
+      CLOUD_AGENT_ENABLED: "true"
+      CLOUD_AGENT_WRITES_ENABLED: "true"
+      CLOUD_AGENT_BLOCK_PRIVATE_URLS: "False"
       # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
       # oracle pins both sides of the resulting 960s cutoff. Only the
       # assistant tasks read this key, and ancient-seeded turns stay stale
@@ -349,7 +366,11 @@ jobs:
         # which this Django-only job never boots; they run in the
         # tasks-cleanup-rust job instead. The file's Celery-oracle tests
         # still run here.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
+        # P3 step B: the cloud-agent dispatch oracle died with the
+        # cloud plane; only the surviving surface remains (beat pin,
+        # wire pin, expire oracle in dispatch/, plus the turns'
+        # credential isolation in assistant/test_turn_isolation.py).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_turn_isolation.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py dispatch
 
       - name: Upload service logs on failure
         if: failure()

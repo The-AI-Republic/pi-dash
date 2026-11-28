@@ -15,7 +15,7 @@ afterEach(() => {
 
 describe("confirmRuntimeSignOut", () => {
   it("keeps history when no dialog is mounted", async () => {
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 });
 
@@ -27,7 +27,7 @@ describe("RuntimeSignOutDialog", () => {
     expect(await screen.findByText("Sign out?")).toBeVisible();
     await user.click(screen.getByRole("switch", { name: "Also delete chat history" }));
     await user.click(screen.getByRole("button", { name: "Sign out" }));
-    await expect(pending).resolves.toEqual({ deleteChatHistory: true });
+    await expect(pending).resolves.toEqual({ deleteChatHistory: true, signOutComputer: false });
   });
 
   it("confirms with history kept by default", async () => {
@@ -36,7 +36,17 @@ describe("RuntimeSignOutDialog", () => {
     const pending = confirmRuntimeSignOut();
     expect(await screen.findByText("Sign out?")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Sign out" }));
-    await expect(pending).resolves.toEqual({ deleteChatHistory: false });
+    await expect(pending).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
+  });
+
+  it("offers no computer sign-out switch: the logout is not optional", async () => {
+    const user = userEvent.setup();
+    render(<RuntimeSignOutDialog />);
+    const pending = confirmRuntimeSignOut();
+    expect(await screen.findByText("Sign out?")).toBeVisible();
+    expect(screen.queryByRole("switch", { name: "Also sign out Pi Dash on this computer" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await expect(pending).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("cancels through the cancel control", async () => {
@@ -86,7 +96,7 @@ describe("RuntimeSignOutDialog", () => {
   it("unregisters on unmount", async () => {
     const { unmount } = render(<RuntimeSignOutDialog />);
     unmount();
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("settles an open request on unmount", async () => {

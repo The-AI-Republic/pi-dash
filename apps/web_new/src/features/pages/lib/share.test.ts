@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const toaster = vi.hoisted(() => ({ notifySuccess: vi.fn(), notifyError: vi.fn() }));
 vi.mock("../../../shared/shell/toaster.js", () => toaster);
 
+import { platform } from "../../../core/platform/index.js";
 import { copyPageLink, PAGE_LINK_COPIED_TITLE, PAGE_LINK_COPY_FAILED_TITLE, pageLinkUrl } from "./share.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -45,5 +46,14 @@ describe("copyPageLink", () => {
     await expect(copyPageLink("acme", PROJECT, PAGE)).resolves.toBe(false);
     expect(toaster.notifyError).toHaveBeenCalledWith(PAGE_LINK_COPY_FAILED_TITLE);
     expect(pageLinkUrl("acme", PROJECT, PAGE)).toBe(`https://app.test/acme/projects/${PROJECT}/pages/${PAGE}`);
+  });
+
+  it("resolves against the hosted origin when the window origin is the desktop bundle", () => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { origin: "http://tauri.localhost" },
+    });
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    expect(pageLinkUrl("acme", PROJECT, PAGE)).toBe(`https://app.example.test/acme/projects/${PROJECT}/pages/${PAGE}`);
   });
 });

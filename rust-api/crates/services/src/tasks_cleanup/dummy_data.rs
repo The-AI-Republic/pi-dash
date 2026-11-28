@@ -121,7 +121,7 @@ pub const ISSUE_ACTIVITY_VERB: &str = "created";
 pub const ISSUE_ACTIVITY_COMMENT: &str = "created the issue";
 
 /// `ProjectMember.role` for the creator and every bulk member (`:58,:71`).
-pub const PROJECT_MEMBER_ROLE: i32 = 20;
+pub const PROJECT_MEMBER_ROLE: i16 = 20;
 
 /// `create_labels` attempts 50 rows with conflicts ignored (`:130-143`);
 /// seeded Faker yields 40 distinct (project, name) pairs, so 40 persist.

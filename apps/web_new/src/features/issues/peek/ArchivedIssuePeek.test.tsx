@@ -7,13 +7,21 @@
 // fields with empty values, and mounts the write surfaces disabled: the
 // title is a heading and properties and activity are read-only.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../shared/shell/index.js", () => ({
+  notifyError: vi.fn(),
+  notifySuccess: vi.fn(),
+}));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { notifySuccess } from "../../../shared/shell/index.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { authKeys } from "../../auth/index.js";
+import { projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuePeek, archivedIssueForDetail } from "./ArchivedIssuePeek.js";
 
 const SLUG = "acme";
@@ -165,9 +173,106 @@ function renderPeek(overrides: { detail?: Answer; respond?: typeof defaultRespon
   return { onClose, reads };
 }
 
+const clipboard = { writeText: vi.fn() };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  clipboard.writeText.mockResolvedValue(undefined);
+  Object.defineProperty(globalThis.navigator, "clipboard", { value: clipboard, configurable: true });
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+});
+
 afterEach(() => {
   resetAppClient();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
+
+function menuEntry(name: string): HTMLElement {
+  const entry = screen
+    .getAllByRole("menuitem", { hidden: true })
+    .find((item) => (item.textContent ?? "").includes(name));
+  if (entry === undefined) throw new Error(`expected the ${name} menu entry`);
+  return entry;
+}
+
+interface PeekActionsOptions {
+  memberRole?: number;
+}
+
+function renderPeekActions(options: PeekActionsOptions = {}) {
+  const memberRole = options.memberRole ?? 20;
+  const onClose = vi.fn();
+  const writes: Array<{ url: string; method: string }> = [];
+  const apiClient = createAppClient("https://api.test", (async (url: string, init: { method: string }) => {
+    const method = init.method ?? "GET";
+    if (method !== "GET") {
+      writes.push({ url, method });
+      if (url.includes(`/issues/${ISSUE}/archive/`)) {
+        return { status: 204, url, headers: { get: () => null }, text: async () => "" };
+      }
+      return { status: 200, url, headers: { get: () => null }, text: async () => "{}" };
+    }
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ csrf_token: "csrf" }),
+      };
+    }
+    if (url.endsWith("/api/users/me/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ id: USER, email: "ada@example.test", username: "ada", display_name: "Ada" }),
+      };
+    }
+    if (url.includes(`/issues/${ISSUE}/archive/`)) {
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(archivedRow()) };
+    }
+    if (new RegExp(`/projects/${PROJECT}/$`).test(new URL(url).pathname)) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(projectRow({ member_role: memberRole })),
+      };
+    }
+    if (new URL(url).pathname.endsWith("/projects/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify([projectRow({ member_role: memberRole })]),
+      };
+    }
+    const reply = defaultRespond(url, { method: "GET" }) ?? { status: 404, body: {} };
+    return { status: reply.status, url, headers: { get: () => null }, text: async () => JSON.stringify(reply.body) };
+  }) as never);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const projects = [projectRow({ member_role: memberRole })];
+  queryClient.setQueryData(authKeys.project(SLUG, PROJECT), projects[0] as never);
+  queryClient.setQueryData(projectsQueryOptions(apiClient, SLUG).queryKey, projects as never);
+  document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ArchivedIssuePeek
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        projectIdentifier="WEB"
+        issueId={ISSUE}
+        onClose={onClose}
+      />
+    </QueryClientProvider>
+  );
+  return { onClose, writes };
+}
 
 describe("archivedIssueForDetail", () => {
   it("supplies empty annotation-backed fields when no list row is in hand", () => {
@@ -273,5 +378,63 @@ describe("ArchivedIssuePeek", () => {
     await screen.findByRole("heading", { name: "Old login form" });
     expect(screen.queryByRole("textbox", { name: /title/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("places Properties above Activity (NEWPIDASH-233)", async () => {
+    renderPeek();
+    const heading = await screen.findByRole("heading", { name: "Old login form" });
+    const properties = screen.getByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(heading.compareDocumentPosition(properties)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+});
+
+describe("ArchivedIssuePeek actions (ARCH-007)", () => {
+  it("offers copy and restore to an editor", async () => {
+    renderPeekActions({ memberRole: 20 });
+    await screen.findByRole("heading", { name: "Old login form" });
+    expect(screen.getByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("detail-menu-trigger"));
+    const titles = screen
+      .getAllByRole("menuitem", { hidden: true })
+      .map((item) => item.textContent ?? "")
+      .filter((title) => title !== "");
+    expect(titles).toEqual(["Restore", "Open in new tab", "Copy link", "Delete"]);
+  });
+
+  it("copies the archived address from the peek copy control", async () => {
+    renderPeekActions({ memberRole: 20 });
+    await screen.findByRole("heading", { name: "Old login form" });
+    fireEvent.click(screen.getByRole("button", { name: "Copy work item link" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Link copied", undefined));
+    expect(clipboard.writeText).toHaveBeenCalledWith(
+      expect.stringContaining(`/${SLUG}/projects/${PROJECT}/archives/issues/${ISSUE}`)
+    );
+  });
+
+  it("offers only the read entries to a guest", async () => {
+    renderPeekActions({ memberRole: 5 });
+    await screen.findByRole("heading", { name: "Old login form" });
+    expect(screen.getByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("detail-menu-trigger"));
+    const titles = screen
+      .getAllByRole("menuitem", { hidden: true })
+      .map((item) => item.textContent ?? "")
+      .filter((title) => title !== "");
+    expect(titles).toEqual(["Open in new tab", "Copy link"]);
+  });
+
+  it("restores from the peek menu, then closes the peek", async () => {
+    const { onClose, writes } = renderPeekActions({ memberRole: 20 });
+    await screen.findByRole("heading", { name: "Old login form" });
+    fireEvent.click(screen.getByTestId("detail-menu-trigger"));
+    fireEvent.click(menuEntry("Restore"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Restore success", expect.anything()));
+    expect(writes).toContainEqual({
+      url: expect.stringContaining(`/projects/${PROJECT}/issues/${ISSUE}/archive/`),
+      method: "DELETE",
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

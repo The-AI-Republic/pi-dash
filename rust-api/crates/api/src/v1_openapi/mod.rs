@@ -368,13 +368,18 @@ pub(crate) async fn is_session_authenticated(
     let Some(pools) = state.pools() else {
         return false;
     };
-    let row: Option<(String, bool)> =
-        sqlx::query_as("SELECT password, is_active FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pools.primary())
-            .await
-            .ok()
-            .flatten();
+    use sea_orm::{EntityTrait as _, QuerySelect as _};
+    let row: Option<(String, bool)> = pidash_db::entity::users::Entity::find_by_id(user_id)
+        .select_only()
+        .columns([
+            pidash_db::entity::users::Column::Password,
+            pidash_db::entity::users::Column::IsActive,
+        ])
+        .into_tuple::<(String, bool)>()
+        .one(&pidash_db::pool::sea_orm_connection(pools.primary()))
+        .await
+        .ok()
+        .flatten();
     let Some((password, is_active)) = row else {
         return false;
     };

@@ -34,38 +34,36 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::AdmissionCache;
-use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::transition::IssueTransitionHook;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy, LOCK_TICKER_PARAMS};
+use pidash_services::extensions::AssistantModelSeam;
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView,
+    CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
-use pidash_services::orchestration::dispatch::{PodRunnerMatcher, PROJECT_CLOCK_POLICY_SQL};
+use pidash_services::orchestration::dispatch::PodRunnerMatcher;
 use pidash_services::orchestration::entries::{
     fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest, NewSchedulerRun,
-    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
+    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView,
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
+use pidash_services::run_creation::executor_policy::UserFlags;
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::dispatch::{dispatch_agent_run, DispatchDecision};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::run_dispatch::{dispatch_agent_run, DispatchDecision};
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
 /// this over its `project_move_handoff` drain; a jobs-context caller passes
@@ -110,18 +108,16 @@ fn fire_erased<E: std::fmt::Display>(error: E, site: &str, request: &FireRequest
     );
 }
 #[allow(clippy::too_many_arguments, clippy::result_unit_err)]
-pub async fn fire_transition<C, H, P, M>(
+pub async fn fire_transition<H, P, M>(
     pool: &PgPool,
-    store_deps: StoreDeps<C, H, P>,
-    preflight_deps: StoreDeps<C, H, P>,
+    store_deps: StoreDeps<H, P>,
+    preflight_deps: StoreDeps<H, P>,
     matcher: M,
-    cloud: &CloudAgentSettings,
     request: FireRequest,
     publish_drain: &dyn PublishEffectsDrain,
     pod_drain: &dyn PodDrain,
 ) -> Result<FireOutcome, ()>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
     M: PodRunnerMatcher,
@@ -145,7 +141,7 @@ where
     };
 
     let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
-    let (tx, _pool, cache, dispatches, deferred, terminal_effects) = seam.store.into_parts();
+    let (tx, _pool, dispatches, terminal_effects) = seam.store.into_parts();
 
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -172,7 +168,7 @@ where
         publish_drain.drain(pairs).await;
     }
     for run_id in dispatches {
-        match dispatch_agent_run(pool, cloud, run_id, request.now).await {
+        match dispatch_agent_run(pool, run_id, request.now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
                 if let Err(()) = pod_drain.drain_pod(pod_id).await {
                     // The drain logs its own cause where the storage error
@@ -200,9 +196,7 @@ where
             }
         }
     }
-    for consume in &deferred {
-        pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
-    }
+
     Ok(outcome)
 }
 
@@ -260,14 +254,36 @@ pub(crate) async fn completion_comment_job(
 
 /// The ticker/clock seam methods run pool-direct (autocommit); everything
 /// else delegates to the tx-backed [`LiveCreationStore`].
-struct LiveTransitionSeam<'a, C, H, P> {
+struct LiveTransitionSeam<'a, H, P> {
     pool: &'a PgPool,
-    store: LiveCreationStore<'a, C, H, P>,
+    store: LiveCreationStore<'a, H, P>,
 }
 
-impl<C, H, P> LiveTransitionSeam<'_, C, H, P> {
+impl<H, P> LiveTransitionSeam<'_, H, P> {
     fn db(error: sqlx::Error) -> CreationError {
         CreationError::Db(error.to_string())
+    }
+
+    fn db_orm(error: sea_orm::DbErr) -> CreationError {
+        CreationError::Db(orm_error_text(error))
+    }
+}
+
+/// A SeaORM failure as the text the old sqlx read raised: the wrapped sqlx
+/// error when there is one (so Postgres codes still classify), otherwise its
+/// message (cf. `tools_exec::orm_error`).
+fn orm_error_text(error: sea_orm::DbErr) -> String {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner.to_string(),
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut.to_string()
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed.to_string()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -280,17 +296,16 @@ impl<C, H, P> LiveTransitionSeam<'_, C, H, P> {
 /// the driver takes them by value while the seam only lends `&mut self`; the
 /// driver consults preflight at most once per fire, so the `None` arm is
 /// defensive.
-struct LivePreflight<C, H, P, M> {
+struct LivePreflight<H, P, M> {
     pool: PgPool,
-    deps: Option<StoreDeps<C, H, P>>,
+    deps: Option<StoreDeps<H, P>>,
     matcher: M,
     now: chrono::DateTime<chrono::Utc>,
     jitter_secs: f64,
 }
 
-impl<C, H, P, M> PreflightSeam for LivePreflight<C, H, P, M>
+impl<H, P, M> PreflightSeam for LivePreflight<H, P, M>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
     M: PodRunnerMatcher,
@@ -329,82 +344,139 @@ where
         }
         Ok(out.outcome.proceed)
     }
-}
 
-// ---------------------------------------------------------------------------
-// Ticker / clock SQL (shared with `v1_work_items`; the L5 consts, verbatim)
-// ---------------------------------------------------------------------------
-
-/// Translate an L5 clock statement's `:name` placeholders to positional `$n`
-/// in `params` order (the documented handler contract in
-/// `services::orchestration::clock`; never a fork — the text still comes from
-/// the L5 consts). Longer names first so `:id` never corrupts `:issue_id`.
-fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
-    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let mut out = sql.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError> {
+        use sea_orm::EntityTrait;
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+            .one(&conn)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?
+            .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+        if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+            &conn,
+            &issue,
+            Some(creator_id),
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        {
+            return Ok(Some(code.to_owned()));
+        }
+        let has = self
+            .matcher
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, Some(creator_id), true, true)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(if has {
+            None
+        } else {
+            Some("no_eligible_runner_in_pod".to_owned())
+        })
     }
-    out
 }
 
-fn lock_ticker_by_issue_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::lock_ticker_sql(),
-        LOCK_TICKER_PARAMS,
-    )
+// ---------------------------------------------------------------------------
+// Ticker / clock reads (SeaORM; the L5 consts' shapes, rebuilt)
+// ---------------------------------------------------------------------------
+//
+// Before TICKER-ORCH-1 these read the L5 consts verbatim
+// (`PRIOR_STATE_SELECT_SQL`, `PROJECT_CLOCK_POLICY_SQL`, `lock_ticker_sql()`).
+// The builders below reproduce those statements exactly — same tables,
+// filters, ordering, limit and lock — without editing the shared consts
+// outside this batch's exclusive scope.
+
+/// `PRIOR_STATE_SELECT_SQL` (`SELECT id, state_id FROM issues WHERE id = $1`,
+/// `entries.rs:195`): pk plus `state_id` only, soft-deleted rows included.
+/// Narrow read via `select_only` + `FromQueryResult`.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct PriorStateRow {
+    id: Uuid,
+    state_id: Option<Uuid>,
 }
 
-/// Map one full ticker row (the jobs `map_ticker` shape over the same shared
-/// column list).
-fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
-    Ok(IssueAgentTicker {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        issue_id: row.try_get("issue_id")?,
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
-        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
-    })
+fn prior_state_select(issue_id: Uuid) -> sea_orm::Select<pidash_db::entity::issues::Entity> {
+    use pidash_db::entity::issues;
+    issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .columns([issues::Column::Id, issues::Column::StateId])
 }
 
-/// Map one `PROJECT_CLOCK_POLICY_SQL` row. The cadence columns are INT4; the
-/// policy widens them to i64 (the jobs `map_policy` precedent).
-fn map_policy(row: &PgRow) -> Result<ProjectClockPolicy, sqlx::Error> {
-    let interval_impl: Option<i32> = row.try_get("agent_default_interval_seconds")?;
-    let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
-    let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
-    Ok(ProjectClockPolicy {
-        agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
-        agent_default_max_ticks: row.try_get("agent_default_max_ticks")?,
-        agent_default_interval_seconds: interval_impl.map(i64::from),
-        agent_review_default_interval_seconds: interval_review.map(i64::from),
-        agent_test_default_interval_seconds: interval_test.map(i64::from),
-    })
+/// `lock_ticker_sql()` (`clock.rs:136`): the issue's ticker row, locked —
+/// `WHERE issue_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 1
+/// FOR UPDATE` over the full 20-column ticker shape.
+fn lock_ticker_select(
+    issue_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::issue_agent_ticker::Entity> {
+    use pidash_db::entity::issue_agent_ticker;
+    issue_agent_ticker::Entity::find()
+        .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+        .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+        .order_by_asc(issue_agent_ticker::Column::Id)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// `PROJECT_CLOCK_POLICY_SQL`
+/// (`SELECT agent_ticking_enabled, agent_default_max_ticks,
+/// agent_default_interval_seconds, agent_review_default_interval_seconds,
+/// agent_test_default_interval_seconds FROM projects WHERE id = $1`,
+/// `dispatch.rs:183`). `Option` decode keeps the `getattr`-default rows
+/// the old `map_policy` read; the cadence columns widen `i32 → i64` there.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct ClockPolicyRow {
+    agent_ticking_enabled: Option<bool>,
+    agent_default_max_ticks: Option<i32>,
+    agent_default_interval_seconds: Option<i32>,
+    agent_review_default_interval_seconds: Option<i32>,
+    agent_test_default_interval_seconds: Option<i32>,
+    settings: serde_json::Value,
+}
+
+impl From<ClockPolicyRow> for ProjectClockPolicy {
+    fn from(row: ClockPolicyRow) -> Self {
+        Self {
+            agent_ticking_enabled: row.agent_ticking_enabled,
+            agent_default_max_ticks: row.agent_default_max_ticks,
+            agent_default_interval_seconds: row.agent_default_interval_seconds.map(i64::from),
+            agent_review_default_interval_seconds: row
+                .agent_review_default_interval_seconds
+                .map(i64::from),
+            agent_test_default_interval_seconds: row
+                .agent_test_default_interval_seconds
+                .map(i64::from),
+            ..Default::default()
+        }
+        .with_stages(&row.settings)
+    }
+}
+
+fn clock_policy_select(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use pidash_db::entity::projects;
+    projects::Entity::find()
+        .filter(projects::Column::Id.eq(project_id))
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
+        ])
 }
 
 // ---------------------------------------------------------------------------
 // Seam impls
 // ---------------------------------------------------------------------------
 
-impl<C, H, P> CreationSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> CreationSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -418,6 +490,35 @@ where
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
         self.store.state(state_id).await
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        CreationSeam::dedicated_pin(&mut self.store, args).await
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        CreationSeam::insert_system_comment(&mut self.store, comment).await
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        CreationSeam::clear_parent_thread(&mut self.store, run_id).await
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        CreationSeam::pod_once_started_comment(&mut self.store, issue_id, pod_id, actor_id, now)
+            .await
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -500,17 +601,6 @@ where
         self.store.execution_fields(req).await
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        self.store
-            .lock_cloud_creation_capacity(workspace_id, executor_kind, automatic)
-            .await
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         self.store.dispatch_after_commit(run_id)
     }
@@ -527,15 +617,10 @@ where
             .render_bundle(issue_id, run_id, parent_run_id, trigger, created_by_id)
             .await
     }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.store.extra_toolsets_schema_tool()
-    }
 }
 
-impl<C, H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -552,19 +637,19 @@ where
     }
 }
 
-impl<C, H, P> EntriesSeam for LiveTransitionSeam<'_, C, H, P>
+impl<H, P> EntriesSeam for LiveTransitionSeam<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = prior_state_select(issue_id)
+            .into_model::<PriorStateRow>()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|(_, state_id)| state_id))
+            .map_err(Self::db_orm)?;
+        Ok(row.and_then(|row| row.state_id))
     }
 
     async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -575,14 +660,12 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = lock_ticker_select(issue_id)
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        row.map(|row| map_ticker(&row))
-            .transpose()
-            .map_err(Self::db)
+            .map_err(Self::db_orm)?;
+        Ok(row.map(IssueAgentTicker::from))
     }
 
     async fn save_ticker(
@@ -592,9 +675,14 @@ where
     ) -> Result<(), CreationError> {
         // `updated_at` is now-at-write: Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(self.pool, &write, row, chrono::Utc::now())
-            .await
-            .map_err(Self::db)
+        apply_clock_write(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            &write,
+            row,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {
@@ -605,12 +693,14 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, CreationError> {
-        let row: PgRow = sqlx::query(PROJECT_CLOCK_POLICY_SQL)
-            .bind(project_id)
-            .fetch_one(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = clock_policy_select(project_id)
+            .into_model::<ClockPolicyRow>()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        map_policy(&row).map_err(Self::db)
+            .map_err(Self::db_orm)?;
+        row.map(ProjectClockPolicy::from)
+            .ok_or_else(|| CreationError::Db(sqlx::Error::RowNotFound.to_string()))
     }
 
     async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
@@ -704,11 +794,9 @@ impl WorkerTransitionHook {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
-        cloud: CloudAgentSettings,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         use crate::hooks::{
@@ -720,12 +808,9 @@ impl WorkerTransitionHook {
         let terminal = Arc::new(QueueTerminalEffectsDrain::new(&pool));
         let deps = HookDeps {
             pool,
-            cloud,
             managed,
-            cache: crate::admission::RedisAdmissionCache::from_env(),
             redis,
             runner,
-            toolsets,
             assistant_seam,
             publish,
             pods,
@@ -838,6 +923,8 @@ pub async fn fire_sync_transition(
         // The sync path never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
         // receiver default (`True`) always applies.
         dispatch_immediate: true,
+        pod_once: false,
+
         // A sync write is never an agent's own move.
         moved_by_run: None,
         now,
@@ -926,5 +1013,101 @@ pub(crate) mod test_support {
             ));
             Box::pin(async move { Ok(FireOutcome::NoTransition) })
         }
+    }
+}
+
+#[cfg(test)]
+mod ticker_orch_orm_tests {
+    use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn sql_of<E>(select: sea_orm::Select<E>) -> String
+    where
+        E: sea_orm::EntityTrait,
+    {
+        select.build(DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn prior_state_select_is_narrow_pk_read() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = sql_of(prior_state_select(id));
+        assert!(sql.contains("SELECT"), "select:\n{sql}");
+        assert!(sql.contains("FROM"), "from:\n{sql}");
+        assert!(sql.contains("\"id\""), "id col:\n{sql}");
+        assert!(sql.contains("\"state_id\""), "state col:\n{sql}");
+        assert!(sql.contains("WHERE"), "where:\n{sql}");
+        assert!(sql.contains("issues"), "table:\n{sql}");
+        assert!(sql.contains("123e4567"), "bind:\n{sql}");
+        // The L5 const scopes no soft-delete and no join.
+        assert!(!sql.contains("deleted_at"), "no deleted_at guard:\n{sql}");
+        assert!(!sql.contains("JOIN"), "no join:\n{sql}");
+    }
+
+    #[test]
+    fn lock_ticker_select_pins_guard_order_limit_and_lock() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = lock_ticker_select(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        for fragment in [
+            "issue_agent_ticker",
+            "issue_id",
+            "deleted_at",
+            "IS NULL",
+            "ORDER BY",
+            "ASC",
+            "LIMIT 1",
+            "FOR UPDATE",
+        ] {
+            assert!(sql.contains(fragment), "missing {fragment} in:\n{sql}");
+        }
+    }
+
+    #[test]
+    fn clock_policy_select_reads_five_columns_by_pk() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let sql = sql_of(clock_policy_select(id));
+        for fragment in [
+            "agent_ticking_enabled",
+            "agent_default_max_ticks",
+            "agent_default_interval_seconds",
+            "agent_review_default_interval_seconds",
+            "agent_test_default_interval_seconds",
+            "FROM",
+            "projects",
+            "WHERE",
+            "123e4567",
+        ] {
+            assert!(sql.contains(fragment), "missing {fragment} in:\n{sql}");
+        }
+        assert!(!sql.contains("JOIN"), "no join:\n{sql}");
+    }
+
+    #[test]
+    fn clock_policy_row_widens_intervals() {
+        let row = ClockPolicyRow {
+            agent_ticking_enabled: Some(true),
+            agent_default_max_ticks: Some(-1),
+            agent_default_interval_seconds: Some(10800),
+            agent_review_default_interval_seconds: Some(3600),
+            agent_test_default_interval_seconds: Some(7200),
+            settings: serde_json::json!({"agent_stages": {"mode": "custom", "review": false}}),
+        };
+        let policy: ProjectClockPolicy = row.into();
+        assert!(!policy.review_enabled);
+        assert!(policy.test_enabled);
+        assert_eq!(policy.agent_ticking_enabled, Some(true));
+        assert_eq!(policy.agent_default_max_ticks, Some(-1));
+        assert_eq!(policy.agent_default_interval_seconds, Some(10800));
+        assert_eq!(policy.agent_review_default_interval_seconds, Some(3600));
+        assert_eq!(policy.agent_test_default_interval_seconds, Some(7200));
+    }
+
+    #[test]
+    fn orm_error_unwraps_sqlx_text() {
+        let inner = sqlx::Error::RowNotFound;
+        let err = sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner));
+        assert_eq!(orm_error_text(err), sqlx::Error::RowNotFound.to_string());
     }
 }

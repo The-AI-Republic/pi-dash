@@ -40,6 +40,7 @@ interface Harness {
   moveCalls: number;
   childPages: ReturnType<typeof makePageRow>[];
   childReadCalls: number;
+  childReadStatus: number;
   childReadRelease: (() => void) | null;
   childReadHold: Promise<void> | null;
 }
@@ -57,6 +58,7 @@ beforeEach(() => {
     moveCalls: 0,
     childPages: [],
     childReadCalls: 0,
+    childReadStatus: 200,
     childReadRelease: null,
     childReadHold: null,
   };
@@ -94,7 +96,7 @@ beforeEach(() => {
     if (pagesRead !== null) {
       harness.childReadCalls += 1;
       if (harness.childReadHold !== null) await harness.childReadHold;
-      return jsonResponse(url, 200, harness.childPages);
+      return jsonResponse(url, harness.childReadStatus, harness.childPages);
     }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -178,6 +180,36 @@ describe("PageRowConnected", () => {
       "1 sub-page will move to the top level."
     );
     expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+  });
+
+  it("keeps the delete dialog confirmable when the child count read fails", async () => {
+    harness.childReadStatus = 500;
+    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete page" })).toBeInTheDocument();
+    await waitFor(() => expect(harness.childReadCalls).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled());
+    expect(screen.queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument();
+    expect(screen.getByTestId("page-delete-rehomed-error")).toHaveTextContent(
+      "The sub-page count could not be loaded."
+    );
+  });
+
+  it("refetches the child count from the dialog error retry", async () => {
+    harness.childReadStatus = 500;
+    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await screen.findByTestId("page-delete-rehomed-error");
+    const before = harness.childReadCalls;
+    harness.childReadStatus = 200;
+    harness.childPages = [makePageRow({ name: "Shelved child", archived_at: "2026-10-01" })];
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(harness.childReadCalls).toBeGreaterThan(before));
+    expect(await screen.findByTestId("page-delete-rehomed")).toHaveTextContent(
+      "1 sub-page will move to the top level."
+    );
   });
 
   it("keeps the delete dialog open when the write is refused", async () => {

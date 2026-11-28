@@ -5,12 +5,15 @@ The suite must fail when a permission class is deliberately removed: delete
 tests go red. Demonstrate that with a one-line local patch, then revert.
 """
 
+import uuid
+from datetime import datetime, timedelta, timezone
+
 import httpx
 import pytest
 
 from _harness import env
 from _harness.seed import ADMIN, GUEST, MEMBER
-from .conftest import _create_issue, create_issue_for, cycle_urls
+from .conftest import _create_issue, create_cycle_for, create_issue_for, cycle_urls
 
 pytestmark = pytest.mark.contract
 
@@ -33,6 +36,28 @@ def test_guest_may_list_but_not_create(make_tenant):
     r = guest["client"].get(urls["cycles"])
     assert r.status_code == 200, r.text[:500]
     r = guest["client"].post(urls["cycles"], json={"name": "Guest cycle"})
+    assert r.status_code == 403, r.text[:500]
+    assert r.json() == FORBIDDEN
+
+
+def test_guest_may_read_archived_cycles_but_not_unarchive(make_tenant):
+    """PDASHOSS01-323: GUEST reads archived cycles (list + detail); the
+    archive/unarchive writes stay ADMIN/MEMBER."""
+    guest = make_tenant(role=GUEST)
+    urls = cycle_urls(guest)
+    now = datetime.now(timezone.utc)
+    archived = create_cycle_for(
+        guest, name="Archived for guest",
+        start_date=now - timedelta(days=30), end_date=now - timedelta(days=1),
+        archived_at=now,
+    )
+    r = guest["client"].get(urls["archived"])
+    assert r.status_code == 200, r.text[:500]
+    assert {row["id"] for row in r.json()} == {str(archived["id"])}
+    r = guest["client"].get(urls["archived_detail"](archived["id"]))
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["id"] == str(archived["id"])
+    r = guest["client"].delete(urls["archive"](archived["id"]))
     assert r.status_code == 403, r.text[:500]
     assert r.json() == FORBIDDEN
 
@@ -215,3 +240,48 @@ def test_guest_cycle_issue_writes_denied(guest_cycle):
         assert r.json() == FORBIDDEN, method
     rows = guest_cycle["owner"]["client"].get(guest_cycle["list"]).json()["results"]
     assert len(rows) == 2
+
+
+def test_guest_retrieves_cycle_like_members(guest_cycle):
+    """PDASHOSS01-327: the detail answers a guest with the bytes a member
+    gets, and guest_view_all_features does not narrow it (same as the list)."""
+    urls = cycle_urls(guest_cycle["owner"])
+    url = urls["detail"](guest_cycle["pk"])
+    for view_all in (True, False):
+        _set_guest_view_all(guest_cycle["owner"], view_all)
+        g = guest_cycle["guest"]["client"].get(url)
+        o = guest_cycle["owner"]["client"].get(url)
+        assert g.status_code == 200, g.text[:500]
+        assert o.status_code == 200, o.text[:500]
+        assert g.content == o.content
+        assert g.json()["id"] == guest_cycle["pk"]
+        assert g.json()["total_issues"] == 2
+
+
+def test_guest_retrieve_miss_matches_member(guest_cycle):
+    """A guest past the gate gets the handler's 404, not the gate's 403."""
+    urls = cycle_urls(guest_cycle["owner"])
+    r = guest_cycle["guest"]["client"].get(urls["detail"](str(uuid.uuid4())))
+    assert r.status_code == 404, r.text[:500]
+    assert r.json() == {"error": "Cycle not found"}
+
+
+def test_guest_cycle_writes_denied(guest_cycle):
+    """Every write on the cycle itself stays refused for a guest."""
+    urls = cycle_urls(guest_cycle["owner"])
+    pk = guest_cycle["pk"]
+    guest = guest_cycle["guest"]["client"]
+    detail = urls["detail"](pk)
+    before = guest_cycle["owner"]["client"].get(detail).content
+    for method, url, kwargs in (
+        ("post", urls["cycles"], {"json": {"name": "Guest cycle"}}),
+        ("patch", detail, {"json": {"name": "Renamed"}}),
+        ("delete", detail, {}),
+        ("post", f"{detail}archive/", {}),
+        ("delete", f"{detail}archive/", {}),
+        ("post", f"{detail}transfer-issues/", {"json": {"new_cycle_id": pk}}),
+    ):
+        r = getattr(guest, method)(url, **kwargs)
+        assert r.status_code == 403, f"{method} {url}: {r.text[:500]}"
+        assert r.json() == FORBIDDEN, f"{method} {url}"
+    assert guest_cycle["owner"]["client"].get(detail).content == before

@@ -90,6 +90,7 @@ pub const SCHEDULER_SERIALIZER_FIELDS: &[&str] = &[
     "prompt",
     "color",
     "source",
+    "is_builtin",
     "is_enabled",
     "active_binding_count",
     "created_at",
@@ -101,6 +102,7 @@ pub const SCHEDULER_READ_ONLY_FIELDS: &[&str] = &[
     "id",
     "workspace",
     "source",
+    "is_builtin",
     "active_binding_count",
     "created_at",
     "updated_at",
@@ -262,6 +264,11 @@ pub const COLOR_ERROR: &str = "color must be a 7-character hex string like '#3b8
 /// (queries R7 + handlers); only the message lives here.
 pub const SLUG_UNIQUE_ERROR: &str = "This slug is already in use in this workspace.";
 
+/// Slug-format rejection (NEWPIDASH-257, `DIFF-34`): the same message the
+/// old web form returns (`SLUG_PATTERN` in
+/// `apps/web/core/components/schedulers/scheduler-definition-fields.tsx`).
+pub const SLUG_FORMAT_ERROR: &str = "Use lowercase letters, numbers, and dashes only.";
+
 /// Cross-field pod/project mismatch (`scheduler.py:264-267`).
 pub const POD_PROJECT_ERROR: &str = "pod must belong to the same project as this scheduler install";
 
@@ -318,6 +325,26 @@ pub fn validate_color(value: &str) -> Result<String, &'static str> {
         Ok(canonical)
     } else {
         Err(COLOR_ERROR)
+    }
+}
+
+/// Whether the *stripped* slug satisfies the scheduler-slug format
+/// `^[a-z0-9][a-z0-9-]*$` (`SLUG_PATTERN` in
+/// `apps/web/core/components/schedulers/scheduler-definition-fields.tsx`),
+/// so a badly formatted slug is rejected without a regex crate: a
+/// non-empty value whose first byte is ASCII lowercase/digit and whose
+/// remaining bytes are ASCII lowercase/digit/dash. The caller passes the
+/// `char_field`-stripped value, matching DRF's `validate_slug` input
+/// (which never sees the empty string: `char_field` rejects blanks
+/// first).
+pub fn validate_slug_format(value: &str) -> Result<(), &'static str> {
+    let bytes = value.as_bytes();
+    let is_start = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    match bytes.first() {
+        Some(first) if is_start(first) && bytes[1..].iter().all(|b| is_start(b) || *b == b'-') => {
+            Ok(())
+        }
+        _ => Err(SLUG_FORMAT_ERROR),
     }
 }
 
@@ -1504,7 +1531,8 @@ mod tests {
     fn scheduler_fields_match_f36_01_in_order() {
         let parsed = golden(F36_01);
         let expected = str_list(&parsed["fields"]);
-        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 12);
+        // NEWPIDASH-256 added `is_builtin` (13 keys now).
+        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 13);
         assert_eq!(SCHEDULER_SERIALIZER_FIELDS, expected.as_slice());
     }
 
@@ -1513,7 +1541,7 @@ mod tests {
         let parsed = golden(F36_01);
         let guards = str_list(&parsed["read_only_fields"]);
         assert_eq!(SCHEDULER_READ_ONLY_FIELDS, guards.as_slice());
-        // The render example carries exactly the 12 keys (order is pinned
+        // The render example carries exactly the 13 keys (order is pinned
         // by the `fields` array above — `serde_json` maps do not preserve
         // document order).
         let mut rendered: Vec<&str> = parsed["render_example"]
@@ -1715,6 +1743,46 @@ mod tests {
             field_error_body("slug", SLUG_UNIQUE_ERROR),
             r#"{"slug":["This slug is already in use in this workspace."]}"#
         );
+    }
+
+    #[test]
+    fn slug_format_vectors_match_web_form_pattern() {
+        // `SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/` (old web form,
+        // `scheduler-definition-fields.tsx`): the message is the form's
+        // exact text, pinned byte for byte against the `{"slug": ...}`
+        // wire body the API answers (NEWPIDASH-257, `DIFF-34`).
+        assert_eq!(
+            SLUG_FORMAT_ERROR,
+            "Use lowercase letters, numbers, and dashes only."
+        );
+        assert_eq!(
+            field_error_body("slug", SLUG_FORMAT_ERROR),
+            r#"{"slug":["Use lowercase letters, numbers, and dashes only."]}"#
+        );
+        for valid in [
+            "nightly-bug-scan",
+            "security-audit",
+            "fable-security-audit",
+            "a",
+            "1",
+            "a1",
+            "1-2",
+            "a-",
+            "5",
+            "x-1-y",
+        ] {
+            assert_eq!(validate_slug_format(valid), Ok(()), "valid {valid:?}");
+        }
+        for invalid in [
+            "", "-a", "-", "Bad", "UPPER", "a b", "a_b", "a.b", "a/b", "a\tb", "café", "Ａ",
+            " noct", "noct ", "noct\0",
+        ] {
+            assert_eq!(
+                validate_slug_format(invalid),
+                Err(SLUG_FORMAT_ERROR),
+                "invalid {invalid:?}"
+            );
+        }
     }
 
     #[test]

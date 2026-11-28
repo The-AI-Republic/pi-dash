@@ -10,6 +10,7 @@ import type { ChatEvent, ChatMessage } from "@pidash/api-client";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { RUNNER_BUSY_LABEL, RUNNER_CHAT_BUSY_MESSAGE } from "./events.js";
 import type { ChatSubscriptionHandlers } from "./transport.js";
 import {
   parkedApproval,
@@ -199,6 +200,44 @@ describe("useChatStream", () => {
       )
     );
     expect(result.current.activity).toEqual([{ seq: 1, label: "Ran: ls" }]);
+  });
+
+  it("shows the busy banner for a live runner_busy refusal and the busy strip row", () => {
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks()));
+    act(() =>
+      transportState.handlers[0]?.onEvent?.(
+        frame(1, { kind: "chat_failed", message: null, payload: { code: "runner_busy", detail: "" } })
+      )
+    );
+    expect(result.current.error).toBe(RUNNER_CHAT_BUSY_MESSAGE);
+    expect(result.current.activity).toEqual([{ seq: 1, label: RUNNER_BUSY_LABEL }]);
+  });
+
+  it("shows only the strip row for a replayed historic runner_busy refusal", () => {
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks()));
+    act(() =>
+      transportState.handlers[0]?.onEvent?.(
+        frame(1, {
+          kind: "chat_failed",
+          message: null,
+          payload: { code: "runner_busy", detail: "" },
+          created_at: "2026-10-19T08:00:00Z",
+        })
+      )
+    );
+    expect(result.current.error).toBeNull();
+    expect(result.current.activity).toEqual([{ seq: 1, label: RUNNER_BUSY_LABEL }]);
+  });
+
+  it("keeps a live non-busy chat failure off the banner", () => {
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks()));
+    act(() =>
+      transportState.handlers[0]?.onEvent?.(
+        frame(1, { kind: "chat_failed", message: null, payload: { code: "dispatch_failed", detail: "boom" } })
+      )
+    );
+    expect(result.current.error).toBeNull();
+    expect(result.current.activity).toEqual([{ seq: 1, label: "Failed" }]);
   });
 
   it("clears the error on the next frame", () => {

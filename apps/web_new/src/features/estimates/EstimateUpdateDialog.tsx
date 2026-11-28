@@ -83,6 +83,11 @@ export function EstimateUpdateDialog({
   const family: EstimateFamily = estimateFamilyOfType(system.type);
   const [original] = React.useState(() => system.points.map((point) => ({ id: point.id, key: point.key })));
   const [name, setName] = React.useState(system.name);
+  // The name field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button and can land after the reader has clicked into the field, eating
+  // their keystrokes on a busy host (NEWFRONT-1055, 1058).
+  const nameRef = React.useRef<HTMLInputElement | null>(null);
   const [nameError, setNameError] = React.useState<string | null>(null);
   const [rows, setRows] = React.useState<ArrangedEstimateValue[]>(() => initialRows(system));
   const [editing, setEditing] = React.useState<{ index: number; draft: string } | null>(null);
@@ -256,6 +261,7 @@ export function EstimateUpdateDialog({
       title={UPDATE_DIALOG_TITLE}
       description={UPDATE_DIALOG_DESCRIPTION}
       nonDismissable={update.isPending}
+      initialFocus={nameRef}
       actions={
         confirming === null ? (
           <>
@@ -282,6 +288,7 @@ export function EstimateUpdateDialog({
         <div className="mt-(--space-4) flex flex-col gap-(--space-4)">
           <div className="flex flex-col gap-(--space-1)">
             <Input
+              inputRef={nameRef}
               label={UPDATE_DIALOG_NAME_LABEL}
               value={name}
               disabled={update.isPending}

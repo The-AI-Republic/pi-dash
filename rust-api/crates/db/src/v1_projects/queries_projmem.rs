@@ -1,7 +1,7 @@
 //! Project / member / invite / user querysets (D-19, stage 5).
 //!
 //! Ports the read querysets behind the api-v1 project, member, invite and
-//! user routes to SQL-identical builders and executors, recorded in
+//! user routes to sea-query builders executed through SeaORM, recorded in
 //! `rust-api/fixtures/v1_projects/queries/project_member.sql` (FX-Q-PROJMEM)
 //! with result shapes in `project_member.rows.json`:
 //!
@@ -32,10 +32,10 @@
 //! Identifier-vs-uuid resolution (`Project.resolve`,
 //! `db/models/project.py:191-224`, plus the `_rewrite_project_kwarg`
 //! middleware, `api/views/base.py:52-104`) reuses the classification in
-//! [`super::models::project`]: [`resolve_project_sql`] picks the pk or the
-//! identifier branch, [`fetch_project_id`] runs it. A UUID-looking input is
-//! never tried as an identifier and non-UUID input is never tried as a pk;
-//! no row means the caller 404s with the generic
+//! [`super::models::project`]: [`resolve_project`] picks the pk or the
+//! identifier statement, [`fetch_project_id`] runs it. A UUID-looking input
+//! is never tried as an identifier and non-UUID input is never tried as a
+//! pk; no row means the caller 404s with the generic
 //! [`super::models::project::NOT_FOUND_DETAIL`] (the input is never echoed).
 //!
 //! Every builder and fetch takes a [`TenantScope`]: the workspace slug from
@@ -44,12 +44,14 @@
 //! [`crate::context::RequestContext`] counterpart carries the same tenant for
 //! writes; reads scope by slug + user exactly as the Django views do.
 //!
-//! Static statements are string constants matching the fixture text with
-//! Postgres `$N` binds where the fixture writes `%(name)s` (`$1` slug,
-//! `$2` user, unless noted). Only the `IN (...)` arity (Q4) and the `ORDER
-//! BY` key are builder functions. SQL execution uses runtime `sqlx::query`
-//! (no `query!` macros: no build-time database, same as the merged
-//! `license/queries` precedent).
+//! Each builder returns a complete sea-query [`SelectStatement`] with its
+//! values bound (the workspace slug, the acting user, the project id, the
+//! membership pk, the member id, the invite pk). Execution runs through
+//! SeaORM ([`ConnectionTrait`], [`DbBackend::Postgres`]) and rows decode by
+//! name into [`FromQueryResult`] structs, so duplicated output names are
+//! impossible by construction. The Q1 correlated subqueries are nested
+//! selects; `EXISTS` renders via [`Expr::exists`]; counts use
+//! [`Func::count`].
 //!
 //! # Ported bugs and quirks (translate, don't redesign)
 //!
@@ -75,11 +77,17 @@
 //!   do the same grouping.
 //! * The invite list carries no `ORDER BY` (fixture Q6); row order is the
 //!   plan order, as in Django.
+//! * The workspace-exists check carries no `deleted_at` predicate (fixture
+//!   Q3 `exists()`), while the workspace-id-for-slug lookup filters
+//!   `deleted_at IS NULL` (a soft-deleted workspace reads as missing, the
+//!   400 branch). Both shapes are kept, never unified.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use sqlx::postgres::PgRow;
-use sqlx::Row;
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, FromQueryResult, QueryResult};
+use sea_query::{
+    Alias, Asterisk, Condition, Expr, Func, JoinType, Order, Query, SelectStatement, SimpleExpr,
+};
 
 use super::models::project::{classify_lookup, ProjectLookup};
 
@@ -109,109 +117,248 @@ impl<'a> TenantScope<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Q1 project list / detail base
+// Builder helpers
 // ---------------------------------------------------------------------------
 
-/// Q1 list base, no `ORDER BY` (the builder appends it).
-///
-/// Fixture Q1 (`views/project.py:82-140`) with `$1` = slug, `$2` = user.
-/// `select_related("project_lead")` is the `LEFT OUTER JOIN` (the FK is
-/// nullable); it selects no extra columns here because the fixture pins
-/// `SELECT p.*`.
-pub const PROJECT_LIST_BASE_SQL: &str = "SELECT p.*,
-  EXISTS(SELECT 1 FROM project_members pm
-         WHERE pm.member_id = $2 AND pm.project_id = p.id
-           AND pm.workspace_id = w.id AND pm.is_active AND pm.deleted_at IS NULL
-        ) AS is_member,
-  (SELECT COUNT(*) FROM project_members pm
-    JOIN users u ON u.id = pm.member_id
-    WHERE pm.project_id = p.id AND u.is_bot = FALSE
-      AND pm.is_active AND pm.deleted_at IS NULL) AS total_members,
-  (SELECT COUNT(*) FROM cycles c
-    WHERE c.project_id = p.id AND c.deleted_at IS NULL) AS total_cycles,
-  (SELECT COUNT(*) FROM modules m
-    WHERE m.project_id = p.id AND m.deleted_at IS NULL) AS total_modules,
-  (SELECT pm.role FROM project_members pm
-    WHERE pm.project_id = p.id AND pm.member_id = $2
-      AND pm.is_active AND pm.deleted_at IS NULL) AS member_role,
-  EXISTS(SELECT 1 FROM deploy_boards d
-         WHERE d.project_id = p.id AND d.workspace_id = w.id
-           AND d.deleted_at IS NULL) AS is_deployed
-FROM projects p
-JOIN workspaces w ON w.id = p.workspace_id
-LEFT OUTER JOIN users project_lead ON p.project_lead_id = project_lead.id
-LEFT OUTER JOIN project_members vis
-  ON (vis.project_id = p.id AND vis.member_id = $2 AND vis.is_active
-      AND vis.deleted_at IS NULL)
-WHERE w.slug = $1 AND p.deleted_at IS NULL
-  AND (vis.id IS NOT NULL OR p.network = 2)
-GROUP BY p.id, w.id";
-
-/// Q1 detail base, no `ORDER BY` (`views/project.py:297-355`).
-///
-/// Same annotations and scoping as the list base; `select_related`
-/// adds the workspace-owner (`INNER`, required FK), default-assignee and
-/// project-lead (`LEFT OUTER`, nullable FKs) joins. The workspace join is
-/// reused from the slug predicate.
-pub const PROJECT_DETAIL_BASE_SQL: &str = "SELECT p.*,
-  EXISTS(SELECT 1 FROM project_members pm
-         WHERE pm.member_id = $2 AND pm.project_id = p.id
-           AND pm.workspace_id = w.id AND pm.is_active AND pm.deleted_at IS NULL
-        ) AS is_member,
-  (SELECT COUNT(*) FROM project_members pm
-    JOIN users u ON u.id = pm.member_id
-    WHERE pm.project_id = p.id AND u.is_bot = FALSE
-      AND pm.is_active AND pm.deleted_at IS NULL) AS total_members,
-  (SELECT COUNT(*) FROM cycles c
-    WHERE c.project_id = p.id AND c.deleted_at IS NULL) AS total_cycles,
-  (SELECT COUNT(*) FROM modules m
-    WHERE m.project_id = p.id AND m.deleted_at IS NULL) AS total_modules,
-  (SELECT pm.role FROM project_members pm
-    WHERE pm.project_id = p.id AND pm.member_id = $2
-      AND pm.is_active AND pm.deleted_at IS NULL) AS member_role,
-  EXISTS(SELECT 1 FROM deploy_boards d
-         WHERE d.project_id = p.id AND d.workspace_id = w.id
-           AND d.deleted_at IS NULL) AS is_deployed
-FROM projects p
-JOIN workspaces w ON w.id = p.workspace_id
-INNER JOIN users workspace_owner ON w.owner_id = workspace_owner.id
-LEFT OUTER JOIN users default_assignee ON p.default_assignee_id = default_assignee.id
-LEFT OUTER JOIN users project_lead ON p.project_lead_id = project_lead.id
-LEFT OUTER JOIN project_members vis
-  ON (vis.project_id = p.id AND vis.member_id = $2 AND vis.is_active
-      AND vis.deleted_at IS NULL)
-WHERE w.slug = $1 AND p.deleted_at IS NULL
-  AND (vis.id IS NOT NULL OR p.network = 2)
-GROUP BY p.id, w.id";
-
-/// Base `ORDER BY` (`kwargs order_by`, always the `-created_at` default).
-pub const ORDER_BASE: &str = "ORDER BY p.created_at DESC";
-
-/// List base with its default ordering (`views/project.py:138`).
-pub fn project_list_sql() -> String {
-    format!("{PROJECT_LIST_BASE_SQL}\n{ORDER_BASE}")
+fn col(table: &str, column: &str) -> Expr {
+    Expr::col((Alias::new(table), Alias::new(column)))
 }
 
-/// Detail base with its default ordering (`views/project.py:353`).
-pub fn project_detail_sql() -> String {
-    format!("{PROJECT_DETAIL_BASE_SQL}\n{ORDER_BASE}")
+fn tbl(name: &str) -> Alias {
+    Alias::new(name)
+}
+
+fn scalar(sub: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
 }
 
 // ---------------------------------------------------------------------------
-// Q2 list-GET sort_order variant + ordering
+// Q1 annotation subqueries (correlated to the outer `p` / `w` aliases)
 // ---------------------------------------------------------------------------
 
-/// The `sort_order` annotation the list GET adds
-/// (`views/project.py:169-174`): the caller's own active membership row in
-/// this workspace, or NULL when the caller holds none (scalar subquery with
-/// zero rows — never absent).
-pub const SORT_ORDER_ANNOTATION_SQL: &str = "(SELECT pm.sort_order FROM project_members pm
-              WHERE pm.member_id = $2 AND pm.project_id = p.id
-                AND pm.workspace_id = w.id AND pm.is_active
-                AND pm.deleted_at IS NULL) AS sort_order";
+/// `is_member`: the caller's active membership in this project + workspace.
+fn is_member_expr(scope: &TenantScope<'_>) -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.expr(Expr::value(1));
+    sub.from_as(tbl("project_members"), Alias::new("pm"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("pm", "member_id").eq(scope.actor_id))
+            .add(col("pm", "project_id").eq(col("p", "id")))
+            .add(col("pm", "workspace_id").eq(col("w", "id")))
+            .add(col("pm", "is_active").eq(true))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    Expr::exists(sub)
+}
 
-/// Default GET ordering (`request.GET order_by`, `:186`).
+/// `total_members`: non-bot active memberships of this project.
+fn total_members_expr() -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.expr(Func::count(col("pm", "id")));
+    sub.from_as(tbl("project_members"), Alias::new("pm"));
+    sub.join_as(
+        JoinType::InnerJoin,
+        tbl("users"),
+        Alias::new("u"),
+        col("pm", "member_id").equals((Alias::new("u"), Alias::new("id"))),
+    );
+    sub.cond_where(
+        Condition::all()
+            .add(col("pm", "project_id").eq(col("p", "id")))
+            .add(col("u", "is_bot").eq(false))
+            .add(col("pm", "is_active").eq(true))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    scalar(sub)
+}
+
+/// `total_cycles`: live cycles of this project.
+fn total_cycles_expr() -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.expr(Func::count(col("c", "id")));
+    sub.from_as(tbl("cycles"), Alias::new("c"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("c", "project_id").eq(col("p", "id")))
+            .add(col("c", "deleted_at").is_null()),
+    );
+    scalar(sub)
+}
+
+/// `total_modules`: live modules of this project.
+fn total_modules_expr() -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.expr(Func::count(col("m", "id")));
+    sub.from_as(tbl("modules"), Alias::new("m"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("m", "project_id").eq(col("p", "id")))
+            .add(col("m", "deleted_at").is_null()),
+    );
+    scalar(sub)
+}
+
+/// `member_role`: the caller's own active role in this project, or NULL.
+fn member_role_expr(scope: &TenantScope<'_>) -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.column((Alias::new("pm"), Alias::new("role")));
+    sub.from_as(tbl("project_members"), Alias::new("pm"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("pm", "project_id").eq(col("p", "id")))
+            .add(col("pm", "member_id").eq(scope.actor_id))
+            .add(col("pm", "is_active").eq(true))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    scalar(sub)
+}
+
+/// `is_deployed`: a live deploy board for this project + workspace exists.
+fn is_deployed_expr() -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.expr(Expr::value(1));
+    sub.from_as(tbl("deploy_boards"), Alias::new("d"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("d", "project_id").eq(col("p", "id")))
+            .add(col("d", "workspace_id").eq(col("w", "id")))
+            .add(col("d", "deleted_at").is_null()),
+    );
+    Expr::exists(sub)
+}
+
+/// `sort_order`: the caller's own active sort order in this workspace.
+fn sort_order_expr(scope: &TenantScope<'_>) -> SimpleExpr {
+    let mut sub = Query::select();
+    sub.column((Alias::new("pm"), Alias::new("sort_order")));
+    sub.from_as(tbl("project_members"), Alias::new("pm"));
+    sub.cond_where(
+        Condition::all()
+            .add(col("pm", "member_id").eq(scope.actor_id))
+            .add(col("pm", "project_id").eq(col("p", "id")))
+            .add(col("pm", "workspace_id").eq(col("w", "id")))
+            .add(col("pm", "is_active").eq(true))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    scalar(sub)
+}
+
+// ---------------------------------------------------------------------------
+// Q1 project list / detail builders
+// ---------------------------------------------------------------------------
+
+/// Shared Q1 select list and `FROM`/`JOIN` block (`views/project.py:82-140`
+/// list, `:297-355` detail).
+///
+/// `SELECT "p".*` carries every project column (the fixture `SELECT p.*`);
+/// the six annotations follow. The detail base adds the workspace-owner
+/// (`INNER`, required FK), default-assignee and project-lead (`LEFT`,
+/// nullable FKs) joins; the list base has only the project-lead join. Both
+/// join `workspaces w` (slug predicate) and `project_members vis` (member
+/// scoping) and group by `p.id, w.id`.
+fn project_head(scope: &TenantScope<'_>, detail: bool, with_sort: bool) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("p"), Asterisk));
+    sel.expr_as(is_member_expr(scope), Alias::new("is_member"));
+    sel.expr_as(total_members_expr(), Alias::new("total_members"));
+    sel.expr_as(total_cycles_expr(), Alias::new("total_cycles"));
+    sel.expr_as(total_modules_expr(), Alias::new("total_modules"));
+    sel.expr_as(member_role_expr(scope), Alias::new("member_role"));
+    sel.expr_as(is_deployed_expr(), Alias::new("is_deployed"));
+    if with_sort {
+        sel.expr_as(sort_order_expr(scope), Alias::new("sort_order"));
+    }
+    sel.from_as(tbl("projects"), Alias::new("p"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("p", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    if detail {
+        sel.join_as(
+            JoinType::InnerJoin,
+            tbl("users"),
+            Alias::new("workspace_owner"),
+            col("w", "owner_id").equals((Alias::new("workspace_owner"), Alias::new("id"))),
+        );
+        sel.join_as(
+            JoinType::LeftJoin,
+            tbl("users"),
+            Alias::new("default_assignee"),
+            col("p", "default_assignee_id")
+                .equals((Alias::new("default_assignee"), Alias::new("id"))),
+        );
+    }
+    sel.join_as(
+        JoinType::LeftJoin,
+        tbl("users"),
+        Alias::new("project_lead"),
+        col("p", "project_lead_id").equals((Alias::new("project_lead"), Alias::new("id"))),
+    );
+    sel.join_as(
+        JoinType::LeftJoin,
+        tbl("project_members"),
+        Alias::new("vis"),
+        Condition::all()
+            .add(col("vis", "project_id").equals((Alias::new("p"), Alias::new("id"))))
+            .add(col("vis", "member_id").eq(scope.actor_id))
+            .add(col("vis", "is_active").eq(true))
+            .add(col("vis", "deleted_at").is_null()),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("w", "slug").eq(scope.workspace_slug))
+            .add(col("p", "deleted_at").is_null())
+            .add(
+                Condition::any()
+                    .add(col("vis", "id").is_not_null())
+                    .add(col("p", "network").eq(2)),
+            ),
+    );
+    sel.group_by_col((Alias::new("p"), Alias::new("id")));
+    sel.group_by_col((Alias::new("w"), Alias::new("id")));
+    sel
+}
+
+/// Q1 list base: `SELECT p.*` + six annotations, kwargs `-created_at` order.
+pub fn project_list(scope: &TenantScope<'_>) -> SelectStatement {
+    let mut sel = project_head(scope, false, false);
+    sel.order_by((Alias::new("p"), Alias::new("created_at")), Order::Desc);
+    sel
+}
+
+/// Q1 detail base: list base plus `select_related` joins, `-created_at`.
+pub fn project_detail(scope: &TenantScope<'_>) -> SelectStatement {
+    let mut sel = project_head(scope, true, false);
+    sel.order_by((Alias::new("p"), Alias::new("created_at")), Order::Desc);
+    sel
+}
+
+// ---------------------------------------------------------------------------
+// Q2 list-GET ordering + builders
+// ---------------------------------------------------------------------------
+
+/// Default GET ordering (`request.GET order_by`, `project.py:186`).
 pub const ORDER_GET_DEFAULT: &str = "sort_order";
+
+/// Map a GET `order_by` key to its `(renders-on-alias, column, descending)`
+/// triple. Unknown keys fall back to the GET default rather than emitting
+/// SQL for an unmapped identifier (the view validates first).
+fn get_order(key: &str) -> (bool, &'static str, Order) {
+    match key {
+        "sort_order" => (true, "sort_order", Order::Asc),
+        "-sort_order" => (true, "sort_order", Order::Desc),
+        "created_at" => (false, "created_at", Order::Asc),
+        "-created_at" => (false, "created_at", Order::Desc),
+        "updated_at" => (false, "updated_at", Order::Asc),
+        "-updated_at" => (false, "updated_at", Order::Desc),
+        "name" => (false, "name", Order::Asc),
+        "-name" => (false, "name", Order::Desc),
+        _ => (true, "sort_order", Order::Asc),
+    }
+}
 
 /// Map a GET `order_by` key to its `ORDER BY` fragment.
 ///
@@ -235,153 +382,188 @@ pub fn order_by_sql(key: &str) -> &'static str {
 
 /// Full list-GET statement: list base + `sort_order` annotation + GET
 /// ordering (`views/project.py:169-187`).
-pub fn project_list_get_sql(order_by: &str) -> String {
-    let select_from = "FROM projects p";
-    let with_annotation = PROJECT_LIST_BASE_SQL.replacen(
-        select_from,
-        &format!(",\n  {SORT_ORDER_ANNOTATION_SQL}\n{select_from}"),
-        1,
-    );
-    format!("{with_annotation}\n{}", order_by_sql(order_by))
+pub fn project_list_get(scope: &TenantScope<'_>, order_by: &str) -> SelectStatement {
+    let mut sel = project_head(scope, false, true);
+    let (on_alias, column, direction) = get_order(order_by);
+    if on_alias {
+        sel.order_by(Alias::new(column), direction);
+    } else {
+        sel.order_by((Alias::new("p"), Alias::new(column)), direction);
+    }
+    sel
+}
+
+/// Annotation names produced by [`project_head`] that are valid `ORDER BY`
+/// targets via their select alias. Mirrors the handler's `ANNOTATIONS`
+/// (`resolve_list_order`): any other validated name is a `projects` column
+/// and must be qualified as `p.<col>`.
+const ANNOTATION_ORDERABLE: &[&str] = &[
+    "total_members",
+    "total_cycles",
+    "total_modules",
+    "is_member",
+    "sort_order",
+    "member_role",
+    "is_deployed",
+];
+
+/// List-GET statement ordered by a caller-supplied custom key.
+///
+/// Django's `order_by(request.GET.get("order_by", "sort_order"))`
+/// (`views/project.py:186`) **replaces** the queryset default ordering: it
+/// always carries the `sort_order` annotation and applies exactly the one
+/// requested key. This builder mirrors that: it starts from
+/// [`project_head`] with `with_sort = true` (the `sort_order` subquery
+/// annotation), adds **no** default `ORDER BY`, then orders by `name` in
+/// `direction`. Annotation keys order by their alias; project columns order
+/// by `p.<col>` — the same split [`project_list_get`] uses for the eight
+/// known keys. Callers must have validated `name` against the project
+/// columns plus this annotation set (the handler's `resolve_list_order`
+/// already does); an unknown name would render `ORDER BY "p"."<name>"`,
+/// which Postgres rejects — but the handler never reaches here with one.
+///
+/// The previous handler path built [`project_list`] (which already carries
+/// `ORDER BY p.created_at DESC` and lacks the `sort_order` annotation) and
+/// then appended the requested key, yielding `ORDER BY p.created_at DESC,
+/// "<key>"` and `sort_order: null` (PIDASHCONV-1720).
+pub fn project_list_get_custom(
+    scope: &TenantScope<'_>,
+    name: &str,
+    direction: Order,
+) -> SelectStatement {
+    let mut sel = project_head(scope, false, true);
+    if ANNOTATION_ORDERABLE.contains(&name) {
+        sel.order_by(Alias::new(name), direction);
+    } else {
+        sel.order_by((Alias::new("p"), Alias::new(name)), direction);
+    }
+    sel
 }
 
 /// Member prefetch for the projects on the page (`:178-185`).
 ///
-/// `$1` is the workspace id. Django filters `workspace__slug = slug`; the
-/// fixture pins the equivalent `workspace_id` predicate, so callers resolve
-/// the id once ([`WORKSPACE_ID_FOR_SLUG_SQL`]) and reuse it.
-pub const PROJECT_MEMBER_PREFETCH_SQL: &str = "SELECT pm.*, u.* FROM project_members pm
-LEFT OUTER JOIN users u ON pm.member_id = u.id
-WHERE pm.workspace_id = $1 AND pm.is_active AND pm.deleted_at IS NULL";
+/// `WHERE pm.workspace_id = <id> AND pm.is_active AND pm.deleted_at IS NULL`
+/// with the member user left-joined (`select_related("member")`). The user
+/// columns are aliased `u_<col>` so the two `id` columns never collide.
+/// Django scopes by `workspace__slug`; callers resolve the id once
+/// ([`workspace_id_for_slug`]) and reuse it.
+pub fn project_member_prefetch(workspace_id: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("pm"), Asterisk));
+    for column in ["id", "first_name", "last_name", "email", "avatar"] {
+        sel.expr_as(col("u", column), Alias::new(format!("u_{column}")));
+    }
+    sel.from_as(tbl("project_members"), Alias::new("pm"));
+    sel.join_as(
+        JoinType::LeftJoin,
+        tbl("users"),
+        Alias::new("u"),
+        col("pm", "member_id").equals((Alias::new("u"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("pm", "workspace_id").eq(workspace_id))
+            .add(col("pm", "is_active").eq(true))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    sel
+}
 
 // ---------------------------------------------------------------------------
 // Q3 workspace members
 // ---------------------------------------------------------------------------
 
-/// Slug existence check (`views/member.py:76`).
-///
-/// Django's `exists()` renders `SELECT 1 ... LIMIT 1`; the fixture pins the
-/// unquoted shape. `$1` = slug.
-pub const WORKSPACE_EXISTS_SQL: &str = "SELECT 1 FROM workspaces WHERE slug = $1 LIMIT 1";
+/// Slug existence check (`views/member.py:76`): Django's `exists()` renders
+/// `SELECT 1 ... LIMIT 1`; this carries no `deleted_at` predicate.
+pub fn workspace_exists(scope: &TenantScope<'_>) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.expr(Expr::value(1));
+    sel.from(tbl("workspaces"));
+    sel.cond_where(col("workspaces", "slug").eq(scope.workspace_slug));
+    sel.limit(1);
+    sel
+}
 
-/// Workspace id lookup for a slug.
-///
-/// Folds Django's `exists()` check and the `workspace__slug` join target
-/// into one lookup: the fixture Q3 exists-check carries no `deleted_at`
-/// predicate, while every manager read scopes live rows, so this filters
-/// `deleted_at IS NULL` (a soft-deleted workspace reads as missing, exactly
-/// what the 400 branch needs). No row means the caller returns
-/// `{"error": "Provided workspace does not exist"}` with 400
-/// (`member.py:76-80,128-132,182-186`).
-pub const WORKSPACE_ID_FOR_SLUG_SQL: &str =
-    "SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL LIMIT 1";
+/// Workspace id lookup for a slug: filters `deleted_at IS NULL` (a
+/// soft-deleted workspace reads as missing, the 400 branch).
+pub fn workspace_id_for_slug(workspace_slug: &str) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("workspaces"), Alias::new("id")));
+    sel.from(tbl("workspaces"));
+    sel.cond_where(
+        Condition::all()
+            .add(col("workspaces", "slug").eq(workspace_slug))
+            .add(col("workspaces", "deleted_at").is_null()),
+    );
+    sel.limit(1);
+    sel
+}
 
 /// Workspace members with their users (`views/member.py:82`).
 ///
-/// `$1` is the workspace id (see [`WORKSPACE_ID_FOR_SLUG_SQL`]).
-/// `select_related("member")` is the `JOIN users`.
-pub const WORKSPACE_MEMBERS_SQL: &str = "SELECT wm.*, u.* FROM workspace_members wm
-JOIN users u ON u.id = wm.member_id
-WHERE wm.workspace_id = $1 AND wm.deleted_at IS NULL AND u.deleted_at IS NULL";
-
-/// Whether the workspace slug exists (the `exists()` branch).
-pub async fn fetch_workspace_exists<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(WORKSPACE_EXISTS_SQL)
-        .bind(scope.workspace_slug)
-        .fetch_optional(ex)
-        .await?;
-    Ok(row.is_some())
-}
-
-/// Workspace id for the scope slug, or `None` (the 400 branch).
-pub async fn fetch_workspace_id<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-) -> Result<Option<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(WORKSPACE_ID_FOR_SLUG_SQL)
-        .bind(scope.workspace_slug)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| r.try_get("id")).transpose()
+/// Columns are named explicitly (`wm.member_id/role/workspace_id`) so the
+/// two join tables' `id` columns never collide; the membership row is
+/// filtered on both `wm` and `u` liveness, and users are left via the
+/// inner join keep-on-user-exists semantics of the fixture `JOIN users`.
+pub fn workspace_members_stmt(workspace_id: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("wm"), Alias::new("member_id")));
+    sel.column((Alias::new("wm"), Alias::new("role")));
+    sel.column((Alias::new("wm"), Alias::new("workspace_id")));
+    sel.from_as(tbl("workspace_members"), Alias::new("wm"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("users"),
+        Alias::new("u"),
+        col("u", "id").equals((Alias::new("wm"), Alias::new("member_id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("wm", "workspace_id").eq(workspace_id))
+            .add(col("wm", "deleted_at").is_null())
+            .add(col("u", "deleted_at").is_null()),
+    );
+    sel
 }
 
 // ---------------------------------------------------------------------------
 // Q4 project member ids + users
 // ---------------------------------------------------------------------------
 
-/// Project member ids (`views/member.py:135-137`).
-///
-/// `values_list("member_id", flat=True)` selects the bare column; `$1` is
-/// the project id, `$2` the workspace slug.
-pub const PROJECT_MEMBER_IDS_SQL: &str = "SELECT pm.member_id FROM project_members pm
-JOIN workspaces w ON w.id = pm.workspace_id
-WHERE pm.project_id = $1 AND w.slug = $2
-  AND pm.deleted_at IS NULL";
-
-/// Users for an id list (`views/member.py:140`).
-///
-/// `n` is the number of `$N` placeholders. Use [`project_users_sql`].
-pub fn project_users_sql(n: usize) -> String {
-    let list: Vec<String> = (1..=n).map(|i| format!("${i}")).collect();
-    format!(
-        "SELECT u.* FROM users u WHERE u.id IN ({}) AND u.deleted_at IS NULL",
-        list.join(", ")
-    )
+/// Project member ids (`views/member.py:135-137`): bare `member_id` column,
+/// joined to `workspaces` for the slug predicate. No `is_active` filter.
+pub fn project_member_ids_stmt(workspace_slug: &str, project_id: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("pm"), Alias::new("member_id")));
+    sel.from_as(tbl("project_members"), Alias::new("pm"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("pm", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("pm", "project_id").eq(project_id))
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    sel
 }
 
-/// Member ids for a project, NULLs dropped.
-///
-/// `member` is nullable; `id__in` never matches NULL, so NULLs are filtered
-/// before the users query.
-pub async fn fetch_project_member_ids<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-    project_id: uuid::Uuid,
-) -> Result<Vec<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(PROJECT_MEMBER_IDS_SQL)
-        .bind(project_id)
-        .bind(scope.workspace_slug)
-        .fetch_all(ex)
-        .await?;
-    rows.iter()
-        .map(|r| r.try_get::<Option<uuid::Uuid>, _>("member_id"))
-        .filter_map(|id| id.transpose())
-        .collect()
-}
-
-/// Users for a member-id list; empty in, empty out with no query.
-///
-/// Mirrors Django's `id__in=[]` empty-result short-circuit: no statement is
-/// issued for an empty list.
-pub async fn fetch_project_users<'e, E>(
-    ex: E,
-    ids: &[uuid::Uuid],
-) -> Result<Vec<MemberUserLite>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql = project_users_sql(ids.len());
-    let mut q = sqlx::query(&sql);
-    for id in ids {
-        q = q.bind(*id);
-    }
-    let rows = q.fetch_all(ex).await?;
-    rows.iter().map(map_member_user).collect()
+/// Users for an id list (`views/member.py:140`): the `UserLiteSerializer`
+/// columns the views embed (id, names, email, avatar). Callers short-circuit
+/// an empty id list before calling (Django `id__in=[]`).
+pub fn project_users_stmt(ids: &[uuid::Uuid]) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("u"), Asterisk));
+    sel.from_as(tbl("users"), Alias::new("u"));
+    sel.cond_where(
+        Condition::all()
+            .add(col("u", "id").is_in(ids.to_vec()))
+            .add(col("u", "deleted_at").is_null()),
+    );
+    sel
 }
 
 // ---------------------------------------------------------------------------
@@ -389,165 +571,143 @@ where
 // ---------------------------------------------------------------------------
 
 /// Project member detail (`.get(project_id, workspace__slug, pk)`,
-/// `views/member.py:189,204,219`).
-///
-/// `$1` project id, `$2` workspace slug, `$3` membership pk. A miss raises
-/// `DoesNotExist` in Django and becomes 404 through the base exception
-/// handler; here it is `None` and the caller 404s. The fixture writes
-/// `SELECT *`; Django enumerates the driving table's columns, so this
-/// selects `pm.*` — a bare star would also return `w.*` and duplicate
-/// `id`, mapping the workspace id over the membership id.
-pub const PROJECT_MEMBER_GET_SQL: &str =
-    "SELECT pm.* FROM project_members pm JOIN workspaces w ON w.id = pm.workspace_id
-WHERE pm.project_id = $1 AND w.slug = $2 AND pm.id = $3
-  AND pm.deleted_at IS NULL";
-
-/// Member user (`User.objects.get(id=...)`, `member.py:190`).
-pub const USER_GET_SQL: &str = "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL";
-
-/// Membership reference for a detail lookup, or `None` (the 404 branch).
-pub async fn fetch_project_member<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
+/// `views/member.py:189,204,219`). `SELECT "pm".*` — a bare star would also
+/// return `w.*` and duplicate `id`, mapping the workspace id over the
+/// membership id. No `is_active` filter (fixture-pinned).
+pub fn project_member_get_stmt(
+    workspace_slug: &str,
     project_id: uuid::Uuid,
     pk: uuid::Uuid,
-) -> Result<Option<ProjectMemberRef>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(PROJECT_MEMBER_GET_SQL)
-        .bind(project_id)
-        .bind(scope.workspace_slug)
-        .bind(pk)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| map_project_member_ref(&r)).transpose()
+) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("pm"), Asterisk));
+    sel.from_as(tbl("project_members"), Alias::new("pm"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("pm", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("pm", "project_id").eq(project_id))
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("pm", "id").eq(pk))
+            .add(col("pm", "deleted_at").is_null()),
+    );
+    sel
 }
 
-/// User by id, or `None` (the 404 branch).
-pub async fn fetch_user_by_id<'e, E>(
-    ex: E,
-    member_id: uuid::Uuid,
-) -> Result<Option<MemberUserLite>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(USER_GET_SQL)
-        .bind(member_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| map_member_user(&r)).transpose()
+/// Member user (`User.objects.get(id=...)`, `member.py:190`).
+pub fn user_get_stmt(member_id: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("users"), Asterisk));
+    sel.from(tbl("users"));
+    sel.cond_where(
+        Condition::all()
+            .add(col("users", "id").eq(member_id))
+            .add(col("users", "deleted_at").is_null()),
+    );
+    sel
 }
 
 // ---------------------------------------------------------------------------
 // Q6 invites
 // ---------------------------------------------------------------------------
 
-/// Invite list (`views/invite.py:36-37`).
-///
-/// `BaseViewSet.get_queryset` (default manager scope) filtered on
-/// `workspace__slug`; `$1` = slug. Pagination / filter backends apply above
-/// this layer. The fixture writes `SELECT *`; Django enumerates the driving
-/// table's columns, so this selects `i.*` — a bare star would also return
-/// `w.*` and duplicate `id`, mapping the workspace id over the invite id
-/// (caught by the live test).
-pub const INVITES_LIST_SQL: &str = "SELECT i.* FROM workspace_member_invites i
-JOIN workspaces w ON w.id = i.workspace_id
-WHERE w.slug = $1 AND i.deleted_at IS NULL";
-
-/// Invite object (`.get(pk)`, `invite.py:40`); a miss is `None` → 404.
-pub const INVITE_GET_SQL: &str = "SELECT i.* FROM workspace_member_invites i
-JOIN workspaces w ON w.id = i.workspace_id
-WHERE w.slug = $1 AND i.deleted_at IS NULL AND i.id = $2";
-
-/// All invites for the scope workspace.
-pub async fn fetch_invites<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-) -> Result<Vec<InviteRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(INVITES_LIST_SQL)
-        .bind(scope.workspace_slug)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_invite_row).collect()
+/// Invite list (`views/invite.py:36-37`): `SELECT "i".*`, no `ORDER BY`.
+pub fn invites_list_stmt(workspace_slug: &str) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("i"), Asterisk));
+    sel.from_as(tbl("workspace_member_invites"), Alias::new("i"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("i", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("i", "deleted_at").is_null()),
+    );
+    sel
 }
 
-/// One invite by pk, or `None` (the 404 branch).
-pub async fn fetch_invite<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-    pk: uuid::Uuid,
-) -> Result<Option<InviteRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(INVITE_GET_SQL)
-        .bind(scope.workspace_slug)
-        .bind(pk)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| map_invite_row(&r)).transpose()
+/// Invite object (`.get(pk)`, `invite.py:40`): list scope + pk.
+pub fn invite_get_stmt(workspace_slug: &str, pk: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("i"), Asterisk));
+    sel.from_as(tbl("workspace_member_invites"), Alias::new("i"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("i", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("i", "deleted_at").is_null())
+            .add(col("i", "id").eq(pk)),
+    );
+    sel
 }
 
 // ---------------------------------------------------------------------------
-// Identifier-vs-uuid resolution
+// Identifier-vs-uuid resolution builders
 // ---------------------------------------------------------------------------
 
-/// `Project.resolve` pk branch (`db/models/project.py:199`): `$1` slug,
-/// `$2` uuid. UUID-looking input is never tried as an identifier.
-pub const RESOLVE_BY_PK_SQL: &str = "SELECT p.id FROM projects p
-JOIN workspaces w ON w.id = p.workspace_id
-WHERE w.slug = $1 AND p.id = $2 AND p.deleted_at IS NULL LIMIT 1";
+/// `Project.resolve` pk branch (`db/models/project.py:199`).
+pub fn resolve_by_pk_stmt(workspace_slug: &str, id: uuid::Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("p"), Alias::new("id")));
+    sel.from_as(tbl("projects"), Alias::new("p"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("p", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("p", "id").eq(id))
+            .add(col("p", "deleted_at").is_null()),
+    );
+    sel.limit(1);
+    sel
+}
 
-/// `Project.resolve` identifier branch (`:204-212`): `$1` slug,
-/// `$2` stripped upper-cased identifier with exact equality (never
-/// `iexact`, so the composite btree is used).
-pub const RESOLVE_BY_IDENTIFIER_SQL: &str = "SELECT p.id FROM projects p
-JOIN workspaces w ON w.id = p.workspace_id
-WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL LIMIT 1";
+/// `Project.resolve` identifier branch (`:204-212`): exact equality on the
+/// stripped upper-cased identifier (never `iexact`).
+pub fn resolve_by_identifier_stmt(workspace_slug: &str, name: &str) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new("p"), Alias::new("id")));
+    sel.from_as(tbl("projects"), Alias::new("p"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        tbl("workspaces"),
+        Alias::new("w"),
+        col("p", "workspace_id").equals((Alias::new("w"), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(col("w", "slug").eq(workspace_slug))
+            .add(col("p", "identifier").eq(name))
+            .add(col("p", "deleted_at").is_null()),
+    );
+    sel.limit(1);
+    sel
+}
 
 /// Pick the resolve statement for raw input, classifying exactly like
-/// `Project.resolve` (`uuid.UUID(str(value))` → pk, `ValueError` /
-/// `AttributeError` / `TypeError` → identifier).
-pub fn resolve_project_sql(raw: &str) -> &'static str {
+/// `Project.resolve` (`uuid.UUID(str(value))` → pk, errors → identifier).
+pub fn resolve_project(scope: &TenantScope<'_>, raw: &str) -> SelectStatement {
     match classify_lookup(raw) {
-        ProjectLookup::Pk(_) => RESOLVE_BY_PK_SQL,
-        ProjectLookup::Identifier(_) => RESOLVE_BY_IDENTIFIER_SQL,
+        ProjectLookup::Pk(id) => resolve_by_pk_stmt(scope.workspace_slug, id),
+        ProjectLookup::Identifier(name) => resolve_by_identifier_stmt(scope.workspace_slug, &name),
     }
-}
-
-/// Resolve raw project input (uuid or identifier) to the project id.
-///
-/// Returns `None` when nothing matches; the caller raises the generic 404
-/// (`Project not found`, input never echoed).
-pub async fn fetch_project_id<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-    raw: &str,
-) -> Result<Option<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = match classify_lookup(raw) {
-        ProjectLookup::Pk(id) => {
-            sqlx::query(RESOLVE_BY_PK_SQL)
-                .bind(scope.workspace_slug)
-                .bind(id)
-                .fetch_optional(ex)
-                .await?
-        }
-        ProjectLookup::Identifier(name) => {
-            sqlx::query(RESOLVE_BY_IDENTIFIER_SQL)
-                .bind(scope.workspace_slug)
-                .bind(name)
-                .fetch_optional(ex)
-                .await?
-        }
-    };
-    row.map(|r| r.try_get("id")).transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -575,77 +735,89 @@ pub struct ProjectAnnotations {
     pub sort_order: Option<f64>,
 }
 
+/// Q1 base row (no `sort_order` column).
+#[derive(Debug, FromQueryResult)]
+struct ProjectBaseRow {
+    id: uuid::Uuid,
+    name: String,
+    identifier: String,
+    is_member: bool,
+    total_members: i64,
+    total_cycles: i64,
+    total_modules: i64,
+    member_role: Option<i16>,
+    is_deployed: bool,
+}
+
+/// Q2 list-GET row (with `sort_order`).
+#[derive(Debug, FromQueryResult)]
+struct ProjectGetRow {
+    id: uuid::Uuid,
+    name: String,
+    identifier: String,
+    is_member: bool,
+    total_members: i64,
+    total_cycles: i64,
+    total_modules: i64,
+    member_role: Option<i16>,
+    is_deployed: bool,
+    sort_order: Option<f64>,
+}
+
+impl From<ProjectBaseRow> for ProjectAnnotations {
+    fn from(row: ProjectBaseRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            identifier: row.identifier,
+            is_member: row.is_member,
+            total_members: row.total_members,
+            total_cycles: row.total_cycles,
+            total_modules: row.total_modules,
+            member_role: row.member_role.map(i32::from),
+            is_deployed: row.is_deployed,
+            sort_order: None,
+        }
+    }
+}
+
+impl From<ProjectGetRow> for ProjectAnnotations {
+    fn from(row: ProjectGetRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            identifier: row.identifier,
+            is_member: row.is_member,
+            total_members: row.total_members,
+            total_cycles: row.total_cycles,
+            total_modules: row.total_modules,
+            member_role: row.member_role.map(i32::from),
+            is_deployed: row.is_deployed,
+            sort_order: row.sort_order,
+        }
+    }
+}
+
 /// Map the annotation columns of a Q1/Q2 row (column names,
-/// order-independent).
-pub fn map_project_annotations(row: &PgRow) -> Result<ProjectAnnotations, sqlx::Error> {
-    let sort_order = match row.try_get::<Option<f64>, _>("sort_order") {
-        Ok(v) => v,
-        Err(sqlx::Error::ColumnNotFound(_)) => None,
-        Err(e) => return Err(e),
-    };
-    // `pm.role` is smallint (INT2); sqlx does not widen INT2 into i32.
-    let member_role: Option<i16> = row.try_get("member_role")?;
+/// order-independent). A missing `sort_order` column reads as `None` (base
+/// statements); a NULL value also reads as `None`.
+pub fn map_project_annotations(row: &QueryResult) -> Result<ProjectAnnotations, DbErr> {
+    let sort_order = row
+        .try_get::<Option<f64>>("", "sort_order")
+        .unwrap_or_default();
+    let member_role: Option<i16> = row.try_get("", "member_role")?;
     Ok(ProjectAnnotations {
-        id: row.try_get("id")?,
-        name: row.try_get("name")?,
-        identifier: row.try_get("identifier")?,
-        is_member: row.try_get("is_member")?,
-        total_members: row.try_get("total_members")?,
-        total_cycles: row.try_get("total_cycles")?,
-        total_modules: row.try_get("total_modules")?,
+        id: row.try_get("", "id")?,
+        name: row.try_get("", "name")?,
+        identifier: row.try_get("", "identifier")?,
+        is_member: row.try_get("", "is_member")?,
+        total_members: row.try_get("", "total_members")?,
+        total_cycles: row.try_get("", "total_cycles")?,
+        total_modules: row.try_get("", "total_modules")?,
         member_role: member_role.map(i32::from),
-        is_deployed: row.try_get("is_deployed")?,
+        is_deployed: row.try_get("", "is_deployed")?,
         sort_order,
     })
-}
-
-/// Annotated project rows for the list base statement.
-pub async fn fetch_project_list<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-) -> Result<Vec<ProjectAnnotations>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&project_list_sql())
-        .bind(scope.workspace_slug)
-        .bind(scope.actor_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_project_annotations).collect()
-}
-
-/// Annotated project rows for the list-GET statement (with `sort_order`).
-pub async fn fetch_project_list_get<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-    order_by: &str,
-) -> Result<Vec<ProjectAnnotations>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&project_list_get_sql(order_by))
-        .bind(scope.workspace_slug)
-        .bind(scope.actor_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_project_annotations).collect()
-}
-
-/// Annotated project rows for the detail base statement (no `sort_order`).
-pub async fn fetch_project_detail<'e, E>(
-    ex: E,
-    scope: &TenantScope<'_>,
-) -> Result<Vec<ProjectAnnotations>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&project_detail_sql())
-        .bind(scope.workspace_slug)
-        .bind(scope.actor_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_project_annotations).collect()
 }
 
 /// One workspace membership with its workspace (`member.py:86-89` loop shape:
@@ -657,30 +829,32 @@ pub struct WorkspaceMemberRow {
     pub workspace_id: uuid::Uuid,
 }
 
-/// Map one Q3 row.
-pub fn map_workspace_member(row: &PgRow) -> Result<WorkspaceMemberRow, sqlx::Error> {
-    // `workspace_members.role` is smallint (INT2); widen to i32.
-    let role: i16 = row.try_get("role")?;
-    Ok(WorkspaceMemberRow {
-        member_id: row.try_get("member_id")?,
-        role: i32::from(role),
-        workspace_id: row.try_get("workspace_id")?,
-    })
+/// Raw Q3 row (`role` is `smallint`, widened to `i32` on mapping).
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceMemberRaw {
+    member_id: uuid::Uuid,
+    role: i16,
+    workspace_id: uuid::Uuid,
 }
 
-/// Workspace memberships for a resolved workspace id.
-pub async fn fetch_workspace_members<'e, E>(
-    ex: E,
-    workspace_id: uuid::Uuid,
-) -> Result<Vec<WorkspaceMemberRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(WORKSPACE_MEMBERS_SQL)
-        .bind(workspace_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_workspace_member).collect()
+impl From<WorkspaceMemberRaw> for WorkspaceMemberRow {
+    fn from(row: WorkspaceMemberRaw) -> Self {
+        Self {
+            member_id: row.member_id,
+            role: i32::from(row.role),
+            workspace_id: row.workspace_id,
+        }
+    }
+}
+
+/// Map one Q3 row.
+pub fn map_workspace_member(row: &QueryResult) -> Result<WorkspaceMemberRow, DbErr> {
+    let role: i16 = row.try_get("", "role")?;
+    Ok(WorkspaceMemberRow {
+        member_id: row.try_get("", "member_id")?,
+        role: i32::from(role),
+        workspace_id: row.try_get("", "workspace_id")?,
+    })
 }
 
 /// The `UserLiteSerializer` columns the member views embed
@@ -695,14 +869,36 @@ pub struct MemberUserLite {
     pub avatar: Option<String>,
 }
 
+/// Raw user row for the lite projection.
+#[derive(Debug, FromQueryResult)]
+struct MemberUserRaw {
+    id: uuid::Uuid,
+    first_name: String,
+    last_name: String,
+    email: String,
+    avatar: Option<String>,
+}
+
+impl From<MemberUserRaw> for MemberUserLite {
+    fn from(row: MemberUserRaw) -> Self {
+        Self {
+            id: row.id,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            email: row.email,
+            avatar: row.avatar,
+        }
+    }
+}
+
 /// Map one user row.
-pub fn map_member_user(row: &PgRow) -> Result<MemberUserLite, sqlx::Error> {
+pub fn map_member_user(row: &QueryResult) -> Result<MemberUserLite, DbErr> {
     Ok(MemberUserLite {
-        id: row.try_get("id")?,
-        first_name: row.try_get("first_name")?,
-        last_name: row.try_get("last_name")?,
-        email: row.try_get("email")?,
-        avatar: row.try_get("avatar")?,
+        id: row.try_get("", "id")?,
+        first_name: row.try_get("", "first_name")?,
+        last_name: row.try_get("", "last_name")?,
+        email: row.try_get("", "email")?,
+        avatar: row.try_get("", "avatar")?,
     })
 }
 
@@ -714,12 +910,30 @@ pub struct ProjectMemberRef {
     pub member_id: Option<uuid::Uuid>,
 }
 
+/// Raw Q5 row.
+#[derive(Debug, FromQueryResult)]
+struct ProjectMemberRefRaw {
+    id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    member_id: Option<uuid::Uuid>,
+}
+
+impl From<ProjectMemberRefRaw> for ProjectMemberRef {
+    fn from(row: ProjectMemberRefRaw) -> Self {
+        Self {
+            id: row.id,
+            project_id: row.project_id,
+            member_id: row.member_id,
+        }
+    }
+}
+
 /// Map one Q5 membership row.
-pub fn map_project_member_ref(row: &PgRow) -> Result<ProjectMemberRef, sqlx::Error> {
+pub fn map_project_member_ref(row: &QueryResult) -> Result<ProjectMemberRef, DbErr> {
     Ok(ProjectMemberRef {
-        id: row.try_get("id")?,
-        project_id: row.try_get("project_id")?,
-        member_id: row.try_get("member_id")?,
+        id: row.try_get("", "id")?,
+        project_id: row.try_get("", "project_id")?,
+        member_id: row.try_get("", "member_id")?,
     })
 }
 
@@ -733,22 +947,215 @@ pub struct InviteRow {
     pub role: i32,
 }
 
+/// Raw Q6 row (`role` is `smallint`; `responded_at` is `timestamptz`).
+#[derive(Debug, FromQueryResult)]
+struct InviteRaw {
+    id: uuid::Uuid,
+    email: String,
+    accepted: bool,
+    responded_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    role: i16,
+}
+
+impl From<InviteRaw> for InviteRow {
+    fn from(row: InviteRaw) -> Self {
+        Self {
+            id: row.id,
+            email: row.email,
+            accepted: row.accepted,
+            responded_at: row.responded_at.map(|t| t.with_timezone(&chrono::Utc)),
+            role: i32::from(row.role),
+        }
+    }
+}
+
 /// Map one Q6 invite row.
-pub fn map_invite_row(row: &PgRow) -> Result<InviteRow, sqlx::Error> {
-    // `workspace_member_invites.role` is smallint (INT2); widen to i32.
-    let role: i16 = row.try_get("role")?;
+pub fn map_invite_row(row: &QueryResult) -> Result<InviteRow, DbErr> {
+    let role: i16 = row.try_get("", "role")?;
+    let responded: Option<chrono::DateTime<chrono::FixedOffset>> =
+        row.try_get("", "responded_at")?;
     Ok(InviteRow {
-        id: row.try_get("id")?,
-        email: row.try_get("email")?,
-        accepted: row.try_get("accepted")?,
-        responded_at: row.try_get("responded_at")?,
+        id: row.try_get("", "id")?,
+        email: row.try_get("", "email")?,
+        accepted: row.try_get("", "accepted")?,
+        responded_at: responded.map(|t| t.with_timezone(&chrono::Utc)),
         role: i32::from(role),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Fetches (SeaORM over `ConnectionTrait`, errors `DbErr`)
+// ---------------------------------------------------------------------------
+
+/// Whether the workspace slug exists (the `exists()` branch).
+pub async fn fetch_workspace_exists<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+) -> Result<bool, DbErr> {
+    let stmt = workspace_exists(scope);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    Ok(row.is_some())
+}
+
+/// Workspace id for the scope slug, or `None` (the 400 branch).
+pub async fn fetch_workspace_id<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+) -> Result<Option<uuid::Uuid>, DbErr> {
+    let stmt = workspace_id_for_slug(scope.workspace_slug);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    row.map(|r| r.try_get::<uuid::Uuid>("", "id")).transpose()
+}
+
+/// Member ids for a project, NULLs dropped.
+///
+/// `member` is nullable; `id__in` never matches NULL, so NULLs are filtered
+/// before the users query.
+pub async fn fetch_project_member_ids<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<uuid::Uuid>, DbErr> {
+    let stmt = project_member_ids_stmt(scope.workspace_slug, project_id);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| r.try_get::<Option<uuid::Uuid>>("", "member_id"))
+        .collect::<Result<Vec<Option<uuid::Uuid>>, DbErr>>()
+        .map(|ids| ids.into_iter().flatten().collect())
+}
+
+/// Users for a member-id list; empty in, empty out with no query.
+///
+/// Mirrors Django's `id__in=[]` empty-result short-circuit: no statement is
+/// issued for an empty list.
+pub async fn fetch_project_users<C: ConnectionTrait>(
+    db: &C,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<MemberUserLite>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stmt = project_users_stmt(ids);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| MemberUserRaw::from_query_result(r, "").map(MemberUserLite::from))
+        .collect()
+}
+
+/// Membership reference for a detail lookup, or `None` (the 404 branch).
+pub async fn fetch_project_member<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+    project_id: uuid::Uuid,
+    pk: uuid::Uuid,
+) -> Result<Option<ProjectMemberRef>, DbErr> {
+    let stmt = project_member_get_stmt(scope.workspace_slug, project_id, pk);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    row.map(|r| ProjectMemberRefRaw::from_query_result(&r, "").map(ProjectMemberRef::from))
+        .transpose()
+}
+
+/// User by id, or `None` (the 404 branch).
+pub async fn fetch_user_by_id<C: ConnectionTrait>(
+    db: &C,
+    member_id: uuid::Uuid,
+) -> Result<Option<MemberUserLite>, DbErr> {
+    let stmt = user_get_stmt(member_id);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    row.map(|r| MemberUserRaw::from_query_result(&r, "").map(MemberUserLite::from))
+        .transpose()
+}
+
+/// All invites for the scope workspace.
+pub async fn fetch_invites<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+) -> Result<Vec<InviteRow>, DbErr> {
+    let stmt = invites_list_stmt(scope.workspace_slug);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| InviteRaw::from_query_result(r, "").map(InviteRow::from))
+        .collect()
+}
+
+/// One invite by pk, or `None` (the 404 branch).
+pub async fn fetch_invite<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+    pk: uuid::Uuid,
+) -> Result<Option<InviteRow>, DbErr> {
+    let stmt = invite_get_stmt(scope.workspace_slug, pk);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    row.map(|r| InviteRaw::from_query_result(&r, "").map(InviteRow::from))
+        .transpose()
+}
+
+/// Resolve raw project input (uuid or identifier) to the project id.
+///
+/// Returns `None` when nothing matches; the caller raises the generic 404.
+pub async fn fetch_project_id<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+    raw: &str,
+) -> Result<Option<uuid::Uuid>, DbErr> {
+    let stmt = resolve_project(scope, raw);
+    let row = db.query_one(DbBackend::Postgres.build(&stmt)).await?;
+    row.map(|r| r.try_get::<uuid::Uuid>("", "id")).transpose()
+}
+
+/// Annotated project rows for the list base statement.
+pub async fn fetch_project_list<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+) -> Result<Vec<ProjectAnnotations>, DbErr> {
+    let stmt = project_list(scope);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| ProjectBaseRow::from_query_result(r, "").map(ProjectAnnotations::from))
+        .collect()
+}
+
+/// Annotated project rows for the list-GET statement (with `sort_order`).
+pub async fn fetch_project_list_get<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+    order_by: &str,
+) -> Result<Vec<ProjectAnnotations>, DbErr> {
+    let stmt = project_list_get(scope, order_by);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| ProjectGetRow::from_query_result(r, "").map(ProjectAnnotations::from))
+        .collect()
+}
+
+/// Annotated project rows for the detail base statement (no `sort_order`).
+pub async fn fetch_project_detail<C: ConnectionTrait>(
+    db: &C,
+    scope: &TenantScope<'_>,
+) -> Result<Vec<ProjectAnnotations>, DbErr> {
+    let stmt = project_detail(scope);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| ProjectBaseRow::from_query_result(r, "").map(ProjectAnnotations::from))
+        .collect()
+}
+
+/// Workspace memberships for a resolved workspace id.
+pub async fn fetch_workspace_members<C: ConnectionTrait>(
+    db: &C,
+    workspace_id: uuid::Uuid,
+) -> Result<Vec<WorkspaceMemberRow>, DbErr> {
+    let stmt = workspace_members_stmt(workspace_id);
+    let rows = db.query_all(DbBackend::Postgres.build(&stmt)).await?;
+    rows.iter()
+        .map(|r| WorkspaceMemberRaw::from_query_result(r, "").map(WorkspaceMemberRow::from))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
     use std::path::{Path, PathBuf};
 
     fn fixtures_dir() -> PathBuf {
@@ -761,11 +1168,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
     }
 
-    /// One statement line cleaned for comparison: strip a leading `--`
-    /// marker (the fixture records some statements behind it), cut trailing
-    /// `;` and any trailing `--` comment. Leading indentation of real
-    /// statement lines is preserved. (`--` never occurs inside the SQL
-    /// itself in this fixture.)
+    fn fixture_lines() -> Vec<String> {
+        read_fixture().lines().map(str::to_owned).collect()
+    }
+
     fn clean(line: &str) -> String {
         let t = line.trim_start();
         let (is_comment, body) = match t.strip_prefix("--") {
@@ -784,7 +1190,6 @@ mod tests {
         }
     }
 
-    /// Joining lines `from`..=`to` (inclusive, 0-based) with `\n`.
     fn block(lines: &[&str], from: usize, to: usize) -> String {
         lines[from..=to]
             .iter()
@@ -793,84 +1198,85 @@ mod tests {
             .join("\n")
     }
 
-    fn fixture_lines() -> Vec<String> {
-        read_fixture().lines().map(str::to_owned).collect()
+    fn render(sel: &SelectStatement) -> String {
+        sel.to_string(PostgresQueryBuilder)
+    }
+
+    fn actor() -> uuid::Uuid {
+        uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
+    }
+
+    fn scope() -> TenantScope<'static> {
+        TenantScope::new("acme", actor())
     }
 
     #[test]
-    fn list_base_matches_fixture_q1() {
-        let raw = read_fixture();
-        let lines: Vec<&str> = raw.lines().collect();
-        let from = lines
-            .iter()
-            .position(|l| l.trim() == "SELECT p.*,")
-            .expect("Q1 SELECT p.*,");
-        let to = lines
-            .iter()
-            .position(|l| l.trim() == "GROUP BY p.id, w.id")
-            .expect("Q1 GROUP BY");
-        let expected = block(&lines, from, to)
-            .replace("%(slug)s", "$1")
-            .replace("%(user)s", "$2");
-        // The base is Q1 plus the `select_related("project_lead")` join
-        // Django emits (`views/project.py:92`; nullable FK, so `LEFT
-        // OUTER`); the fixture abbreviates the shape to `SELECT p.*` plus
-        // the scoping join, so the comparison drops exactly that line.
-        let without_lead: String = PROJECT_LIST_BASE_SQL
-            .lines()
-            .filter(|l| !l.contains("users project_lead"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(without_lead, expected);
-        assert!(PROJECT_LIST_BASE_SQL
-            .contains("LEFT OUTER JOIN users project_lead ON p.project_lead_id = project_lead.id"));
-    }
-
-    #[test]
-    fn detail_base_shares_q1_annotations_and_scoping() {
-        for fragment in [
-            ") AS is_member,",
-            ") AS total_members,",
-            ") AS total_cycles,",
-            ") AS total_modules,",
-            ") AS member_role,",
-            ") AS is_deployed",
-            "LEFT OUTER JOIN project_members vis",
-            "AND (vis.id IS NOT NULL OR p.network = 2)",
-            "GROUP BY p.id, w.id",
+    fn list_base_carries_q1_annotations_scoping_and_grouping() {
+        let sql = render(&project_list(&scope()));
+        assert!(sql.contains(r#"FROM "projects" AS "p""#), "{sql}");
+        assert!(
+            sql.contains(r#"INNER JOIN "workspaces" AS "w" ON "p"."workspace_id" = "w"."id""#),
+            "{sql}"
+        );
+        for alias in [
+            r#"AS "is_member""#,
+            r#"AS "total_members""#,
+            r#"AS "total_cycles""#,
+            r#"AS "total_modules""#,
+            r#"AS "member_role""#,
+            r#"AS "is_deployed""#,
         ] {
-            assert!(
-                PROJECT_DETAIL_BASE_SQL.contains(fragment),
-                "detail base misses {fragment}"
-            );
-        }
-        for join in [
-            "INNER JOIN users workspace_owner ON w.owner_id = workspace_owner.id",
-            "LEFT OUTER JOIN users default_assignee ON p.default_assignee_id = default_assignee.id",
-            "LEFT OUTER JOIN users project_lead ON p.project_lead_id = project_lead.id",
-        ] {
-            assert!(
-                PROJECT_DETAIL_BASE_SQL.contains(join),
-                "detail base misses select_related join {join}"
-            );
+            assert!(sql.contains(alias), "{sql}");
         }
         assert!(
-            !PROJECT_DETAIL_BASE_SQL.contains("sort_order"),
-            "detail base must not annotate sort_order (fixture rows note)"
+            sql.contains(r#"LEFT JOIN "users" AS "project_lead""#),
+            "{sql}"
         );
+        assert!(
+            sql.contains(r#"LEFT JOIN "project_members" AS "vis""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""vis"."id" IS NOT NULL"#), "{sql}");
+        assert!(sql.contains(r#""p"."network" = 2"#), "{sql}");
+        assert!(sql.contains(r#"GROUP BY "p"."id", "w"."id""#), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "p"."created_at" DESC"#), "{sql}");
+        assert!(sql.contains(r#""w"."slug" = 'acme'"#), "{sql}");
+        assert!(!sql.contains("sort_order"), "{sql}");
     }
 
     #[test]
-    fn list_get_adds_sort_order_annotation_and_default_order() {
-        let sql = project_list_get_sql("sort_order");
-        assert!(sql.contains(SORT_ORDER_ANNOTATION_SQL));
-        assert!(sql.ends_with("ORDER BY sort_order"));
-        // Unknown keys fall back to the GET default.
-        assert!(project_list_get_sql("bogus").ends_with("ORDER BY sort_order"));
-        assert!(project_list_get_sql("-created_at").ends_with("ORDER BY p.created_at DESC"));
-        // Base statements keep the kwargs default.
-        assert!(project_list_sql().ends_with("ORDER BY p.created_at DESC"));
-        assert!(project_detail_sql().ends_with("ORDER BY p.created_at DESC"));
+    fn detail_base_adds_select_related_joins_without_sort_order() {
+        let sql = render(&project_detail(&scope()));
+        for join in [
+            r#"INNER JOIN "users" AS "workspace_owner" ON "w"."owner_id" = "workspace_owner"."id""#,
+            r#"LEFT JOIN "users" AS "default_assignee" ON "p"."default_assignee_id" = "default_assignee"."id""#,
+            r#"LEFT JOIN "users" AS "project_lead""#,
+        ] {
+            assert!(sql.contains(join), "{sql}");
+        }
+        assert!(!sql.contains("sort_order"), "{sql}");
+        assert!(sql.contains(r#"GROUP BY "p"."id", "w"."id""#), "{sql}");
+    }
+
+    #[test]
+    fn list_get_adds_sort_order_annotation_and_get_ordering() {
+        let sql = render(&project_list_get(&scope(), "sort_order"));
+        assert!(sql.contains(r#"AS "sort_order""#), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "sort_order" ASC"#), "{sql}");
+        let bogus = render(&project_list_get(&scope(), "bogus"));
+        assert!(bogus.contains(r#"ORDER BY "sort_order" ASC"#), "{bogus}");
+        let created = render(&project_list_get(&scope(), "-created_at"));
+        assert!(
+            created.contains(r#"ORDER BY "p"."created_at" DESC"#),
+            "{created}"
+        );
+        let base = render(&project_list(&scope()));
+        assert!(base.contains(r#"ORDER BY "p"."created_at" DESC"#), "{base}");
+        let detail = render(&project_detail(&scope()));
+        assert!(
+            detail.contains(r#"ORDER BY "p"."created_at" DESC"#),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -887,9 +1293,43 @@ mod tests {
     }
 
     #[test]
+    fn custom_list_get_carries_sort_order_and_single_order_by() {
+        // PIDASHCONV-1720: custom keys must carry sort_order and must not
+        // leak the list base's `ORDER BY p.created_at DESC`.
+        let sql = render(&project_list_get_custom(&scope(), "identifier", Order::Asc));
+        assert!(sql.contains(r#"AS "sort_order""#), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "p"."identifier" ASC"#), "{sql}");
+        assert!(!sql.contains(r#"ORDER BY "p"."created_at" DESC"#), "{sql}");
+        assert!(
+            sql.matches("ORDER BY").count() == 1,
+            "exactly one ORDER BY expected, got: {sql}"
+        );
+
+        // Annotation keys order by their alias.
+        let total = render(&project_list_get_custom(
+            &scope(),
+            "total_members",
+            Order::Desc,
+        ));
+        assert!(
+            total.contains(r#"ORDER BY "total_members" DESC"#),
+            "{total}"
+        );
+        assert!(!total.contains(r#""p"."total_members""#), "{total}");
+        assert!(total.contains(r#"AS "sort_order""#), "{total}");
+
+        // Reverse direction flips only the direction, not the target.
+        let rev = render(&project_list_get_custom(
+            &scope(),
+            "identifier",
+            Order::Desc,
+        ));
+        assert!(rev.contains(r#"ORDER BY "p"."identifier" DESC"#), "{rev}");
+    }
+
+    #[test]
     fn q2_sort_order_annotation_matches_fixture_shape() {
         let raw = read_fixture();
-        // The fixture records the annotation behind `--` comment lines.
         for fragment in [
             "SELECT pm.sort_order FROM project_members pm",
             "pm.member_id = %(user)s AND pm.project_id = p.id",
@@ -898,13 +1338,10 @@ mod tests {
         ] {
             assert!(raw.contains(fragment), "fixture Q2 misses {fragment}");
         }
-        let with_binds = SORT_ORDER_ANNOTATION_SQL.replace("$2", "%(user)s");
-        for line in with_binds.lines().map(str::trim) {
-            assert!(
-                raw.contains(line),
-                "annotation line not in fixture Q2: {line}"
-            );
-        }
+        let sql = render(&project_list_get(&scope(), "sort_order"));
+        assert!(sql.contains(r#""pm"."sort_order""#), "{sql}");
+        assert!(sql.contains(r#""pm"."member_id""#), "{sql}");
+        assert!(sql.contains(r#"AS "sort_order""#), "{sql}");
     }
 
     #[test]
@@ -915,19 +1352,33 @@ mod tests {
             .iter()
             .position(|l| clean(l).starts_with("SELECT 1 FROM workspaces"))
             .expect("Q3 exists");
+        assert!(clean(refs[exists_at]).contains("slug = %(slug)s"));
         let members_at = refs
             .iter()
             .position(|l| l.trim_start().starts_with("SELECT wm.*, u.*"))
             .expect("Q3 members");
-        let exists_stmt = clean(refs[exists_at]).replace("%(slug)s", "$1");
-        assert_eq!(
-            WORKSPACE_EXISTS_SQL
-                .strip_suffix(" LIMIT 1")
-                .expect("exists LIMIT"),
-            exists_stmt
+        let members_stmt = block(&refs, members_at, members_at + 2);
+        assert!(members_stmt.contains("wm.workspace_id = %(ws)s"));
+        let exists = render(&workspace_exists(&scope()));
+        assert!(exists.contains(r#"FROM "workspaces""#), "{exists}");
+        assert!(exists.contains(r#"LIMIT 1"#), "{exists}");
+        assert!(!exists.contains("deleted_at"), "{exists}");
+        let members = render(&workspace_members_stmt(
+            uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+        ));
+        assert!(
+            members.contains(r#"FROM "workspace_members" AS "wm""#),
+            "{members}"
         );
-        let members_stmt = block(&refs, members_at, members_at + 2).replace("%(ws)s", "$1");
-        assert_eq!(WORKSPACE_MEMBERS_SQL, members_stmt);
+        assert!(
+            members.contains(r#"INNER JOIN "users" AS "u" ON "u"."id" = "wm"."member_id""#),
+            "{members}"
+        );
+        assert!(
+            members.contains(r#""wm"."deleted_at" IS NULL"#),
+            "{members}"
+        );
+        assert!(members.contains(r#""u"."deleted_at" IS NULL"#), "{members}");
     }
 
     #[test]
@@ -938,27 +1389,20 @@ mod tests {
             .iter()
             .position(|l| l.trim_start().starts_with("SELECT pm.member_id"))
             .expect("Q4 ids");
-        let ids_stmt = block(&refs, ids_at, ids_at + 3)
-            .replace("%(project)s", "$1")
-            .replace("%(slug)s", "$2");
-        assert_eq!(PROJECT_MEMBER_IDS_SQL, ids_stmt);
-        let users_line = refs
-            .iter()
-            .find(|l| l.trim_start().starts_with("SELECT u.* FROM users"))
-            .expect("Q4 users");
-        let raw_line = clean(users_line);
-        assert!(
-            raw_line.contains("u.id IN (...)"),
-            "fixture Q4 IN shape: {raw_line}"
-        );
-        assert_eq!(
-            project_users_sql(2),
-            "SELECT u.* FROM users u WHERE u.id IN ($1, $2) AND u.deleted_at IS NULL"
-        );
-        assert_eq!(
-            project_users_sql(1),
-            "SELECT u.* FROM users u WHERE u.id IN ($1) AND u.deleted_at IS NULL"
-        );
+        assert!(block(&refs, ids_at, ids_at + 3).contains("pm.project_id = %(project)s"));
+        let project_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let ids = render(&project_member_ids_stmt("acme", project_id));
+        assert!(ids.contains(r#""pm"."member_id""#), "{ids}");
+        assert!(ids.contains(r#"JOIN "workspaces" AS "w""#), "{ids}");
+        assert!(ids.contains(r#""w"."slug" = 'acme'"#), "{ids}");
+        assert!(!ids.contains("is_active"), "{ids}");
+        let users = render(&project_users_stmt(&[
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            uuid::Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
+        ]));
+        assert!(users.contains(r#"FROM "users" AS "u""#), "{users}");
+        assert!(users.contains(" IN ("), "{users}");
+        assert!(users.contains(r#""u"."deleted_at" IS NULL"#), "{users}");
     }
 
     #[test]
@@ -972,17 +1416,18 @@ mod tests {
                     .starts_with("SELECT * FROM project_members pm JOIN workspaces")
             })
             .expect("Q5 get");
-        let get_stmt = block(&refs, get_at, get_at + 2)
-            .replace("%(project)s", "$1")
-            .replace("%(slug)s", "$2")
-            .replace("%(pk)s", "$3")
-            .replacen("SELECT *", "SELECT pm.*", 1);
-        assert_eq!(PROJECT_MEMBER_GET_SQL, get_stmt);
-        let user_line = refs
-            .iter()
-            .find(|l| l.trim_start().starts_with("SELECT * FROM users WHERE"))
-            .expect("Q5 user");
-        assert_eq!(USER_GET_SQL, clean(user_line).replace("%(member)s", "$1"));
+        assert!(block(&refs, get_at, get_at + 2).contains("pm.id = %(pk)s"));
+        let project_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let pk = uuid::Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        let got = render(&project_member_get_stmt("acme", project_id, pk));
+        assert!(got.contains(r#"FROM "project_members" AS "pm""#), "{got}");
+        assert!(got.contains(r#""pm"."id""#), "{got}");
+        assert!(got.contains(r#""pm"."deleted_at" IS NULL"#), "{got}");
+        assert!(!got.contains("is_active"), "{got}");
+        let member_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let user = render(&user_get_stmt(member_id));
+        assert!(user.contains(r#"FROM "users""#), "{user}");
+        assert!(user.contains(r#""users"."deleted_at" IS NULL"#), "{user}");
     }
 
     #[test]
@@ -996,35 +1441,37 @@ mod tests {
                     .starts_with("SELECT * FROM workspace_member_invites i")
             })
             .expect("Q6 list");
-        let list_stmt = block(&refs, list_at, list_at + 2)
-            .replace("%(slug)s", "$1")
-            .replacen("SELECT *", "SELECT i.*", 1);
-        assert_eq!(INVITES_LIST_SQL, list_stmt);
-        // get_object adds the pk predicate to the same scope.
-        assert_eq!(
-            INVITE_GET_SQL,
-            format!("{list_stmt} AND i.id = $2").replace("%(slug)s", "$1")
+        assert!(block(&refs, list_at, list_at + 2).contains("w.slug = %(slug)s"));
+        let list = render(&invites_list_stmt("acme"));
+        assert!(
+            list.contains(r#"FROM "workspace_member_invites" AS "i""#),
+            "{list}"
         );
-        assert!(INVITE_GET_SQL.contains("AND i.id = $2"));
+        assert!(!list.contains("ORDER BY"), "{list}");
+        let pk = uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let one = render(&invite_get_stmt("acme", pk));
+        assert!(one.contains(r#""i"."id""#), "{one}");
+        assert!(one.contains(r#"JOIN "workspaces" AS "w""#), "{one}");
     }
 
     #[test]
     fn resolve_sql_branches_match_lookup() {
-        assert_eq!(
-            resolve_project_sql("11111111-1111-1111-1111-111111111111"),
-            RESOLVE_BY_PK_SQL
-        );
-        assert_eq!(resolve_project_sql("eng"), RESOLVE_BY_IDENTIFIER_SQL);
-        assert_eq!(resolve_project_sql(" ENG "), RESOLVE_BY_IDENTIFIER_SQL);
-        assert_eq!(resolve_project_sql(""), RESOLVE_BY_IDENTIFIER_SQL);
+        let scope = scope();
+        let pk_sql = render(&resolve_project(
+            &scope,
+            "11111111-1111-1111-1111-111111111111",
+        ));
+        assert!(pk_sql.contains(r#""p"."id""#), "{pk_sql}");
+        assert!(pk_sql.contains(r#"LIMIT 1"#), "{pk_sql}");
+        let ident_sql = render(&resolve_project(&scope, "eng"));
+        assert!(ident_sql.contains(r#""p"."identifier""#), "{ident_sql}");
+        assert!(ident_sql.contains("'ENG'"), "{ident_sql}");
+        let padded = render(&resolve_project(&scope, " ENG "));
+        assert!(padded.contains("'ENG'"), "{padded}");
     }
 
-    // -- live scratch-DB tests (env-gated) -------------------------------
+    // -- live scratch-DB tests (env-gated, SeaORM over `TxConn`) ----------------
 
-    /// Scratch Postgres for the Done-when verification. Unset (plain
-    /// `cargo test`) skips these; CI sets no database either, so the suite
-    /// stays green offline. Run with e.g.
-    /// `export DATABASE_URL=postgresql://user@host/db` for the real check.
     async fn scratch_pool() -> Option<sqlx::PgPool> {
         match std::env::var("DATABASE_URL") {
             Ok(url) => Some(
@@ -1075,9 +1522,6 @@ mod tests {
         tx
     }
 
-    /// Seed the fixture shape: workspace `acme`, project Engine (`ENG`,
-    /// public), one private project, two human members + one bot membership
-    /// on Engine, one invite.
     async fn seed_full(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
         sqlx::query("INSERT INTO workspaces (id, slug, owner_id) VALUES ($1, 'acme', $2)")
             .bind(live_uuid(WS))
@@ -1112,8 +1556,6 @@ mod tests {
             .execute(&mut **tx)
             .await
             .expect("seed private project");
-        // `role` binds as i16: the live column is smallint (INT2), and the
-        // scratch DDL pins SMALLINT so these tests cover the INT2 decode.
         for (id, project, member, role, sort) in [
             (MEMBERSHIP, PROJECT, MEMBER, 20i16, 55535.0),
             (
@@ -1130,8 +1572,6 @@ mod tests {
                 15i16,
                 61000.0,
             ),
-            // The member also holds the private project: member scoping
-            // (`vis.id IS NOT NULL`) lists it, strangers never see it.
             (
                 "aaaaaaaa-1111-2222-3333-444444444444",
                 PRIVATE_PROJECT,
@@ -1166,10 +1606,6 @@ mod tests {
             .expect("seed invite");
     }
 
-    fn scope() -> TenantScope<'static> {
-        TenantScope::new("acme", live_uuid(MEMBER))
-    }
-
     #[tokio::test]
     async fn live_list_annotations_match_fixture_rows() {
         let Some(pool) = scratch_pool().await else {
@@ -1177,10 +1613,12 @@ mod tests {
         };
         let mut tx = live_tx(&pool).await;
         seed_full(&mut tx).await;
-        // GET variant: the fixture list_row, incl. sort_order.
-        let rows = fetch_project_list_get(&mut *tx, &scope(), "sort_order")
-            .await
-            .expect("list get");
+        let rows = {
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            fetch_project_list_get(&conn, &scope(), "sort_order")
+                .await
+                .expect("list get")
+        };
         assert_eq!(rows.len(), 2, "public + member-visible private project");
         let eng = rows
             .iter()
@@ -1190,23 +1628,23 @@ mod tests {
         assert_eq!(eng.identifier, "ENG");
         assert!(eng.is_member);
         assert_eq!(eng.member_role, Some(20));
-        // Two humans; the bot membership is excluded.
         assert_eq!(eng.total_members, 2);
         assert_eq!(eng.total_cycles, 0);
         assert_eq!(eng.total_modules, 0);
         assert!(!eng.is_deployed);
         assert_eq!(eng.sort_order, Some(55535.0));
-        // The private project lists through the membership branch.
         let sec = rows
             .iter()
             .find(|r| r.id == live_uuid(PRIVATE_PROJECT))
             .expect("Secret row");
         assert!(sec.is_member);
         assert_eq!(sec.member_role, Some(15));
-        // Base statement: same annotations, no sort_order column.
-        let base = fetch_project_list(&mut *tx, &scope())
-            .await
-            .expect("list base");
+        let base = {
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            fetch_project_list(&conn, &scope())
+                .await
+                .expect("list base")
+        };
         let eng_base = base
             .iter()
             .find(|r| r.id == live_uuid(PROJECT))
@@ -1222,26 +1660,29 @@ mod tests {
         };
         let mut tx = live_tx(&pool).await;
         seed_full(&mut tx).await;
-        // A stranger (no membership): only the public project is listed,
-        // with NULL member_role and is_member false.
         let stranger = TenantScope::new("acme", live_uuid("00000000-0000-0000-0000-000000000000"));
-        let rows = fetch_project_list(&mut *tx, &stranger)
-            .await
-            .expect("stranger list");
+        let rows = {
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            fetch_project_list(&conn, &stranger)
+                .await
+                .expect("stranger list")
+        };
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, live_uuid(PROJECT));
         assert!(!rows[0].is_member);
         assert_eq!(rows[0].member_role, None);
-        // Detail base carries the same scoping.
-        let detail = fetch_project_detail(&mut *tx, &stranger)
-            .await
-            .expect("stranger detail");
+        let detail = {
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            fetch_project_detail(&conn, &stranger)
+                .await
+                .expect("stranger detail")
+        };
         assert_eq!(detail.len(), 1);
-        // Unknown workspace slug: nothing.
         let elsewhere = TenantScope::new("nope", live_uuid(MEMBER));
-        let empty = fetch_project_list(&mut *tx, &elsewhere)
-            .await
-            .expect("empty");
+        let empty = {
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            fetch_project_list(&conn, &elsewhere).await.expect("empty")
+        };
         assert!(empty.is_empty());
     }
 
@@ -1253,148 +1694,62 @@ mod tests {
         let mut tx = live_tx(&pool).await;
         seed_full(&mut tx).await;
         assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), PROJECT)
-                .await
-                .expect("pk"),
-            Some(live_uuid(PROJECT))
-        );
-        // Identifier: exact, case-insensitive input, surrounding space OK.
-        assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), "eng")
-                .await
-                .expect("ident"),
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), PROJECT)
+                    .await
+                    .expect("pk")
+            },
             Some(live_uuid(PROJECT))
         );
         assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), " ENG ")
-                .await
-                .expect("padded"),
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), "eng")
+                    .await
+                    .expect("ident")
+            },
             Some(live_uuid(PROJECT))
         );
-        // A UUID-looking value is never tried as an identifier.
         assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), "00000000-0000-0000-0000-000000000000")
-                .await
-                .expect("bogus uuid"),
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), " ENG ")
+                    .await
+                    .expect("padded")
+            },
+            Some(live_uuid(PROJECT))
+        );
+        assert_eq!(
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), "00000000-0000-0000-0000-000000000000")
+                    .await
+                    .expect("bogus uuid")
+            },
             None
         );
         assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), "NOPE")
-                .await
-                .expect("unknown"),
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), "NOPE")
+                    .await
+                    .expect("unknown")
+            },
             None
         );
-        // Soft-deleted projects do not resolve.
         sqlx::query("UPDATE projects SET deleted_at = now() WHERE id = $1")
             .bind(live_uuid(PROJECT))
             .execute(&mut *tx)
             .await
             .expect("soft delete");
         assert_eq!(
-            fetch_project_id(&mut *tx, &scope(), "ENG")
-                .await
-                .expect("deleted"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn live_members_invites_detail() {
-        let Some(pool) = scratch_pool().await else {
-            return;
-        };
-        let mut tx = live_tx(&pool).await;
-        seed_full(&mut tx).await;
-        assert!(fetch_workspace_exists(&mut *tx, &scope())
-            .await
-            .expect("exists"));
-        assert!(
-            !fetch_workspace_exists(&mut *tx, &TenantScope::new("nope", live_uuid(MEMBER)))
-                .await
-                .expect("missing")
-        );
-        let ws_id = fetch_workspace_id(&mut *tx, &scope())
-            .await
-            .expect("ws id")
-            .expect("workspace");
-        assert_eq!(ws_id, live_uuid(WS));
-        let members = fetch_workspace_members(&mut *tx, ws_id)
-            .await
-            .expect("members");
-        assert_eq!(members.len(), 1);
-        // Fixture workspace_member_row shape.
-        assert_eq!(members[0].member_id, live_uuid(MEMBER));
-        assert_eq!(members[0].role, 20);
-        assert_eq!(members[0].workspace_id, live_uuid(WS));
-        // Q4: ids then users (bot included — no bot filter on this path).
-        let ids = fetch_project_member_ids(&mut *tx, &scope(), live_uuid(PROJECT))
-            .await
-            .expect("ids");
-        assert_eq!(ids.len(), 3);
-        let users = fetch_project_users(&mut *tx, &ids).await.expect("users");
-        assert_eq!(users.len(), 3);
-        let ct = users
-            .iter()
-            .find(|u| u.id == live_uuid(MEMBER))
-            .expect("Ct Member");
-        // Fixture member_user_row shape.
-        assert_eq!(ct.email, "m@example.com");
-        assert_eq!(ct.first_name, "Ct");
-        assert_eq!(ct.last_name, "Member");
-        // Empty id list short-circuits with no query.
-        assert!(fetch_project_users(&mut *tx, &[])
-            .await
-            .expect("empty")
-            .is_empty());
-        // Q5 detail + user.
-        let pm = fetch_project_member(
-            &mut *tx,
-            &scope(),
-            live_uuid(PROJECT),
-            live_uuid(MEMBERSHIP),
-        )
-        .await
-        .expect("detail")
-        .expect("membership");
-        assert_eq!(pm.member_id, Some(live_uuid(MEMBER)));
-        let user = fetch_user_by_id(&mut *tx, live_uuid(MEMBER))
-            .await
-            .expect("user")
-            .expect("user row");
-        assert_eq!(user.email, "m@example.com");
-        assert_eq!(
-            fetch_project_member(
-                &mut *tx,
-                &scope(),
-                live_uuid(PROJECT),
-                live_uuid("00000000-0000-0000-0000-000000000000")
-            )
-            .await
-            .expect("missing membership"),
-            None
-        );
-        // Q6 invites.
-        let invites = fetch_invites(&mut *tx, &scope()).await.expect("invites");
-        assert_eq!(invites.len(), 1);
-        // Fixture invite_row shape.
-        assert_eq!(invites[0].id, live_uuid(INVITE));
-        assert_eq!(invites[0].email, "new@example.com");
-        assert!(!invites[0].accepted);
-        assert_eq!(invites[0].responded_at, None);
-        assert_eq!(invites[0].role, 15);
-        let one = fetch_invite(&mut *tx, &scope(), live_uuid(INVITE))
-            .await
-            .expect("invite")
-            .expect("invite row");
-        assert_eq!(one, invites[0]);
-        assert_eq!(
-            fetch_invite(
-                &mut *tx,
-                &scope(),
-                live_uuid("00000000-0000-0000-0000-000000000000")
-            )
-            .await
-            .expect("missing invite"),
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                fetch_project_id(&conn, &scope(), "ENG")
+                    .await
+                    .expect("deleted")
+            },
             None
         );
     }

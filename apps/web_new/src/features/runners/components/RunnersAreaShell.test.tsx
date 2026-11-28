@@ -75,12 +75,12 @@ describe("RunnersAreaShell", () => {
         access="allowed"
         runners={[runner]}
         pathname="/acme/runners"
-        localContacts={[{ id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: null }]}
+        localContacts={[{ id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: null }]}
       >
         <p>child</p>
       </RunnersAreaShell>
     );
-    expect(screen.getByText("Built-in agent")).toBeInTheDocument();
+    expect(screen.getByText("Pi Dash Agent")).toBeInTheDocument();
   });
 
   it("composes the rail and the content column for an admitted viewer", () => {

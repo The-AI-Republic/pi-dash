@@ -32,6 +32,14 @@ export function shareableAddress(path: string): string {
   return platform.shareableUrl(path);
 }
 
+/**
+ * The origin shareable addresses carry (hosted app on desktop, page
+ * origin on web); throws when no hosted origin is configured.
+ */
+export function shareableOrigin(): string {
+  return new URL(shareableAddress("/")).origin;
+}
+
 /** Open `path`'s shareable address through the active platform. Rejects on failure. */
 export async function openShareAddress(path: string): Promise<void> {
   await platform.openExternal(shareableAddress(path));

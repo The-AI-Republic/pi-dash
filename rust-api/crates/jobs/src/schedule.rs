@@ -192,7 +192,7 @@ pub enum ScheduleError {
     BadCron { spec: String },
 }
 
-/// The 24 literal entries of `app.conf.beat_schedule` in
+/// The 27 literal entries of `app.conf.beat_schedule` in
 /// `apps/api/pi_dash/celery.py`, in file order.
 ///
 /// Note the two `delete_old_s3_link` entries (`01:30` and `03:45`): both
@@ -270,6 +270,13 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
             task: "runner.mark_offline_runners",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
+        // Pause the engine of machines whose credential ran out
+        // (`crontab(minute='*/5')`, #2910).
+        BeatEntry {
+            name: "runner-pause-engines-with-expired-credentials",
+            task: "runner.pause_engines_with_expired_credentials",
+            cadence: Cadence::Crontab(Crontab::parse("*/5", "*", "*", "*", "*").expect("valid")),
+        },
         // Recover runs stranded on a runner that stopped heartbeating;
         // without these a stranded run blocks its issue indefinitely
         // (`70d684af`).
@@ -281,6 +288,27 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
         BeatEntry {
             name: "runner-fail-runs-on-offline-runners",
             task: "runner.fail_runs_on_offline_runners",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        // Dedicated-runner bounds (§11.3, §12.1, PDASHOSS01-297):
+        // fail dedicated runs still unavailable after 12h, and sweep
+        // stranded dedicated pins (`crontab(minute='*/1')`).
+        BeatEntry {
+            name: "runner-fail-dedicated-runs",
+            task: "runner.fail_dedicated_runs",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        BeatEntry {
+            name: "runner-sweep-stranded-dedicated-runs",
+            task: "runner.sweep_stranded_dedicated_runs",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        // Unsatisfiable-pin recovery: releases wedged-busy pinned runners
+        // and auto-clears pins held past RUNNER_PIN_AUTO_RELEASE_SECS,
+        // then drains the affected pods (PDASHOSS01-233).
+        BeatEntry {
+            name: "runner-reconcile-unsatisfiable-pins",
+            task: "runner.reconcile_unsatisfiable_pins",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
         BeatEntry {
@@ -326,27 +354,16 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
     ]
 }
 
-/// Defaults for the 4 settings-backed entries registered in
+/// Defaults for the 2 settings-backed entries registered in
 /// `_register_settings_backed_beat_entries` (from `settings/common.py`).
-pub const DEFAULT_CLOUD_AGENT_DISPATCH_SECS: u64 = 10;
-pub const DEFAULT_CLOUD_AGENT_SWEEP_SECS: u64 = 30;
 pub const DEFAULT_MANAGED_RUNNER_SWEEP_SECS: u64 = 300;
 pub const DEFAULT_AGENT_RUN_TERMINAL_RECONCILE_SECS: u64 = 30;
 
-/// The 4 settings-backed entries with Django defaults. The scheduler loop
+/// The 2 settings-backed entries with Django defaults (the retired
+/// cloud scan/sweep entries died in P3 step A). The scheduler loop
 /// applies environment overrides on top via [`beat_schedule`].
 pub fn settings_backed_schedule() -> Vec<BeatEntry> {
     vec![
-        BeatEntry {
-            name: "cloud-agent-scan-queued-runs",
-            task: "cloud_agent.scan_queued_runs",
-            cadence: Cadence::IntervalSecs(DEFAULT_CLOUD_AGENT_DISPATCH_SECS),
-        },
-        BeatEntry {
-            name: "cloud-agent-sweep-stale-runs",
-            task: "cloud_agent.sweep_stale_runs",
-            cadence: Cadence::IntervalSecs(DEFAULT_CLOUD_AGENT_SWEEP_SECS),
-        },
         BeatEntry {
             name: "managed-runner-expire-waiting-runs",
             task: "managed_runner.expire_waiting_runs",
@@ -368,11 +385,9 @@ fn env_secs(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// The full schedule: the 24 literal entries plus the 4 settings-backed
+/// The full schedule: the 28 literal entries plus the 2 settings-backed
 /// entries with their Django-setting environment overrides applied
-/// (`CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS`,
-/// `CLOUD_AGENT_SWEEP_INTERVAL_SECONDS`,
-/// `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`,
+/// (`MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`,
 /// `AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS` — same names as
 /// `settings/common.py`).
 pub fn beat_schedule() -> Vec<BeatEntry> {
@@ -383,8 +398,6 @@ pub fn beat_schedule() -> Vec<BeatEntry> {
             continue;
         };
         let env_name = match entry.name {
-            "cloud-agent-scan-queued-runs" => "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "cloud-agent-sweep-stale-runs" => "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
             "managed-runner-expire-waiting-runs" => "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "agent-run-reconcile-terminal-effects" => {
                 "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS"
@@ -495,9 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_schedule_has_all_24_entries() {
+    fn literal_schedule_has_all_28_entries() {
         let schedule = literal_schedule();
-        assert_eq!(schedule.len(), 24);
+        assert_eq!(schedule.len(), 28);
         let names: Vec<_> = schedule.iter().map(|e| e.name).collect();
         for expected in [
             "check-every-five-minutes-to-send-email-notifications",
@@ -514,8 +527,12 @@ mod tests {
             "check-every-day-to-delete-exporter-history",
             "runner-expire-stale-approvals",
             "runner-mark-offline-runners",
+            "runner-pause-engines-with-expired-credentials",
             "runner-release-pins-on-offline-runners",
             "runner-fail-runs-on-offline-runners",
+            "runner-fail-dedicated-runs",
+            "runner-sweep-stranded-dedicated-runs",
+            "runner-reconcile-unsatisfiable-pins",
             "runner-reconcile-stalled-runs",
             "runner-sweep-agent-chat-state",
             "assistant-sweep-stale-turns",
@@ -530,29 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn full_schedule_adds_four_settings_backed_entries() {
+    fn full_schedule_adds_two_settings_backed_entries() {
         // Defaults only: a developer shell exporting the Django interval
         // names must not change what this asserts (overrides are covered
         // by `env_secs` fallback behavior, not here).
         for var in [
-            "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
         ] {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 30);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
-        assert_eq!(
-            find("cloud-agent-scan-queued-runs").cadence,
-            Cadence::IntervalSecs(10)
-        );
-        assert_eq!(
-            find("cloud-agent-sweep-stale-runs").cadence,
-            Cadence::IntervalSecs(30)
-        );
         assert_eq!(
             find("managed-runner-expire-waiting-runs").cadence,
             Cadence::IntervalSecs(300)

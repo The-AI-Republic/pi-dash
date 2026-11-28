@@ -24,8 +24,9 @@ export interface AdminSidebarEntryDef {
 
 /**
  * Sidebar entries in render order: general, email, authentication,
- * workspaces, AI, loop, runners. No image entry (removal target per
- * main#523); the runners entry sits last (target per main#534).
+ * workspaces, AI, loop, runners, runner models. No image entry
+ * (removal target per main#523); the runners entry sits second-to-last
+ * and the model catalog follows (NEWPIDASH-169, next to Runners).
  */
 export const ADMIN_SIDEBAR_ENTRIES: readonly AdminSidebarEntryDef[] = [
   {
@@ -76,6 +77,13 @@ export const ADMIN_SIDEBAR_ENTRIES: readonly AdminSidebarEntryDef[] = [
     description: "Machines running agents for this instance.",
     slug: "runners",
     href: "/god-mode/runners/",
+  },
+  {
+    key: "runner-models",
+    name: "Runner models",
+    description: "LLM models the add-runner picker offers, per agent.",
+    slug: "runner-models",
+    href: "/god-mode/runner-models/",
   },
 ];
 

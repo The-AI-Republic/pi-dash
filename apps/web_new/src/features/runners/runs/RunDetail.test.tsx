@@ -13,8 +13,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   canCancelRun,
-  cancelBodyKind,
-  RUN_CANCEL_CLOUD_BODY,
   RUN_CANCEL_LOCAL_BODY,
   RUN_DETAIL_LOADING_TEXT,
   RUN_DETAIL_NONE_TEXT,
@@ -109,7 +107,7 @@ describe("identity", () => {
       run: run({ executor_kind: "cloud_agent" }),
       schedulerHref: () => null,
     });
-    expect(screen.getByTestId("run-executor")).toHaveTextContent("Cloud executor");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Cloud agent run (retired)");
     expect(screen.queryByTestId("run-scheduler-link")).toBeNull();
   });
 
@@ -286,11 +284,6 @@ describe("cancellation", () => {
     expect(canCancelRun({ status: "completed" })).toBe(false);
     expect(canCancelRun({ status: "cancel_requested" })).toBe(false);
     expect(canCancelRun({ status: "queued" })).toBe(true);
-  });
-
-  it("uses executor-specific consequence copy", () => {
-    expect(cancelBodyKind("cloud_agent")).toBe(RUN_CANCEL_CLOUD_BODY);
-    expect(cancelBodyKind("local_runner")).toBe(RUN_CANCEL_LOCAL_BODY);
   });
 
   it("confirms and cancels", async () => {

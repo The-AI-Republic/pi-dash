@@ -62,6 +62,8 @@ pub enum TransportError {
     MembershipRevoked,
     #[error("auth: machine_token_revoked")]
     MachineTokenRevoked,
+    #[error("auth: machine_token_expired")]
+    MachineTokenExpired,
     #[error("auth: dev_machine_revoked")]
     DevMachineRevoked,
     #[error("auth: runner_revoked")]
@@ -124,6 +126,7 @@ impl TransportError {
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
                 | TransportError::MachineTokenRevoked
+                | TransportError::MachineTokenExpired
                 | TransportError::DevMachineRevoked
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
@@ -340,6 +343,13 @@ pub struct AttachBody {
     /// `"muse_code"`) — the same spelling the diagnostics matcher expects. A
     /// cloud that predates this field simply ignores it.
     pub agent_kind: AgentKind,
+    /// The default model configured for the agent; `""` is the agent's
+    /// own default. The cloud keeps it on the runner row so the web edit
+    /// form shows what the daemon runs with. Older clouds ignore it.
+    pub model: String,
+    /// The configured reasoning effort (Codex / Claude Code / Muse Code);
+    /// `""` is the agent's default.
+    pub reasoning_effort: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +403,7 @@ impl TransportErrorCode {
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
             "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
+            "auth: machine_token_expired" => TransportError::MachineTokenExpired,
             "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_gone" => TransportError::RunnerGone,
@@ -1224,6 +1235,28 @@ pub struct PollStatus {
     pub agent_health: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_last_activity_at: Option<DateTime<Utc>>,
+    // ----- machine capacity (NEWPIDASH-241 T2) -----
+    // Held attempt token + capacity snapshot for the in-flight run, so the
+    // cloud can persist `capacity_wait` through every poll and exempt fresh
+    // waits from the 180s reaper. Both absent for legacy polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_assignment_token: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<PollCapacity>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PollCapacity {
+    pub phase: String,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1288,6 +1321,8 @@ impl PollStatus {
             turn_count: None,
             agent_health: None,
             agent_last_activity_at: None,
+            held_assignment_token: None,
+            capacity: None,
         }
     }
 
@@ -1314,6 +1349,8 @@ impl PollStatus {
             turn_count: None,
             agent_health: None,
             agent_last_activity_at: None,
+            held_assignment_token: None,
+            capacity: None,
         }
     }
 
@@ -1395,6 +1432,14 @@ pub struct HttpLoop {
     pub in_flight_rx: watch::Receiver<Option<Uuid>>,
     pub shutdown: Arc<tokio::sync::Notify>,
     pub attach_body: AttachBody,
+    /// Optional durable receipt store (NEWPIDASH-241 T4). When present,
+    /// every inbound frame commits check+insert+sequence before any HTTP
+    /// ACK leaves; pending dedupe stays in-memory.
+    pub receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    /// Optional machine FIFO coordinator (NEWPIDASH-241 T2): poll reports
+    /// the held attempt token + capacity snapshot so the cloud persists
+    /// `capacity_wait` through every poll.
+    pub coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
     /// Optional handle to the daemon's state. When `Some`, `poll_once`
     /// builds a `PollStatus::from_state` (carrying the per-active-run
     /// observability snapshot). When `None`, falls back to `from_wire`,
@@ -1549,6 +1594,29 @@ impl HttpLoop {
         shutdown: Arc<tokio::sync::Notify>,
         attach_body: AttachBody,
     ) -> Self {
+        Self::new_with_receipt(
+            client,
+            mailbox,
+            ack_rx,
+            status_rx,
+            in_flight_rx,
+            shutdown,
+            attach_body,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_receipt(
+        client: RunnerCloudClient,
+        mailbox: mpsc::Sender<InboundEnvelope>,
+        ack_rx: mpsc::UnboundedReceiver<AckEntry>,
+        status_rx: watch::Receiver<WireStatus>,
+        in_flight_rx: watch::Receiver<Option<Uuid>>,
+        shutdown: Arc<tokio::sync::Notify>,
+        attach_body: AttachBody,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
         Self {
             client,
             mailbox,
@@ -1557,6 +1625,8 @@ impl HttpLoop {
             in_flight_rx,
             shutdown,
             attach_body,
+            receipt_store,
+            coordinator: None,
             state: None,
             teardown_rx: None,
             reconnect_kick: None,
@@ -1592,6 +1662,26 @@ impl HttpLoop {
     /// Attach the reconnect kick (see the `reconnect_kick` field).
     pub fn with_reconnect_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
         self.reconnect_kick = Some(kick);
+        self
+    }
+
+    /// Attach the durable receipt store (NEWPIDASH-241 T4): every frame
+    /// is committed to SQLite before any HTTP ACK leaves.
+    pub fn with_receipt_store(
+        mut self,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
+        self.receipt_store = receipt_store;
+        self
+    }
+
+    /// Attach the machine FIFO coordinator (NEWPIDASH-241 T2) so poll
+    /// reports the held attempt token + capacity snapshot.
+    pub fn with_coordinator(
+        mut self,
+        coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    ) -> Self {
+        self.coordinator = coordinator;
         self
     }
 
@@ -1646,7 +1736,7 @@ impl HttpLoop {
 
     /// Run `ensure_access_token` then `open_session` until a session is
     /// open. Fatal-for-runner errors propagate. Everything else retries on
-    /// [`ReconnectPolicy`]: transient failures back off 30 s → 6 h with
+    /// [`ReconnectPolicy`]: transient failures back off 30 s → 5 m with
     /// jitter, and `runner_gone` answers retry every ~30 s until enough of
     /// them confirm the deletion, which returns
     /// [`TransportError::RunnerDeletedInCloud`]. A local teardown
@@ -1889,7 +1979,10 @@ impl HttpLoop {
                     if let Some(state) = &self.state {
                         state.set_connected(false).await;
                     }
-                    match self.wait_after_failure(&TransportError::RunnerGone, 0).await {
+                    match self
+                        .wait_after_failure(&TransportError::RunnerGone, 0)
+                        .await
+                    {
                         Ok(()) => {}
                         Err(err) if is_bootstrap_shutdown(&err) => break,
                         Err(err) => return Err(err),
@@ -1984,6 +2077,34 @@ impl HttpLoop {
             }
             None => PollStatus::from_wire(wire_status, in_flight),
         };
+        // Machine capacity (NEWPIDASH-241 T2): report the held attempt
+        // token + snapshot when the coordinator holds this run.
+        let status = match (self.coordinator.as_ref(), in_flight) {
+            (Some(coord), Some(run_id)) => {
+                let mut s = status;
+                if let Some(token) = coord.held_token(run_id) {
+                    s.held_assignment_token = Some(token);
+                }
+                if let Some(phase) = coord.held_phase(run_id) {
+                    let counts = coord.counts();
+                    let phase = if phase == "waiting" {
+                        "waiting_for_capacity".to_string()
+                    } else {
+                        "preparing".to_string()
+                    };
+                    s.capacity = Some(PollCapacity {
+                        phase,
+                        revision: counts.revision,
+                        queued_at: coord.queued_at_rfc3339(run_id),
+                        queue_position: coord.position(run_id).map(|p| p as u64),
+                        active: Some(counts.active as u64),
+                        limit: Some(counts.limit as u64),
+                    });
+                }
+                s
+            }
+            _ => status,
+        };
         let resp = self
             .client
             .poll(acks, status, self.long_poll_interval_secs)
@@ -1997,6 +2118,31 @@ impl HttpLoop {
     async fn dispatch(&mut self, msg: PollMessage) -> Result<(), TransportError> {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
+        // NEWPIDASH-241 T4: durable receipt-before-ACK. Committed = SQLite
+        // commit precedes any HTTP ACK; pending dedupe stays in-memory.
+        if let Some(store) = self.receipt_store.as_ref() {
+            match store.record_before_ack(&msg.mid, std::slice::from_ref(&stream_id), None, false) {
+                Ok(crate::daemon::receipt::ReceiptResult::AlreadyCommitted { .. })
+                | Ok(crate::daemon::receipt::ReceiptResult::Tombstone) => {
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, kind = ?msg.kind, "durable duplicate acked");
+                    self.inline_acks.push_back(stream_id);
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Pending) => {
+                    // Join stream list without ACK (in-memory pending on HttpLoop owner)
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, "pending duplicate joins stream list");
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Committed { .. }) => {
+                    // Committed before ACK; fall through to dispatch
+                }
+                Err(e) => {
+                    tracing::warn!(runner = %runner_id, "receipt store error: {e}; storage_blocked");
+                    // Fail closed when enabled: do not ACK, retry
+                    return Err(TransportError::Local(format!("storage_blocked: {e}")));
+                }
+            }
+        }
         // At-least-once delivery (design.md §8): a frame the daemon
         // already executed can reappear via PEL replay or stream
         // retries. Drop duplicates by `mid` before they reach the
@@ -2116,6 +2262,9 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         if body.contains("machine_token_revoked") {
             return TransportError::MachineTokenRevoked;
         }
+        if json_error_code(body).as_deref() == Some("machine_token_expired") {
+            return TransportError::MachineTokenExpired;
+        }
         if body.contains("dev_machine_revoked") {
             return TransportError::DevMachineRevoked;
         }
@@ -2156,6 +2305,10 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
+    /// `Some("engine")` creates a Pi Dash Agent runner (design §5); the
+    /// server then assigns the name and requires a live engine credential.
+    /// `None` keeps the request byte-identical to before.
+    pub agent_kind: Option<&'a str>,
 }
 
 /// Public helper to create a runner with the user-scoped CLI `APIToken`.
@@ -2182,6 +2335,9 @@ pub async fn create_runner(
     }
     if let Some(p) = req.pod {
         body["pod"] = Json::String(p.to_string());
+    }
+    if let Some(kind) = req.agent_kind {
+        body["agent_kind"] = Json::String(kind.to_string());
     }
     let resp = transport
         .http()
@@ -2323,6 +2479,25 @@ impl MachineClient {
         ack: Vec<String>,
         long_poll_interval_secs: u64,
     ) -> Result<PollResponse, TransportError> {
+        self.poll_with(
+            session_id,
+            crate::cloud::protocol::MachinePollBody {
+                ack,
+                engine_state: None,
+            },
+            long_poll_interval_secs,
+        )
+        .await
+    }
+
+    /// [`Self::poll`] with the whole heartbeat body, including the
+    /// machine's `engine_state`.
+    pub async fn poll_with(
+        &self,
+        session_id: &Uuid,
+        body: crate::cloud::protocol::MachinePollBody,
+        long_poll_interval_secs: u64,
+    ) -> Result<PollResponse, TransportError> {
         let url = format!("{}/sessions/{}/poll", self.base(), session_id);
         let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
@@ -2330,7 +2505,7 @@ impl MachineClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
-            .json(&serde_json::json!({ "ack": ack }))
+            .json(&body)
             .timeout(request_timeout)
             .send()
             .await
@@ -2489,6 +2664,12 @@ pub struct EnrollResponse {
     pub machine_token: Option<String>,
     #[serde(default)]
     pub machine_token_minted: bool,
+    /// Whether the server created this runner in this call. `Some(false)`
+    /// when it answered with a runner it already had (a repeated engine
+    /// add for the same machine and project). Servers that predate the
+    /// field leave it out; they never return an existing runner.
+    #[serde(default)]
+    pub created: Option<bool>,
 }
 
 #[cfg(test)]
@@ -2685,6 +2866,22 @@ mod tests {
     }
 
     #[test]
+    fn expired_machine_token_is_fatal_and_keeps_its_code() {
+        for body in [
+            r#"{"detail":"machine_token_expired"}"#,
+            r#"{"error":"machine_token_expired"}"#,
+        ] {
+            let err = map_auth_error(StatusCode::UNAUTHORIZED, body);
+            assert!(matches!(err, TransportError::MachineTokenExpired));
+            assert!(err.is_fatal_for_runner());
+            assert!(matches!(
+                TransportErrorCode::from(&err).into_err(),
+                TransportError::MachineTokenExpired
+            ));
+        }
+    }
+
+    #[test]
     fn runner_gone_requires_exact_401_with_json_code() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone\"}");
         assert!(matches!(err, TransportError::RunnerGone));
@@ -2700,9 +2897,18 @@ mod tests {
             (StatusCode::BAD_GATEWAY, "{\"detail\":\"runner_gone\"}"),
             (StatusCode::UNAUTHORIZED, "<html>runner_gone</html>"),
             (StatusCode::UNAUTHORIZED, "runner_gone"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone_soon\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_not_found\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"machine_token_invalid\"}"),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_gone_soon\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_not_found\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"machine_token_invalid\"}",
+            ),
             (StatusCode::UNAUTHORIZED, ""),
         ];
         for (status, body) in not_gone {
@@ -2727,9 +2933,7 @@ mod tests {
     fn runner_gone_is_neither_fatal_nor_recoverable_until_confirmed() {
         assert!(!TransportError::RunnerGone.is_fatal_for_runner());
         assert!(!TransportError::RunnerGone.is_recoverable());
-        assert!(
-            TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner()
-        );
+        assert!(TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner());
         let code = TransportErrorCode::from(&TransportError::RunnerGone);
         assert!(matches!(code.into_err(), TransportError::RunnerGone));
     }
@@ -2836,6 +3040,8 @@ mod tests {
             working_dir: "/tmp/wd".into(),
             agent_versions: std::collections::HashMap::new(),
             agent_kind: AgentKind::default(),
+            model: String::new(),
+            reasoning_effort: String::new(),
         }
     }
 
@@ -2875,7 +3081,9 @@ mod tests {
         // The poll path is the single ingestion site for the
         // per-active-run snapshot; session-open stays a thin
         // identity/resume body. `agent_kind` is identity, not observability —
-        // which agent this runner drives, persisted once on session-open.
+        // which agent this runner drives, persisted once on session-open;
+        // `model` / `reasoning_effort` are its configured settings, shown
+        // by the web runner edit form.
         let body = sample_attach_body();
         let v = serde_json::to_value(&body).unwrap();
         let keys: std::collections::BTreeSet<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -2890,6 +3098,8 @@ mod tests {
             "working_dir",
             "agent_versions",
             "agent_kind",
+            "model",
+            "reasoning_effort",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2942,6 +3152,41 @@ mod tests {
         assert!(!obj.contains_key("agent_pid"));
         assert!(!obj.contains_key("approvals_pending"));
         assert!(!obj.contains_key("tokens"));
+        // Machine capacity is absent for legacy polls.
+        assert!(!obj.contains_key("held_assignment_token"));
+        assert!(!obj.contains_key("capacity"));
+    }
+
+    #[test]
+    fn poll_status_carries_capacity_snapshot_when_set() {
+        // NEWPIDASH-241 T2: held token + capacity snapshot ride the poll
+        // so the cloud persists capacity_wait every poll.
+        let tok = Uuid::new_v4();
+        let mut s = PollStatus::from_wire(WireStatus::Busy, Some(Uuid::nil()));
+        s.held_assignment_token = Some(tok);
+        s.capacity = Some(PollCapacity {
+            phase: "waiting_for_capacity".to_string(),
+            revision: 7,
+            queued_at: Some("2026-11-16T04:00:00+00:00".to_string()),
+            queue_position: Some(3),
+            active: Some(2),
+            limit: Some(3),
+        });
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("held_assignment_token"),
+            Some(&serde_json::json!(tok.to_string()))
+        );
+        let cap = obj.get("capacity").unwrap().as_object().unwrap();
+        assert_eq!(
+            cap.get("phase"),
+            Some(&serde_json::json!("waiting_for_capacity"))
+        );
+        assert_eq!(cap.get("revision"), Some(&serde_json::json!(7)));
+        assert_eq!(cap.get("queue_position"), Some(&serde_json::json!(3)));
+        assert_eq!(cap.get("active"), Some(&serde_json::json!(2)));
+        assert_eq!(cap.get("limit"), Some(&serde_json::json!(3)));
     }
 
     #[test]
@@ -3135,6 +3380,9 @@ mod reconnect_loop_tests {
 
     fn empty_state() -> StateHandle {
         StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -3194,6 +3442,8 @@ mod reconnect_loop_tests {
                 working_dir: "/tmp/wd".into(),
                 agent_versions: HashMap::new(),
                 agent_kind: AgentKind::default(),
+                model: String::new(),
+                reasoning_effort: String::new(),
             },
         )
         .with_state(state.clone())
@@ -3214,18 +3464,24 @@ mod reconnect_loop_tests {
     }
 
     fn fast_policy() -> ReconnectPolicy {
-        ReconnectPolicy::new(Backoff::new(Duration::from_millis(1), Duration::from_millis(2)))
-            .with_gone_timing(GoneTiming {
-                confirmations: 10,
-                min_span: Duration::from_millis(100),
-                retry_interval: Duration::from_millis(2),
-            })
+        ReconnectPolicy::new(Backoff::new(
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        ))
+        .with_gone_timing(GoneTiming {
+            confirmations: 10,
+            min_span: Duration::from_millis(100),
+            retry_interval: Duration::from_millis(2),
+        })
     }
 
     async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !cond() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -3259,8 +3515,12 @@ mod reconnect_loop_tests {
             format!("http://{}", l.local_addr().unwrap())
         };
         let (timeout_url, _) = stub_server(Arc::new(|_, _| None)).await;
-        let (unavailable_url, _) =
-            stub_server(fixed(503, "application/json", "{\"detail\":\"unavailable\"}")).await;
+        let (unavailable_url, _) = stub_server(fixed(
+            503,
+            "application/json",
+            "{\"detail\":\"unavailable\"}",
+        ))
+        .await;
         let (proxy_url, _) = stub_server(fixed(
             502,
             "text/html",
@@ -3304,9 +3564,15 @@ mod reconnect_loop_tests {
         let task = tokio::spawn(h.http_loop.run());
         wait_until("first attempt", || hits.load(Ordering::SeqCst) == 1).await;
         let snap = h.state.runner_snapshot().await;
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         let wait = snap.next_retry_at.expect("next retry recorded") - Utc::now();
-        assert!(wait.num_seconds() >= 20 && wait.num_seconds() <= 36, "{wait}");
+        assert!(
+            wait.num_seconds() >= 20 && wait.num_seconds() <= 36,
+            "{wait}"
+        );
 
         h.remove_tx.send(true).unwrap();
         let err = tokio::time::timeout(Duration::from_secs(1), task)
@@ -3363,7 +3629,11 @@ mod reconnect_loop_tests {
             if n == 0 {
                 Some((201, "application/json", session.clone()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;
@@ -3389,7 +3659,11 @@ mod reconnect_loop_tests {
         .to_string();
         let (url, hits) = stub_server(Arc::new(move |n, _| match n {
             0 => Some((201, "application/json", session.clone())),
-            1 => Some((503, "text/html", "<html>503 Service Unavailable</html>".into())),
+            1 => Some((
+                503,
+                "text/html",
+                "<html>503 Service Unavailable</html>".into(),
+            )),
             _ => Some((200, "application/json", "{\"messages\":[]}".into())),
         }))
         .await;
@@ -3406,8 +3680,14 @@ mod reconnect_loop_tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        assert!(!snap.connected, "a failed poll must mark the runner disconnected");
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert!(
+            !snap.connected,
+            "a failed poll must mark the runner disconnected"
+        );
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         assert!(snap.next_retry_at.is_some(), "next retry recorded");
         assert_eq!(snap.cloud_deleted_confirmations, 0);
 
@@ -3434,7 +3714,11 @@ mod reconnect_loop_tests {
             if n == 9 {
                 Some((503, "text/html", "<html>down</html>".into()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;

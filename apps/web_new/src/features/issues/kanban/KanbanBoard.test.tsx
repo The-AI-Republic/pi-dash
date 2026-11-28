@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   permissions: { role: 15, isMember: true, canEdit: true, isAdmin: false },
   me: { id: "me-1" } as { id: string } | null,
   groupLabels: null as unknown,
+  groupOrders: {} as Record<string, readonly string[]>,
   projects: null as unknown,
   details: null as unknown,
   openCycleIds: new Set<string>(),
@@ -88,6 +89,7 @@ vi.mock("../prefs/prefsQuery.js", () => ({
 vi.mock("../list/reference.js", () => ({
   useListReferences: () => ({
     labels: (mocks.groupLabels as unknown as Record<string, Map<string, string>>) ?? {},
+    orders: mocks.groupOrders as Record<string, readonly string[]>,
     stateRows: [],
     stateNames: new Map(),
     assigneeNames: mocks.assigneeNames as Map<string, string>,
@@ -290,7 +292,9 @@ function row(overrides: Partial<IssueListItem> = {}): IssueListItem {
     link_count: null,
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
+    // NEWPIDASH-261: fixtures model a default-policy project where the
+    // viewer is the creator, so state drags are not run-blocked.
+    created_by: "me-1",
     updated_by: null,
     is_draft: false,
     archived_at: null,
@@ -417,6 +421,7 @@ beforeEach(async () => {
   mocks.permissions = { role: 15, isMember: true, canEdit: true, isAdmin: false };
   mocks.me = { id: "me-1" };
   mocks.groupLabels = null;
+  mocks.groupOrders = {};
   mocks.projects = null;
   mocks.details = null;
   mocks.openCycleIds = new Set<string>();
@@ -763,6 +768,24 @@ describe("KanbanBoard", () => {
     setup({ prefs: prefs({ groupBy: "created_by", subGroupBy: null }) });
     expect(mocks.boardInput).toHaveBeenLastCalledWith(
       expect.objectContaining({ groupDomain: undefined, subDomain: undefined })
+    );
+  });
+
+  it("passes the explicit axis order so state columns read in workflow order (NEWPIDASH-46)", () => {
+    mocks.board = flatBoard();
+    mocks.groupOrders = { state: [TODO, DONE] };
+    setup({ prefs: prefs({ groupBy: "state", subGroupBy: null }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupOrder: [TODO, DONE], subOrder: undefined })
+    );
+    setup({ prefs: prefs({ groupBy: "labels", subGroupBy: "state" }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupOrder: undefined, subOrder: [TODO, DONE] })
+    );
+    // A repeated sub-group collapses, so the lane axis carries no order.
+    setup({ prefs: prefs({ groupBy: "state", subGroupBy: "state" }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupOrder: [TODO, DONE], subOrder: undefined })
     );
   });
 
@@ -1222,7 +1245,7 @@ describe("KanbanBoard drag and drop", () => {
         projectIdentifier: "WEB",
         sequenceId: 42,
         viewerId: "me-1",
-        creatorId: null,
+        creatorId: "me-1",
         projectRole: 15,
       })
     );

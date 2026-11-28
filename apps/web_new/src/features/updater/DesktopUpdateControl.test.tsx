@@ -118,6 +118,23 @@ describe("DesktopUpdateControlView", () => {
     expect(updateReadyHint("3.1.0", "3.0.9")).toContain("3.0.9");
     expect(updateInstallingHint("3.1.0")).toBe("Installing 3.1.0…");
   });
+
+  it("shows release notes in the ready hint when the release carried any", async () => {
+    const user = userEvent.setup();
+    render(view(state({ update: { ...WAITING, notes: "Fixes the sync race." } })));
+    const control = screen.getByRole("button", { name: "Update to Pi Dash 2.0.0" });
+    await user.hover(control);
+    // The tooltip normalizes whitespace, so match the notes themselves;
+    // the exact hint format is pinned in the test below.
+    expect(await screen.findByText(/Fixes the sync race\./)).toBeInTheDocument();
+  });
+
+  it("leaves the ready hint alone when no notes wait", () => {
+    expect(updateReadyHint("2.0.0", "1.9.4")).toBe(
+      "Update to 2.0.0 — you're on 1.9.4. The app restarts when it's done."
+    );
+    expect(updateReadyHint("2.0.0", "1.9.4", "  ")).toBe(updateReadyHint("2.0.0", "1.9.4"));
+  });
 });
 
 describe("DesktopUpdateControl", () => {

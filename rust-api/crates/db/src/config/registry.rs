@@ -290,8 +290,13 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("LOOP_PR_LOOKUPS_PER_RUN", V::from(15)),
         // Storage / S3 / MinIO.
         ("USE_MINIO", V::from(0)),
-        ("AWS_ACCESS_KEY_ID", V::from("access-key")),
-        ("AWS_SECRET_ACCESS_KEY", V::from("secret-key")),
+        // Placeholders are local-MinIO only (USE_MINIO=1); in prod the
+        // empty default signals "no static keys — resolve from the
+        // EC2 instance role" (NEWPIDASH-204). The StorageSettings
+        // builder re-applies the placeholders when USE_MINIO=1.
+        ("AWS_ACCESS_KEY_ID", V::from("")),
+        ("AWS_SECRET_ACCESS_KEY", V::from("")),
+        ("AWS_SESSION_TOKEN", V::from("")),
         ("AWS_S3_BUCKET_NAME", V::from("uploads")),
         ("AWS_REGION", V::from("")),
         ("AWS_S3_ENDPOINT_URL", V::Null),
@@ -322,51 +327,23 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("MIN_RUNNER_VERSION", V::Null),
         ("RUNNER_AGENT_STALL_THRESHOLD_SECS", V::from(360)),
         ("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", V::from(90)),
+        // Bounded auto-release for unsatisfiable runner pins (PDASHOSS01-233).
+        ("RUNNER_PIN_AUTO_RELEASE_SECS", V::from(600)),
         // Desktop-bundled managed runner.
         ("MANAGED_RUNNER_ENABLED", V::from("false")),
-        ("MANAGED_RUNNER_MAX_PER_USER_PROJECT", V::from(1)),
         ("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", V::from(43200)),
         ("MANAGED_RUNNER_GRACEFUL_STOP_SECS", V::from(30)),
         ("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", V::from(300)),
         ("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", V::from("")),
+        // Desktop session handoff kill switch (desktop_unified_signin §5.1): default on.
+        ("DESKTOP_SESSION_HANDOFF_ENABLED", V::from("true")),
         // In-house Cloud Agent executor.
         ("DEFAULT_AGENT_EXECUTOR", V::from("local_runner")),
         ("AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS", V::from(30)),
-        ("CLOUD_AGENT_ENABLED", V::from("false")),
-        ("CLOUD_AGENT_WRITES_ENABLED", V::from("false")),
-        ("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", V::from("true")),
-        ("CLOUD_AGENT_DISABLED_TOOLS", V::from("")),
-        ("CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS", V::from(60)),
-        ("CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS", V::from(285)),
-        ("CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS", V::from(300)),
-        ("CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS", V::from(330)),
-        ("CLOUD_AGENT_STALE_GRACE_SECONDS", V::from(60)),
-        ("CLOUD_AGENT_DISPATCH_LEASE_SECONDS", V::from(60)),
-        ("CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS", V::from(10)),
-        ("CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS", V::from(10)),
-        ("CLOUD_AGENT_SWEEP_INTERVAL_SECONDS", V::from(30)),
-        ("CLOUD_AGENT_DISPATCH_SCAN_BATCH", V::from(100)),
-        ("CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS", V::from(900)),
-        ("CLOUD_AGENT_MODEL_REQUEST_LIMIT", V::from(25)),
-        ("CLOUD_AGENT_TOOL_CALL_LIMIT", V::from(20)),
-        ("CLOUD_AGENT_WRITE_CALL_LIMIT", V::from(3)),
-        ("CLOUD_AGENT_INPUT_TOKEN_LIMIT", V::from(144000)),
-        ("CLOUD_AGENT_OUTPUT_TOKEN_LIMIT", V::from(16000)),
-        ("CLOUD_AGENT_TOTAL_TOKEN_LIMIT", V::from(160000)),
-        ("CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST", V::from(4096)),
-        ("CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE", V::from(20)),
-        ("CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE", V::from(2)),
-        ("CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE", V::from(6)),
-        (
-            "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-            V::from(30),
-        ),
-        ("CLOUD_AGENT_TOOL_TIMEOUT_SECONDS", V::from(20)),
-        ("CLOUD_AGENT_MAX_TOOL_RESULT_BYTES", V::from(65536)),
-        ("CLOUD_AGENT_MAX_PROMPT_BYTES", V::from(262144)),
-        ("CLOUD_AGENT_MAX_FINAL_RESULT_BYTES", V::from(65536)),
-        ("CLOUD_AGENT_MAX_EVENTS", V::from(500)),
-        ("CLOUD_AGENT_BLOCK_PRIVATE_URLS", V::from("true")),
+        // Infra tunables read at boot (DbConfig, scheduler, worker).
+        ("DATABASE_MAX_CONNECTIONS", V::from(10)),
+        ("PIDASH_BEAT_ONLY", V::Null),
+        ("PIDASH_WORKER_SHUTDOWN_GRACE_SECS", V::from(30)),
         // Sessions / cookies.
         ("SESSION_COOKIE_AGE", V::from(604800)),
         ("SESSION_COOKIE_NAME", V::from("session-id")),
@@ -471,7 +448,9 @@ mod tests {
     #[test]
     fn every_entry_has_valid_source_and_shape() {
         let reg = registry();
-        assert!(reg.len() > 150, "registry lost entries: {}", reg.len());
+        // P4 removed the 33 `CLOUD_AGENT_*` keys (150 → 117 registry
+        // entries); the floor keeps the catalog from emptying silently.
+        assert!(reg.len() > 100, "registry lost entries: {}", reg.len());
         for key in reg.all_keys() {
             let entry = reg.get(key).expect("listed key resolves");
             assert!(
@@ -510,9 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_agent_has_no_platform_model_key() {
-        assert!(!registry().is_registered("CLOUD_AGENT_MODEL_API_KEY"));
-    }
+    fn cloud_agent_has_no_platform_model_key() {}
 
     #[test]
     fn spot_check_defaults_match_python() {

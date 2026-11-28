@@ -58,9 +58,11 @@ export const COMMENT_FAILURE_FALLBACK = "Check your connection and try again.";
 /**
  * Drop every read that shows the issue's comments. The activity feed
  * keeps its own list of comment rows (ISS-194), so a comment write has to
- * refetch both or the timeline shows a stale set.
+ * refetch both or the timeline shows a stale set. The agent-status poll
+ * rides this too (ISS-164): a comment posted while a run is active joins
+ * the feed through the same cheap incremental refetch.
  */
-function invalidateCommentViews(queryClient: QueryClient, scope: CommentScope): Promise<void> {
+export function invalidateCommentViews(queryClient: QueryClient, scope: CommentScope): Promise<void> {
   return Promise.all([
     queryClient.invalidateQueries({
       queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),

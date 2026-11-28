@@ -1,6 +1,9 @@
 //! Prompt recipes — ordered section lists per prompt kind.
 //!
-//! Port of `apps/api/pi_dash/prompting/recipes.py` (189 lines):
+//! Originally a port of `apps/api/pi_dash/prompting/recipes.py` (189
+//! lines); the issue-run recipes ([`RECIPES`]) diverged from it with the
+//! lean agent workflow change and are now Rust-owned (`FIX-recipes` was
+//! re-based on this file). Python line references below are historical:
 //!
 //! * `recipes.py:24-28` (kind constants) + `30-84` (`RECIPES`).
 //! * `recipes.py:88-129` (`CLOUD_RECIPES`).
@@ -14,6 +17,13 @@
 //! [`EXECUTOR_MANAGED_RUNNER`] carries that value and any other (or no)
 //! executor resolves to the local table.
 //!
+//! Issue-stage recipes carry named [`RecipeEntry::Slot`] entries alongside
+//! core section keys (PDASHOSS01-234). A slot is filled at compose time with
+//! the section the issue's **work type** supplies for it
+//! ([`super::work_types::expand`]) — e.g. the `execute` slot of the In
+//! Progress recipe resolves to `software.execute` for the `software` work
+//! type. Core sections stay work-type-neutral.
+//!
 //! No ported bugs: the `bugs` array of `FIX-recipes` is empty.
 
 /// Prompt kinds (`recipes.py:24-28`).
@@ -23,10 +33,34 @@ pub const KIND_TEST: &str = "test";
 pub const KIND_SCHEDULER: &str = "scheduler";
 pub const KIND_DIRECT: &str = "direct";
 
-/// Default work kind (`recipes.py:135`). The work-kind axis is
-/// designed-but-deferred; `kind_for` accepts it from day one and callers
-/// hardcode `"coding"` so the axis lands without touching call sites.
+/// Legacy name for the default work axis value (`recipes.py`
+/// `WORK_KIND_CODING`). The §9.5 work-kind axis shipped as **work type**
+/// ([`super::work_types`]): the stage keeps selecting the kind/recipe
+/// unchanged, and the work type only fills the recipe's slots at compose
+/// time. Kept so `kind_for` callers stay stable.
 pub const WORK_KIND_CODING: &str = "coding";
+
+/// One recipe entry (`recipes.py` `Slot` + plain section keys): a core
+/// section key, or a named hole filled by the issue's work type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeEntry {
+    /// A core section key.
+    Section(&'static str),
+    /// A work-type slot; the name is one of
+    /// [`super::work_types::SLOT_NAMES`].
+    Slot(&'static str),
+}
+
+use RecipeEntry::{Section as S, Slot};
+
+/// `Slot("context")` (`recipes.py` `SLOT_CONTEXT`).
+pub const SLOT_CONTEXT: RecipeEntry = Slot("context");
+/// `Slot("execute")` (`recipes.py` `SLOT_EXECUTE`).
+pub const SLOT_EXECUTE: RecipeEntry = Slot("execute");
+/// `Slot("review")` (`recipes.py` `SLOT_REVIEW`).
+pub const SLOT_REVIEW: RecipeEntry = Slot("review");
+/// `Slot("test")` (`recipes.py` `SLOT_TEST`).
+pub const SLOT_TEST: RecipeEntry = Slot("test");
 
 /// Executor kind value for the desktop-bundled managed runner
 /// (`AgentExecutorKind.MANAGED_RUNNER`).
@@ -52,130 +86,75 @@ impl RecipeNotFound {
     }
 }
 
-/// Local-runner recipes: section keys per kind, in order
-/// (`recipes.py:30-84`).
-pub const RECIPES: &[(&str, &[&str])] = &[
+/// Local-runner recipes: section keys and work-type slots per kind, in
+/// order. Since the lean agent workflow change (design
+/// `.ai_design/lean_agent_workflow/design.md` §9.2) these are the Rust
+/// source of truth and no longer mirror `recipes.py`: one `lifecycle`
+/// section carries the path, the moves and the closing `pidash run finish`
+/// command for all three stages. Since `.ai_design/unified_workpad/design.md`
+/// every issue run, review and test included, reads and writes the workpad
+/// (there is no separate hand-off). The scheduler recipe is unchanged and is now the only
+/// user of `session-framing` and `guardrails`.
+pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_CODING_TASK,
         &[
-            "intro",
-            "repo-context",
-            "relationships",
-            "session-framing",
-            "pidash-cli",
-            "task-lifecycle",
-            "default-posture",
-            "autonomy",
-            "state-routing",
-            "analyze-and-scope",
-            "workpad-setup",
-            "implementation",
-            "blocking",
-            "guardrails",
-            "workpad-template",
-            "ending-run",
+            S("this-run"),
+            S("intro"),
+            SLOT_CONTEXT,
+            S("relationships"),
+            S("run-framing"),
+            S("pidash-cli"),
+            S("lifecycle"),
+            S("default-posture"),
+            S("autonomy"),
+            S("analyze-and-scope"),
+            S("workpad"),
+            SLOT_EXECUTE,
+            S("implementation"),
+            S("blocking"),
         ],
     ),
     (
         KIND_REVIEW,
         &[
-            "review-intro",
-            "repo-context",
-            "session-framing",
-            "pidash-cli",
-            "task-lifecycle",
-            "workpad-context",
-            "review-cycle",
-            "blocking",
-            "guardrails",
-            "ending-run",
+            S("this-run"),
+            S("review-intro"),
+            SLOT_CONTEXT,
+            S("run-framing"),
+            S("pidash-cli"),
+            S("lifecycle"),
+            S("workpad"),
+            S("review"),
+            SLOT_REVIEW,
+            S("blocking"),
         ],
     ),
     (
         KIND_TEST,
         &[
-            "test-intro",
-            "repo-context",
-            "session-framing",
-            "pidash-cli",
-            "task-lifecycle",
-            "workpad-context",
-            "test-cycle",
-            "blocking",
-            "guardrails",
-            "ending-run",
+            S("this-run"),
+            S("test-intro"),
+            SLOT_CONTEXT,
+            S("run-framing"),
+            S("pidash-cli"),
+            S("lifecycle"),
+            S("workpad"),
+            S("test"),
+            SLOT_TEST,
+            S("blocking"),
         ],
     ),
     (
         KIND_SCHEDULER,
         &[
-            "scheduler-intro",
-            "session-framing",
-            "pidash-cli",
-            "scheduler-task",
-            "guardrails",
-            "scheduler-ending",
-        ],
-    ),
-];
-
-/// Locked executor-owned recipes, sharing no local Runner section
-/// (`recipes.py:88-129`).
-pub const CLOUD_RECIPES: &[(&str, &[&str])] = &[
-    (
-        KIND_CODING_TASK,
-        &[
-            "cloud-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-execution-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_REVIEW,
-        &[
-            "cloud-review-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-review-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_TEST,
-        &[
-            "cloud-test-intro",
-            "cloud-capabilities",
-            "cloud-issue-context",
-            "cloud-test-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_SCHEDULER,
-        &[
-            "cloud-scheduler-intro",
-            "cloud-project-context",
-            "cloud-capabilities",
-            "cloud-scheduler-task",
-            "cloud-scheduler-loop",
-            "cloud-write-policy",
-            "cloud-ending",
-        ],
-    ),
-    (
-        KIND_DIRECT,
-        &[
-            "cloud-intro",
-            "cloud-capabilities",
-            "cloud-direct-task",
-            "cloud-execution-loop",
-            "cloud-write-policy",
-            "cloud-ending",
+            S("this-run"),
+            S("scheduler-intro"),
+            S("session-framing"),
+            S("pidash-cli"),
+            S("scheduler-task"),
+            S("guardrails"),
+            S("scheduler-ending"),
         ],
     ),
 ];
@@ -183,24 +162,26 @@ pub const CLOUD_RECIPES: &[(&str, &[&str])] = &[
 /// Recipes for the desktop-bundled managed runner (`recipes.py:163`).
 /// An alias of the local map, not a copy: a managed runner has exactly
 /// the same capabilities as a user-installed one.
-pub const MANAGED_RECIPES: &[(&str, &[&str])] = RECIPES;
+pub const MANAGED_RECIPES: &[(&str, &[RecipeEntry])] = RECIPES;
 
-/// Resolve a prompt *kind* from a phase template name and a work kind
-/// (`recipes.py:142-152`). Today an identity on `template_name` — the
-/// work-kind matrix collapses to the coding row — but the signature keeps
-/// the §9.5 seam so the matrix can expand without changing callers.
+/// Resolve a prompt *kind* from a phase template name (`recipes.py`
+/// `kind_for`). An identity on `template_name` and stays one: the work-type
+/// axis landed as recipe slots ([`super::work_types::expand`]) rather than
+/// as extra kinds, so the kind — and everything stamped from it
+/// (`phase_kind`, ticking, the outcome guard) — depends only on the stage.
+/// `work_kind` is kept for signature compatibility and is ignored.
 pub fn kind_for<'a>(template_name: &'a str, work_kind: &str) -> &'a str {
     let _ = work_kind;
     template_name
 }
 
-/// Section keys for `kind` on `executor_kind` (default local runner:
-/// pass `None`) (`recipes.py:166-178`). Cloud recipes are deliberately
-/// not reachable here; use [`cloud_recipe_for`].
+/// Recipe entries (section keys and slots) for `kind` on `executor_kind`
+/// (default local runner: pass `None`) (`recipes.py` `recipe_for`). Resolve
+/// slots with [`super::work_types::expand`] before composing.
 pub fn recipe_for(
     kind: &str,
     executor_kind: Option<&str>,
-) -> Result<&'static [&'static str], RecipeNotFound> {
+) -> Result<&'static [RecipeEntry], RecipeNotFound> {
     let table = if executor_kind == Some(EXECUTOR_MANAGED_RUNNER) {
         MANAGED_RECIPES
     } else {
@@ -210,15 +191,6 @@ pub fn recipe_for(
         .iter()
         .find_map(|(name, sections)| (*name == kind).then_some(*sections))
         .ok_or_else(|| RecipeNotFound::new(format!("no recipe for kind '{kind}'")))
-}
-
-/// Section keys for `kind` on the locked Cloud Agent recipes
-/// (`recipes.py:181-185`).
-pub fn cloud_recipe_for(kind: &str) -> Result<&'static [&'static str], RecipeNotFound> {
-    CLOUD_RECIPES
-        .iter()
-        .find_map(|(name, sections)| (*name == kind).then_some(*sections))
-        .ok_or_else(|| RecipeNotFound::new(format!("no Cloud Agent recipe for kind '{kind}'")))
 }
 
 /// All local recipe kinds, in table order (`recipes.py:188-189`).
@@ -268,15 +240,27 @@ mod tests {
         assert_eq!(kinds["work_kind_coding"].as_str(), Some(WORK_KIND_CODING));
     }
 
+    /// A fixture recipe entry: a section key string, or `{"slot": name}`.
+    fn entry_from_fixture(value: &Value) -> RecipeEntry {
+        if let Some(key) = value.as_str() {
+            return RecipeEntry::Section(Box::leak(key.to_owned().into_boxed_str()));
+        }
+        let slot = value["slot"].as_str().expect("entry is a key or a slot");
+        RecipeEntry::Slot(Box::leak(slot.to_owned().into_boxed_str()))
+    }
+
     #[test]
     fn local_recipes_match_fixture() {
         let golden = fixture();
         let data = recipes_data(&golden);
-        for (kind, sections) in RECIPES {
-            let got: &[&str] = sections;
-            let expected = str_list(&data["local_recipes"][kind]);
-            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
-            assert_eq!(got, &expected[..], "local recipe for {kind}");
+        for (kind, entries) in RECIPES {
+            let expected: Vec<RecipeEntry> = data["local_recipes"][kind]
+                .as_array()
+                .expect("recipe is an array")
+                .iter()
+                .map(entry_from_fixture)
+                .collect();
+            assert_eq!(*entries, &expected[..], "local recipe for {kind}");
         }
         let lengths = &data["local_recipe_lengths"];
         for (kind, sections) in RECIPES {
@@ -289,22 +273,40 @@ mod tests {
     }
 
     #[test]
-    fn cloud_recipes_match_fixture() {
+    fn work_types_match_fixture() {
+        use crate::prompting::work_types;
         let golden = fixture();
-        let data = recipes_data(&golden);
-        for (kind, sections) in CLOUD_RECIPES {
-            let got: &[&str] = sections;
-            let expected = str_list(&data["cloud_recipes"][kind]);
-            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
-            assert_eq!(got, &expected[..], "cloud recipe for {kind}");
-        }
-        let lengths = &data["cloud_recipe_lengths"];
-        for (kind, sections) in CLOUD_RECIPES {
+        let data = &recipes_data(&golden)["work_types"];
+        assert_eq!(
+            str_list(&data["slot_names"]),
+            work_types::SLOT_NAMES.to_vec()
+        );
+        assert_eq!(
+            data["default"].as_str(),
+            Some(work_types::DEFAULT_WORK_TYPE)
+        );
+        assert_eq!(str_list(&data["keys"]), work_types::keys());
+        for work_type in work_types::all_work_types() {
+            let golden_type = &data["types"][work_type.key];
+            assert_eq!(golden_type["title"].as_str(), Some(work_type.title));
             assert_eq!(
-                sections.len(),
-                lengths[kind].as_u64().expect("u64") as usize,
-                "cloud recipe length for {kind}"
+                golden_type["description"].as_str(),
+                Some(work_type.description)
             );
+            let sections = golden_type["sections"].as_object().expect("sections map");
+            assert_eq!(sections.len(), work_type.sections.len());
+            for (slot, key) in &work_type.sections {
+                assert_eq!(sections[*slot].as_str(), Some(key.as_str()));
+            }
+        }
+        for (kind, entries) in RECIPES {
+            for key in work_types::keys() {
+                assert_eq!(
+                    work_types::expand(entries, key).expect("expands"),
+                    str_list(&data["expanded"][kind][key]),
+                    "expanded {kind} for {key}"
+                );
+            }
         }
     }
 
@@ -360,12 +362,6 @@ mod tests {
             Some(false)
         );
         recipe_for(KIND_DIRECT, None).expect_err("direct has no local recipe");
-        let err = cloud_recipe_for("nope").expect_err("unknown cloud kind raises");
-        assert_eq!(err.message(), "no Cloud Agent recipe for kind 'nope'");
-        assert!(data["cloud_recipe_for_unknown"]["error"]
-            .as_str()
-            .expect("string")
-            .ends_with(err.message()));
     }
 
     #[test]

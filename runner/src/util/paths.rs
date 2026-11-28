@@ -3,9 +3,17 @@ use directories::{BaseDirs, ProjectDirs};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::util::fs::create_dir_all_private;
+
 const QUALIFIER: &str = "so";
 const ORG: &str = "pidash";
 const APP: &str = "pidash";
+
+/// Files the macOS service supervisor (launchd) writes daemon stdout/stderr
+/// into, under [`Paths::logs_dir`]. Pre-created by [`Paths::ensure`] so
+/// they are never world-readable.
+pub(crate) const SERVICE_OUT_LOG: &str = "runner.out.log";
+pub(crate) const SERVICE_ERR_LOG: &str = "runner.err.log";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -172,15 +180,88 @@ impl Paths {
     }
 
     pub fn ensure(&self) -> Result<()> {
+        // Owner-only when the daemon creates them: the data dir holds engine
+        // homes, runner histories and service logs. Existing directories
+        // keep their mode.
         for dir in [
             &self.config_dir,
             &self.data_dir,
             &self.runtime_dir,
             &self.logs_dir(),
         ] {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
+            create_dir_all_private(dir).with_context(|| format!("creating {dir:?}"))?;
+        }
+        // An install made before the daemon created its home owner-only
+        // still has a 0755 data dir, and every engine task folder and runner
+        // history under it stays readable. The data dir is the daemon's own
+        // (never a user-chosen working dir), so tighten it here; that covers
+        // the whole tree beneath it without touching anything the user owns.
+        tighten_daemon_dir(&self.data_dir);
+        for name in [SERVICE_OUT_LOG, SERVICE_ERR_LOG] {
+            ensure_service_log(&self.logs_dir().join(name))?;
         }
         Ok(())
+    }
+}
+
+/// Drop group/other access from a daemon-owned directory that predates
+/// owner-only creation. Best effort: a directory owned by another user, or
+/// a chmod the filesystem refuses, is logged and left alone so the daemon
+/// still starts.
+fn tighten_daemon_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Ok(meta) = std::fs::metadata(dir) else {
+            return;
+        };
+        if meta.mode() & 0o077 == 0 || meta.uid() != nix::unistd::getuid().as_raw() {
+            return;
+        }
+        let mut perm = meta.permissions();
+        perm.set_mode(meta.mode() & 0o700);
+        if let Err(e) = std::fs::set_permissions(dir, perm) {
+            tracing::warn!(dir = ?dir, error = %e, "could not make daemon dir owner-only");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Ensure a service log file exists and is owner-only (0600 on Unix).
+///
+/// launchd opens these files at exec time with the default umask, before
+/// the daemon's first line runs, so the mode of a file that already exists
+/// is enforced here rather than only applied at creation.
+fn ensure_service_log(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    set_private_open_mode(&mut options);
+    options
+        .open(path)
+        .with_context(|| format!("creating service log {path:?}"))?;
+    set_service_log_permissions(path)?;
+    Ok(())
+}
+
+fn set_service_log_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Enforced on every `ensure`, not only at creation: same precedent
+        // as `config::file`'s credential files.
+        let mut perm = std::fs::metadata(path)?.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o600);
+        std::fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+fn set_private_open_mode(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
 }
 
@@ -220,10 +301,11 @@ impl RunnerPaths {
         self.base_dir.join("credentials.toml")
     }
 
-    /// Create the runner's directory tree on disk.
+    /// Create the runner's directory tree on disk (owner-only when created;
+    /// existing directories keep their mode).
     pub fn ensure(&self) -> Result<()> {
         for dir in [&self.base_dir, &self.runs_dir(), &self.logs_dir()] {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
+            create_dir_all_private(dir).with_context(|| format!("creating {dir:?}"))?;
         }
         Ok(())
     }
@@ -409,6 +491,83 @@ mod tests {
         assert!(rp.runs_dir().is_dir(), "runs dir should be created");
         assert!(rp.logs_dir().is_dir(), "logs dir should be created");
         assert!(rp.base_dir().is_dir(), "base dir should be created");
+    }
+
+    /// The daemon's home tree is owner-only: the data dir holds engine
+    /// homes, runner histories and service logs, all of which outlive the
+    /// config's 0600 files.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_creates_owner_only_dirs_and_service_logs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        p.ensure().unwrap();
+        for dir in [&p.config_dir, &p.data_dir, &p.runtime_dir, &p.logs_dir()] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "created dir {} must be owner-only",
+                dir.display()
+            );
+        }
+        for name in [SERVICE_OUT_LOG, SERVICE_ERR_LOG] {
+            let file = p.logs_dir().join(name);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "service log {} must be owner-only",
+                file.display()
+            );
+        }
+    }
+
+    /// launchd opens the service log files at exec time with the default
+    /// umask, before the daemon's first line runs, so `ensure` must tighten
+    /// the files it finds rather than only ones it creates.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_tightens_an_existing_service_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        std::fs::create_dir_all(p.logs_dir()).unwrap();
+        let file = p.logs_dir().join(SERVICE_OUT_LOG);
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        p.ensure().unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing service log must be tightened to 0600"
+        );
+    }
+
+    /// An upgraded install's data dir was created 0755 by an older daemon;
+    /// `ensure` tightens it (the daemon owns it) so the engine task folders
+    /// and histories already under it stop being readable by other users.
+    /// What lies beneath keeps its mode: the data dir alone gates access.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_tightens_an_existing_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        let task = p.data_dir.join("engine/workdirs/acme/WEB");
+        std::fs::create_dir_all(&task).unwrap();
+        for dir in [&p.data_dir, &task] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p.ensure().unwrap();
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&p.data_dir),
+            0o700,
+            "existing data dir must be tightened"
+        );
+        assert_eq!(mode(&task), 0o755, "contents are not chmodded");
     }
 
     #[test]

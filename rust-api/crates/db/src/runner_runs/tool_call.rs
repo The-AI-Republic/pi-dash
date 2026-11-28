@@ -6,7 +6,7 @@
 //! (`apps/api/pi_dash/runner/models.py:1187-1216`): row struct +
 //! column list. `status` reuses the L1
 //! [`pidash_types::runner_runs::ToolCallStatus`]. D-11's
-//! `db::dispatch::tool_call` keeps its own read shape of this table;
+//! `db::agent_runs::tool_call` keeps its own read shape of this table;
 //! this is the runner-domain full port.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-02-models-runs.golden.json`

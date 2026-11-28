@@ -112,10 +112,11 @@ def make_project(workspace_id: str, owner_id: str, identifier: str | None = None
                repo_url, base_branch, agent_default_interval_seconds,
                agent_default_max_ticks, agent_ticking_enabled, is_default,
                agent_review_default_interval_seconds, default_agent_executor,
+               dedicated_runner_lost_action,
                agent_test_default_interval_seconds, created_at, updated_at)
            VALUES (%s,%s,'',0,%s,%s,true,true,true,true,true,365,365,'{}',
                    true,false,false,'UTC',true,'','',10800,10,true,false,
-                   10800,'local_runner',10800,now(),now())""",
+                   10800,'local_runner','fail_to_backlog',10800,now(),now())""",
         (proj_id, f"proj-{ident}", ident, workspace_id),
     )
     return proj_id, ident
@@ -200,13 +201,13 @@ def make_run(issue_id: str, workspace_id: str, creator_id: str, pod_id: str,
         "llm_model": "", "trigger": "tick",
         "executor_kind": "local_runner", "dispatch_attempts": 0, "cancel_reason": "",
         "tool_plan": "{}", "phase_kind": "",
-        "agent_metadata": "{}", "usage": "{}",
+        "agent_metadata": "{}", "usage": "{}", "pin_kind": "locality",
     }
     row.update(fields)
     cols = ",".join(row)
     vals = ",".join(["%s"] * len(row))
     _exec(
-        f"INSERT INTO agent_run ({cols}, created_at) VALUES ({vals}, now())",
+        f"INSERT INTO agent_run (failure_reason, {cols}, created_at) VALUES ('', {vals}, now())",
         tuple(row.values()),
     )
     return run_id

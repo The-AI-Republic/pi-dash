@@ -86,7 +86,7 @@ overrides:
   '@types/react-dom@18>@types/react': 18.3.11
   express: 4.22.0
   mdast-util-to-hast: 13.2.1
-  remark-rehype>mdast-util-to-hast: ^12.1.0
+  remark-rehype@10>mdast-util-to-hast: ^12.1.0
   valibot: 1.2.0
   glob: 11.1.0
   js-yaml: 4.1.1
@@ -18983,7 +18983,7 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.4
       '@types/mdast': 4.0.4
-      mdast-util-to-hast: 12.3.0
+      mdast-util-to-hast: 13.2.1
       unified: 11.0.5
       vfile: 6.0.3
 

@@ -61,7 +61,7 @@ fn fake_cmd(script: &str) -> Command {
 
 async fn new_bridge(resume: Option<&str>) -> Bridge {
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Bridge::spawn_with_resume("muse", &cwd, None, resume)
+    Bridge::spawn_with_resume("muse", &cwd, None, None, resume)
         .await
         .expect("bridge setup")
 }

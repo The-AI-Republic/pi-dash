@@ -15,6 +15,7 @@ pub struct Model {
     // Not `unique`: the generator reads a partial unique index as a
     // column constraint (see the module doc in `mod.rs`).
     pub dev_machine_id: Uuid,
+    pub machine_token_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -27,11 +28,25 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     DevMachine,
+    #[sea_orm(
+        belongs_to = "super::machine_token::Entity",
+        from = "Column::MachineTokenId",
+        to = "super::machine_token::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    MachineToken,
 }
 
 impl Related<super::dev_machine::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::DevMachine.def()
+    }
+}
+
+impl Related<super::machine_token::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::MachineToken.def()
     }
 }
 

@@ -8,6 +8,8 @@ must reproduce them byte for byte.
 
 import pytest
 
+from _harness.diffs import expect
+
 from .conftest import ENVELOPE_KEYS, issue_url
 
 pytestmark = pytest.mark.contract
@@ -37,6 +39,7 @@ ISSUE_ROW_KEYS = {
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -46,13 +49,20 @@ ISSUE_ROW_KEYS = {
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "assignees",
     "labels",
 }
 
 ISSUE_WRITE_KEYS = ISSUE_ROW_KEYS | {"relations_summary", "has_open_blockers"}
 
-ISSUE_DETAIL_KEYS = ISSUE_WRITE_KEYS | {"relations"}
+ISSUE_DETAIL_KEYS = (
+    ISSUE_WRITE_KEYS
+    | {"relations"}
+    | expect("DIFF-68", django=set(), rust={"code_reviews"})
+)
 
 
 def test_issue_list_shape(api, world):
@@ -123,6 +133,25 @@ def test_issue_create_invalid(api, world):
         "name": ["This field is required."],
         "priority": ['"bogus" is not a valid choice.'],
     }
+
+
+def test_issue_patch_executor_translates(api, world, db_conn):
+    # #2903: a cloud_agent write through the v1 serializer is stored as
+    # local_runner (normalize_issue_executor parity).
+    response = api.patch(
+        issue_url(world, world["issue"]["id"]),
+        json={"agent_executor": "cloud_agent"},
+    )
+    assert response.status_code == 200, response.text
+    from _harness.db import fetchone, get_database_url
+
+    db_conn.commit()
+    row = fetchone(
+        get_database_url(),
+        "SELECT agent_executor FROM issues WHERE id=%s",
+        (world["issue"]["id"],),
+    )
+    assert row["agent_executor"] == "local_runner"
 
 
 def test_issue_patch_bad_state(api, world):

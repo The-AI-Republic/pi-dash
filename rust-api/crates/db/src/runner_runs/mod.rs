@@ -13,7 +13,7 @@
 //!   (`runner/signals.py:32-66`, PIDASHCONV-1297). Pod *views* are
 //!   D-13's; the model lives here per the epic and D-13's split reuses
 //!   this module.
-//! * [`agent_run`] — `AgentRun` (`models.py:872-1161`): all 41
+//! * [`agent_run`] — `AgentRun` (`models.py:872-1161`): all 42
 //!   columns/defaults/constraints/indexes, `save` pod-resolution order
 //!   + owner→created_by mirror (`:1104-1134`), token pseudo-fields as
 //!     `(usage->>key)::bigint` reads (`fields.py:56-58`).
@@ -42,11 +42,11 @@
 //!
 //! Choice columns use the L1 enums from
 //! [`pidash_types::runner_runs`] (PIDASHCONV-527); `executor_kind`
-//! reuses [`pidash_types::dispatch::AgentExecutorKind`] (PIDASHCONV-482)
+//! reuses [`pidash_types::agent_runs::AgentExecutorKind`] (PIDASHCONV-482)
 //! like the D-11 read shape does; FK delete behavior reuses
 //! [`crate::integrations::OnDelete`]; the live-state token properties
 //! reuse L1 [`pidash_types::runner_runs::flat_token_fields`]. D-11
-//! keeps its own `db::dispatch` read-shape copies of `AgentRun` /
+//! keeps its own `db::agent_runs` read-shape copies of `AgentRun` /
 //! `AgentRunEvent` / `AgentRunToolCall` / status enums (partial
 //! projections for dispatch queries); this module is the
 //! runner-domain full port the D-15 layers build on. No code here

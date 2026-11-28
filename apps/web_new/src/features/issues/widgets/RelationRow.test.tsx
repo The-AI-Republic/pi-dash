@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { platform } from "../../../core/platform/index.js";
 import { WORKFLOW_FLAG } from "../edition/flags.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { RelationRow, copyWorkItemUrl } from "./RelationRow.js";
@@ -136,6 +137,18 @@ describe("relation row", () => {
     });
     await copyWorkItemUrl("/acme/browse/WEB-42");
     expect(notifyError).toHaveBeenCalledWith("Couldn't copy the link", "denied");
+  });
+
+  it("copies the hosted address when the window origin is the desktop bundle", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { origin: "http://tauri.localhost" },
+    });
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    await copyWorkItemUrl("/acme/browse/WEB-42");
+    expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/WEB-42");
   });
 
   it("copies through the row menu for guests", async () => {

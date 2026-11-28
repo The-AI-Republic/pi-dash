@@ -11,6 +11,8 @@
 /** What the user chose when confirming a desktop sign-out. */
 export interface RuntimeSignOutChoice {
   deleteChatHistory: boolean;
+  /** "Also sign out Pi Dash on this computer": `pidash auth logout`. */
+  signOutComputer: boolean;
 }
 
 /** Desktop runtime steps the sign-out sequence runs when registered. */

@@ -60,20 +60,18 @@
 //!   `space/views/base.py:199-200`). [`group_values_requires_queryset`]
 //!   marks those branches; the builders still emit the intended SQL for the
 //!   follow-up fix only.
-//! * QUIRK-filtered-out-updated-at (`pi_dash/utils/issue_filters.py:230-238`):
-//!   `filter_updated_at` writes the `created_at__date` term, not
-//!   `updated_at__date` — an `updated_at` query param filters `created_at`.
-//!   [`compile_issue_filters`] keeps that mapping.
 //! * QUIRK-intake-status-fallback (`issue_filters.py:353-365`): the POST
 //!   branch of `filter_intake_status` reads `params.get("inbox_status")`,
 //!   not `"intake_status"`. This endpoint only uses `"GET"`, so the quirk
 //!   never fires here; it is recorded so a shared compiler does not
 //!   "fix" it.
-//! * QUIRK-count-filter-intake (`views/issue.py:170-177,196-203`): the
+//! * QUIRK-count-filter-intake (`views/issue.py:170-177,196-203`): Django's
 //!   grouped totals `count_filter` counts intake rows with `status IN
-//!   (1, -1, 2)` OR no intake row at all — status `0` (pending triage) and
-//!   any other status contribute zero to `total_results` while the row still
-//!   appears in `results`. [`count_filter_sql`] keeps that predicate as-is.
+//!   (1, -1, 2)` OR no intake row at all — status `-2` (pending) and `0`
+//!   (snoozed) contribute zero to `total_results` while the row still
+//!   appears in `results`, so the header reads short of the rows beneath
+//!   it (NEWPIDASH-276). The fixed behaviour (DIFF-52) drops the intake
+//!   leg: [`count_filter_sql`] counts every row the group returns.
 
 use serde::{Deserialize, Serialize};
 
@@ -481,9 +479,8 @@ pub fn compile_issue_filters(
                 }
                 next = n;
             }
-            // QUIRK-filtered-out-updated-at: writes the created_at term.
             "updated_at" => {
-                let (cs, n) = date_conjuncts("\"issues\".\"created_at\"", raw, true, next);
+                let (cs, n) = date_conjuncts("\"issues\".\"updated_at\"", raw, true, next);
                 for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
@@ -759,12 +756,17 @@ pub fn default_annotation_sql(key: &str) -> Option<String> {
 pub const GROUP_MISMATCH_BODY: &str =
     r#"{"error": "Group by and sub group by cannot have same parameters"}"#;
 
-/// Intake/archived/draft totals predicate shared by the grouped and
-/// sub-grouped paginators (`count_filter=Q(...)`, `views/issue.py:170-177`
-/// and `:196-203`; QUIRK-count-filter-intake documented at the top of this
-/// module).
+/// Archived/draft totals predicate shared by the grouped and sub-grouped
+/// paginators. Django's `count_filter=Q(...)` (`views/issue.py:170-177`
+/// and `:196-203`) also carries an intake leg (status 1/-1/2 or no intake
+/// row) that excludes pending (-2) and snoozed (0) intake issues from the
+/// totals while the rows still render them, so the group header reads
+/// short of the rows beneath it. The fixed behaviour (DIFF-52,
+/// NEWPIDASH-276) drops that leg so the totals count every row the group
+/// returns; the archived/draft legs are already implied by the base
+/// `WHERE` (`ISSUE_OBJECTS_WHERE`) and are kept for shape stability.
 pub fn count_filter_sql() -> String {
-    "((\"issue_intake\".\"status\" = 1 OR \"issue_intake\".\"status\" = -1 OR \"issue_intake\".\"status\" = 2 OR \"issue_intake\".\"id\" IS NULL) AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false)".to_string()
+    "(\"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false)".to_string()
 }
 
 /// Per-group totals query behind `__get_total_queryset`
@@ -1381,13 +1383,13 @@ mod tests {
     }
 
     #[test]
-    fn filters_updated_at_hits_created_at_and_type_always_emits() {
-        // QUIRK-filtered-out-updated-at: updated_at compiles to created_at,
-        // on the date part (`created_at__date`, `issue_filters.py:236`).
+    fn filters_updated_at_hits_updated_at_and_type_always_emits() {
+        // `updated_at` compares on the date part of the updated column
+        // (`updated_at__date`, `issue_filters.py:236`).
         let c = compile_issue_filters(&qp(&[("updated_at", "2026-01-01;after")]), 3);
         assert_eq!(
             c.conjuncts,
-            vec!["\"issues\".\"created_at\"::date >= $3".to_string()]
+            vec!["\"issues\".\"updated_at\"::date >= $3".to_string()]
         );
         assert_eq!(c.params, vec!["2026-01-01".to_string()]);
         // `start_date`/`target_date` are bare columns (no `__date` term).
@@ -1544,17 +1546,18 @@ mod tests {
         assert!(
             squashed(FIXTURE_SQL).contains("Group by and sub group by cannot have same parameters")
         );
-        // QUIRK-count-filter-intake: 1/-1/2-or-null + archived-null + draft.
+        // DIFF-52 (NEWPIDASH-276): the totals count every row the group
+        // returns — no intake leg, so pending/snoozed intake issues are
+        // counted instead of rendering uncounted.
         let count = count_filter_sql();
         for frag in [
-            "\"issue_intake\".\"status\" = 1",
-            "\"issue_intake\".\"status\" = -1",
-            "\"issue_intake\".\"status\" = 2",
-            "\"issue_intake\".\"id\" IS NULL",
             "\"issues\".\"archived_at\" IS NULL",
             "\"issues\".\"is_draft\" = false",
         ] {
             assert!(count.contains(frag), "{frag}");
+        }
+        for frag in ["issue_intake", "\"status\""] {
+            assert!(!count.contains(frag), "{frag} must not appear in {count}");
         }
         let grouped = grouped_window_sql("priority", "-created_at");
         assert!(grouped.contains("PARTITION BY priority"));

@@ -11,8 +11,20 @@
 
 import { Avatar, IconButton, Menu, Tooltip, type MenuEntry } from "@pidash/kit";
 import type { IssueComment } from "@pidash/api-client";
-import { Copy, Globe, Lock, MoreHorizontal, Pencil, Trash2, UnfoldVertical, FoldVertical } from "lucide-react";
+import {
+  Copy,
+  Globe,
+  Lock,
+  MessageSquare,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+  UnfoldVertical,
+  FoldVertical,
+} from "lucide-react";
 import * as React from "react";
+
+import { TimelineRow, type TimelinePosition } from "../activity/TimelineRow.js";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { descriptionAssetSrc, RichTextView } from "../../../shared/editor/index.js";
@@ -59,6 +71,8 @@ export interface CommentCardProps {
   viewerId: string | null;
   /** True while the thread is archived: no menu, no edit, no reactions. */
   readOnly: boolean;
+  /** Where the card sits in the timeline; trims the rail at the ends. */
+  position?: TimelinePosition | undefined;
   access: CommentAccessFlags;
   onEdit: (commentId: string, html: string) => Promise<unknown>;
   onDelete: (commentId: string) => void;
@@ -104,6 +118,7 @@ export function CommentCard({
   comment,
   viewerId,
   readOnly,
+  position = "only",
   access,
   onEdit,
   onDelete,
@@ -144,100 +159,109 @@ export function CommentCard({
       );
 
   return (
-    <article id={commentDomId(comment.id)} className="flex flex-col gap-(--space-2)">
-      <header className="flex items-start gap-(--space-2)">
-        <Avatar name={name} {...(avatar === undefined ? {} : { src: avatar })} size="small" className="mt-0.5" />
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-(--space-2)">
-          <span className="text-meta font-medium text-(--text)">{name}</span>
-          <Tooltip content={`${new Date(comment.created_at).toLocaleString()}${edited ? " (edited)" : ""}`}>
-            <button
-              type="button"
-              className="text-caption text-(--text-muted) hover:text-(--text)"
-              aria-label={`Commented ${timeAgo(comment.created_at)}${edited ? ", edited" : ""}`}
-            >
-              {timeAgo(comment.created_at)}
-              {edited ? " (edited)" : ""}
-            </button>
-          </Tooltip>
-          {folded && !editing ? (
-            <button
-              type="button"
-              aria-expanded={expanded}
-              className="text-caption text-(--text-muted) hover:text-(--text)"
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {expanded ? "Click to collapse" : "Folded comment · Click to expand"}
-            </button>
-          ) : null}
-        </div>
-        {access.toggle ? (
-          <span className="shrink-0 pt-(--space-1) text-(--text-muted)">
-            <Tooltip content={comment.access === "INTERNAL" ? "Private comment" : "Public comment"}>
-              <span aria-label={comment.access === "INTERNAL" ? "Private comment" : "Public comment"}>
-                {comment.access === "INTERNAL" ? (
-                  <Lock size={12} strokeWidth={1.5} />
-                ) : (
-                  <Globe size={12} strokeWidth={1.5} />
-                )}
-              </span>
+    <TimelineRow
+      position={position}
+      badgeLabel="Comment"
+      badge={<MessageSquare size={14} strokeWidth={1.5} aria-hidden="true" />}
+    >
+      <article
+        id={commentDomId(comment.id)}
+        className="rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-3)"
+      >
+        <header className="flex items-start gap-(--space-2)">
+          <Avatar name={name} {...(avatar === undefined ? {} : { src: avatar })} size="small" className="mt-0.5" />
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-(--space-2)">
+            <span className="text-meta font-medium text-(--text)">{name}</span>
+            <Tooltip content={`${new Date(comment.created_at).toLocaleString()}${edited ? " (edited)" : ""}`}>
+              <button
+                type="button"
+                className="text-caption text-(--text-muted) hover:text-(--text)"
+                aria-label={`Commented ${timeAgo(comment.created_at)}${edited ? ", edited" : ""}`}
+              >
+                {timeAgo(comment.created_at)}
+                {edited ? " (edited)" : ""}
+              </button>
             </Tooltip>
-          </span>
-        ) : null}
-        {readOnly ? null : (
-          <CommentReactionPicker
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issueId={comment.issue}
-            commentId={comment.id}
-          />
-        )}
-        {readOnly || items.length === 0 ? null : (
-          <Menu
-            trigger={
-              <IconButton label="Comment actions" size="small">
-                <MoreHorizontal size={16} strokeWidth={1.5} />
-              </IconButton>
-            }
-            items={items}
-          />
-        )}
-      </header>
-      {editing ? (
-        <CommentEditForm
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          comment={comment}
-          onSave={async (html) => {
-            await onEdit(comment.id, html);
-            setEditing(false);
-          }}
-          onCancel={() => setEditing(false)}
-        />
-      ) : showBody ? (
-        <>
-          {empty ? (
-            <p className="text-body text-(--text-muted)">This comment has no text.</p>
-          ) : (
-            <RichTextView
-              html={comment.comment_html}
-              label={`Comment by ${name}`}
-              className="pl-(--space-8)"
-              resolveAsset={resolveAsset}
-              workspaceSlug={workspaceSlug}
-            />
-          )}
-          {/* Folded cards and archived issues hide the whole cluster (ISS-203). */}
+            {folded && !editing ? (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                className="text-caption text-(--text-muted) hover:text-(--text)"
+                onClick={() => setExpanded((value) => !value)}
+              >
+                {expanded ? "Click to collapse" : "Folded comment · Click to expand"}
+              </button>
+            ) : null}
+          </div>
+          {access.toggle ? (
+            <span className="shrink-0 pt-(--space-1) text-(--text-muted)">
+              <Tooltip content={comment.access === "INTERNAL" ? "Private comment" : "Public comment"}>
+                <span aria-label={comment.access === "INTERNAL" ? "Private comment" : "Public comment"}>
+                  {comment.access === "INTERNAL" ? (
+                    <Lock size={12} strokeWidth={1.5} />
+                  ) : (
+                    <Globe size={12} strokeWidth={1.5} />
+                  )}
+                </span>
+              </Tooltip>
+            </span>
+          ) : null}
           {readOnly ? null : (
-            <CommentReactions
+            <CommentReactionPicker
               workspaceSlug={workspaceSlug}
               projectId={projectId}
               issueId={comment.issue}
               commentId={comment.id}
-              className="pl-(--space-8)"
             />
           )}
-        </>
-      ) : null}
-    </article>
+          {readOnly || items.length === 0 ? null : (
+            <Menu
+              trigger={
+                <IconButton label="Comment actions" size="small">
+                  <MoreHorizontal size={16} strokeWidth={1.5} />
+                </IconButton>
+              }
+              items={items}
+            />
+          )}
+        </header>
+        {editing ? (
+          <div className="mt-(--space-2)">
+            <CommentEditForm
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              comment={comment}
+              onSave={async (html) => {
+                await onEdit(comment.id, html);
+                setEditing(false);
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          </div>
+        ) : showBody ? (
+          <div className="mt-(--space-2) flex flex-col gap-(--space-2)">
+            {empty ? (
+              <p className="text-body text-(--text-muted)">This comment has no text.</p>
+            ) : (
+              <RichTextView
+                html={comment.comment_html}
+                label={`Comment by ${name}`}
+                resolveAsset={resolveAsset}
+                workspaceSlug={workspaceSlug}
+              />
+            )}
+            {/* Folded cards and archived issues hide the whole cluster (ISS-203). */}
+            {readOnly ? null : (
+              <CommentReactions
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                issueId={comment.issue}
+                commentId={comment.id}
+              />
+            )}
+          </div>
+        ) : null}
+      </article>
+    </TimelineRow>
   );
 }

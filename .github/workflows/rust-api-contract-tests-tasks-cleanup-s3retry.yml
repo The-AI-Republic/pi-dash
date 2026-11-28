@@ -29,7 +29,7 @@ concurrency:
 jobs:
   tasks-cleanup-s3retry-django:
     name: tasks_cleanup S3 retry vs Django worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -157,7 +157,7 @@ jobs:
 
   tasks-cleanup-s3retry-rust:
     name: tasks_cleanup S3 retry vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
