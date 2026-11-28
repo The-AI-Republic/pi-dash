@@ -313,6 +313,7 @@ Create a work item under a project.
 pidash issue create --title <TITLE> [--project <P>]
                     [--description <D> | --description-file <PATH>]
                     [--priority <P>] [--state <S>]
+                    [--output json|id]
 ```
 
 | Flag                        | Purpose                                                                                                                         |
@@ -323,12 +324,32 @@ pidash issue create --title <TITLE> [--project <P>]
 | `--description-file <PATH>` | Read the markdown description from a file; `-` reads stdin. Conflicts with `--description`. Empty input is an error (exit `2`). |
 | `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                                              |
 | `--state <S>`               | Initial state — name (case-insensitive) or UUID.                                                                                |
+| `--output <O>`              | `json` (default) prints the created work item; `id` prints only its identifier (`PROJ-123`) and a newline, for scripts.         |
 
 **How descriptions land.** The CLI sends the markdown as `description_markdown`, and the server converts it with the same markdown → rich-text converter the page commands use. Headings, nested lists, task-list checkboxes, fenced code blocks (with language) and tables keep their structure in the web editor. For a long or multi-line body, write it to a file or pipe it instead of quoting it on the command line:
 
 ```
 generate-body | pidash issue create --project ENG --title "Cold start: crate foo" --description-file -
 ```
+
+**Output.** With the default `--output json`, stdout is one JSON object: the server's work-item payload with an `identifier` added by the CLI. Fields a script can rely on:
+
+| Field         | Meaning                                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------------------- |
+| `identifier`  | Project-scoped key, `<PROJECT>-<sequence_id>` (e.g. `ENG-123`). Use it with `issue get`, `patch`, `relate`. |
+| `sequence_id` | The number part of the key (integer).                                                                       |
+| `url`         | Absolute web URL of the issue. Omitted when the deployment has no `WEB_URL` / `APP_BASE_URL` configured.    |
+| `id`          | Work-item UUID.                                                                                             |
+| `project`     | Project UUID.                                                                                               |
+
+The rest of the payload (`name`, `state`, `priority`, `labels`, …) is the same work-item shape the API returns. With `--output id`, stdout is only the identifier, so a script can capture it directly:
+
+```
+child=$(pidash issue create --project ENG --title "Follow-up: flaky test" --output id)
+pidash issue relate "$child" --blocked-by ENG-42
+```
+
+The `identifier` is taken from the created item itself: from its `url` (`…/browse/ENG-123`), or, when the deployment sends no `url`, from a read of the item's project after the create. Creating needs no permission beyond the create itself. If the project can't be read either, the work item still exists: the JSON comes without `identifier` (exit `0`, with a note on stderr), and `--output id` exits `5` with an error naming the created item, so a script must not retry it blindly. An unknown `--project` exits `4` and creates nothing.
 
 ### `pidash issue list --project <P>`
 
@@ -581,15 +602,16 @@ pidash page unarchive 550e8400-e29b-41d4-a716-446655440000 --project ENG
 
 ## States
 
-### `pidash state list [PROJECT_OR_ISSUE]`
+### `pidash state list [PROJECT_OR_ISSUE] [--project <PROJ-or-UUID>]`
 
-List workflow states for a project. Without an argument, uses the current issue context from `PIDASH_ISSUE_IDENTIFIER`.
+List workflow states for a project. Without an argument, uses the current issue context from `PIDASH_ISSUE_IDENTIFIER`, then `PIDASH_PROJECT`. A positional argument shaped like `<PROJ>-<number>` is read as a work-item identifier; anything else is a project slug or UUID, so a project whose identifier itself looks like `<PROJ>-<number>` needs `--project`. `--project` takes the same forms as `issue list --project` and wins over the positional argument. An unknown project slug exits 4 with `project '<name>' not found`. A project UUID (hyphenated or compact) you cannot see exits 3 with `project '<uuid>' not found or not accessible`, because the server hides secret projects from non-members and so a missing project and a hidden one look the same; a visible project you cannot access keeps the server's permission error (exit 3). A supplied but blank target exits 2 rather than falling back to the run context.
 
 ```
 pidash state list             # uses current issue context
 pidash state list ENG         # project slug
 pidash state list ENG-42      # via work-item identifier
 pidash state list <UUID>      # project UUID
+pidash state list --project ENG
 ```
 
 ---

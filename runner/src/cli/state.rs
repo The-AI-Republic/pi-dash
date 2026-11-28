@@ -6,7 +6,11 @@
 
 use clap::{Args, Subcommand};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
+use serde_json::Value;
+
+use crate::api_client::{
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_UNKNOWN, report_error,
+};
 
 use super::resolve::{looks_like_uuid, resolve_issue};
 
@@ -27,11 +31,13 @@ pub struct StateArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
-    /// List states for the current issue's project. Optionally pass either a
-    /// project UUID or an issue identifier (e.g. `ENG-42`) to override the
-    /// current issue context from `PIDASH_ISSUE_IDENTIFIER`.
+    /// List states for the current issue's project. Optionally pass a
+    /// project identifier (e.g. `ENG`), a project UUID, or an issue
+    /// identifier (e.g. `ENG-42`) to override the current issue context
+    /// from `PIDASH_ISSUE_IDENTIFIER`.
     List {
-        /// Optional project UUID or work-item identifier.
+        /// Optional project identifier, project UUID, or work-item
+        /// identifier (`ENG`, `<uuid>`, `ENG-42`).
         project_or_issue: Option<String>,
         /// Project UUID or identifier (e.g. `ENG`). Wins over the
         /// positional argument; both default from `PIDASH_ISSUE_IDENTIFIER`,
@@ -80,32 +86,98 @@ async fn cmd_list(
 ) -> Result<(), CliError> {
     let current_issue = std::env::var(ISSUE_ENV).ok();
     let current_project = std::env::var(PROJECT_ENV).ok();
-    let target = state_list_target(
-        project.as_deref(),
+    let resp = list_states(
+        client,
         project_or_issue.as_deref(),
+        project.as_deref(),
         current_issue.as_deref(),
         current_project.as_deref(),
-    )?;
-    let project_id = match target {
-        StateListTarget::Project(project) => project,
-        StateListTarget::Issue(arg) => {
-            if looks_like_uuid(&arg) {
-                arg
-            } else {
-                resolve_issue(client, &arg).await?.project_id
-            }
-        }
-    };
-    let path = format!(
-        "workspaces/{}/projects/{}/states/",
-        client.env.workspace_slug, project_id
-    );
-    let resp = client.get(&path).await?;
+    )
+    .await?;
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// Fetch the states of the project named by `--project`, the positional
+/// argument, or the run context (see `state_list_target`). A project the
+/// server does not know (404) is reported by name.
+pub async fn list_states(
+    client: &ApiClient,
+    project_or_issue: Option<&str>,
+    project: Option<&str>,
+    current_issue: Option<&str>,
+    current_project: Option<&str>,
+) -> Result<Value, CliError> {
+    let target = state_list_target(project, project_or_issue, current_issue, current_project)?;
+    let (project_id, named_project) = match target {
+        StateListTarget::Project(project) => (project.clone(), Some(project)),
+        // A UUID in `PIDASH_ISSUE_IDENTIFIER` has always been used as the
+        // project UUID directly; keep that.
+        StateListTarget::Issue(arg) if looks_like_uuid(&arg) => (arg, None),
+        StateListTarget::Issue(arg) => (resolve_issue(client, &arg).await?.project_id, None),
+    };
+    let path = format!(
+        "workspaces/{}/projects/{}/states/",
+        client.env.workspace_slug, project_id
+    );
+    let err = match client.get(&path).await {
+        Ok(resp) => return Ok(resp),
+        Err(e) => e,
+    };
+    let Some(name) = named_project else {
+        return Err(err);
+    };
+    if err.exit_code == EXIT_NOT_FOUND {
+        return Err(project_not_found(&name, err));
+    }
+    // Both servers check project membership on the states route before
+    // they check that a UUID exists, so an unknown UUID answers 403. Ask
+    // project detail whether the project is visible. Detail hides secret
+    // projects from non-members, so its 404 cannot tell a missing project
+    // from a hidden one: name the project but keep the 403 (exit 3), never
+    // claim "not found". A visible project keeps the server's own 403.
+    if err.status == Some(403) && is_project_uuid(&name) {
+        let detail = format!(
+            "workspaces/{}/projects/{}/",
+            client.env.workspace_slug, name
+        );
+        if let Err(probe) = client.get(&detail).await
+            && probe.exit_code == EXIT_NOT_FOUND
+        {
+            let mut hidden = CliError::new(
+                err.exit_code,
+                format!("project '{name}' not found or not accessible"),
+            );
+            hidden.detail = err.detail;
+            hidden.status = err.status;
+            return Err(hidden);
+        }
+    }
+    Err(err)
+}
+
+/// A project UUID in either spelling both servers accept: hyphenated
+/// (36 chars) or compact (32 hex chars).
+fn is_project_uuid(s: &str) -> bool {
+    matches!(s.len(), 32 | 36) && uuid::Uuid::try_parse(s).is_ok()
+}
+
+fn project_not_found(name: &str, source: CliError) -> CliError {
+    let mut err = CliError::new(EXIT_NOT_FOUND, format!("project '{name}' not found"));
+    err.detail = source.detail;
+    err.status = source.status;
+    err
+}
+
+/// `<PROJ>-<number>`, e.g. `ENG-42`: the shape of a work-item identifier.
+/// Anything else that is not a UUID is taken as a project identifier.
+fn looks_like_issue_identifier(s: &str) -> bool {
+    s.rsplit_once('-').is_some_and(|(prefix, num)| {
+        !prefix.is_empty() && !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 fn state_list_target(
@@ -114,12 +186,30 @@ fn state_list_target(
     current_issue: Option<&str>,
     current_project: Option<&str>,
 ) -> Result<StateListTarget, CliError> {
+    // A target the caller supplied but left blank (`"$project"` with an
+    // empty variable) is an error, never a fallback to the run context.
     if let Some(project) = project {
+        let project = project.trim();
+        if project.is_empty() {
+            return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+        }
         return Ok(StateListTarget::Project(project.to_string()));
     }
-    // A bare UUID stays ambiguous by design: it may be a project UUID or
-    // an issue UUID, and both resolve to the same project below.
-    if let Some(arg) = explicit.or(current_issue) {
+    // The positional argument is a project (identifier or UUID) unless it
+    // has the `<PROJ>-<number>` shape of a work-item identifier.
+    if let Some(arg) = explicit.map(str::trim) {
+        if arg.is_empty() {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                "state list target must not be empty",
+            ));
+        }
+        if looks_like_uuid(arg) || !looks_like_issue_identifier(arg) {
+            return Ok(StateListTarget::Project(arg.to_string()));
+        }
+        return Ok(StateListTarget::Issue(arg.to_string()));
+    }
+    if let Some(arg) = current_issue {
         return Ok(StateListTarget::Issue(arg.to_string()));
     }
     current_project
@@ -127,7 +217,7 @@ fn state_list_target(
         .ok_or_else(|| {
             CliError::new(
                 EXIT_INVALID,
-                "state list requires a project UUID, issue identifier, PIDASH_ISSUE_IDENTIFIER, or PIDASH_PROJECT",
+                "state list requires a project identifier or UUID, issue identifier, PIDASH_ISSUE_IDENTIFIER, or PIDASH_PROJECT",
             )
         })
 }
@@ -135,6 +225,7 @@ fn state_list_target(
 #[cfg(test)]
 mod tests {
     use super::{StateListTarget, state_list_target};
+    use crate::api_client::EXIT_INVALID;
 
     fn issue(target: &StateListTarget) -> &str {
         match target {
@@ -165,6 +256,14 @@ mod tests {
     }
 
     #[test]
+    fn state_list_positional_project_forms_are_projects() {
+        for arg in ["ENG", "e509f5c9-c6fd-4b1a-a89c-8cb863610500", "MY-PROJ"] {
+            let target = state_list_target(None, Some(arg), Some("ENG-7"), None).expect("target");
+            assert_eq!(project(&target), arg);
+        }
+    }
+
+    #[test]
     fn state_list_falls_back_to_current_issue_env() {
         let target = state_list_target(None, None, Some("ENG-7"), Some("ENG")).expect("target");
         assert_eq!(issue(&target), "ENG-7");
@@ -177,11 +276,23 @@ mod tests {
     }
 
     #[test]
+    fn state_list_rejects_a_supplied_blank_target_even_with_run_context() {
+        for blank in ["", "   "] {
+            let err = state_list_target(None, Some(blank), Some("ENG-7"), Some("ENG"))
+                .expect_err("blank positional");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            let err = state_list_target(Some(blank), None, Some("ENG-7"), Some("ENG"))
+                .expect_err("blank --project");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+        }
+    }
+
+    #[test]
     fn state_list_requires_context() {
         let err = state_list_target(None, None, None, None).expect_err("missing target");
         assert_eq!(
             err.message,
-            "state list requires a project UUID, issue identifier, PIDASH_ISSUE_IDENTIFIER, or PIDASH_PROJECT"
+            "state list requires a project identifier or UUID, issue identifier, PIDASH_ISSUE_IDENTIFIER, or PIDASH_PROJECT"
         );
     }
 }

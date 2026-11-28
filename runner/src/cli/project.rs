@@ -88,6 +88,22 @@ pub async fn list_projects(client: &ApiClient) -> Result<Vec<ProjectRow>, CliErr
     project_rows_from_value(resp)
 }
 
+/// Read one project by identifier or UUID through `GET projects/{ref}/`.
+/// The server resolves `project_ref` exactly as it does for the work-item
+/// routes (identifier in any case, UUID in any spelling), independent of
+/// list paging and of archived filtering. An unknown project is a 404
+/// (exit 4).
+pub async fn get_project(client: &ApiClient, project_ref: &str) -> Result<ProjectRow, CliError> {
+    let path = format!(
+        "workspaces/{}/projects/{}/",
+        client.env.workspace_slug,
+        project_ref.trim()
+    );
+    let resp = client.get(&path).await?;
+    serde_json::from_value(resp)
+        .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("invalid project JSON: {e}")))
+}
+
 pub async fn resolve_project(
     client: &ApiClient,
     project_ref: &str,
