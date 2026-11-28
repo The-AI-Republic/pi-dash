@@ -311,14 +311,34 @@ impl RecoveryHold {
 /// start, before any run; a no-op where groups are not recovered. The
 /// groups that could not be resolved are returned so their runners stay
 /// reserved (review of #3501 at 1524d8e).
-pub async fn recover_orphaned_groups(data_dir: &Path) -> RecoveryHold {
+///
+/// `containment_on` is false under `PIDASH_CONTAINMENT=off`: that opt-out
+/// also stops startup recovery from signalling anything (as it stops the
+/// cgroup sweep). The records stay on disk for a later start with
+/// containment on.
+pub async fn recover_orphaned_groups(data_dir: &Path, containment_on: bool) -> RecoveryHold {
+    recover_in(record_dir(data_dir), RECOVERS, containment_on).await
+}
+
+/// [`recover_orphaned_groups`] for one record dir; `recovers` is
+/// [`RECOVERS`] outside tests.
+async fn recover_in(dir: PathBuf, recovers: bool, containment_on: bool) -> RecoveryHold {
     let mut hold = RecoveryHold {
-        dir: record_dir(data_dir),
+        dir,
         held: Vec::new(),
     };
-    if RECOVERS {
-        hold.recheck().await;
+    if !recovers {
+        return hold;
     }
+    if !containment_on {
+        if !list_records(&hold.dir).is_empty() {
+            tracing::warn!(
+                "PIDASH_CONTAINMENT=off: process groups a previous daemon left are not recovered"
+            );
+        }
+        return hold;
+    }
+    hold.recheck().await;
     hold
 }
 
@@ -733,6 +753,29 @@ mod process_tests {
         assert!(!status.success(), "the member must have been signalled");
         let _ = anchor.wait();
         assert!(!path.exists(), "the record must be removed");
+    }
+
+    /// Review of #3501 at 5542f04 (MUST 5): with containment off, startup
+    /// recovery signals nothing and keeps the record, as the cgroup sweep
+    /// does under the same opt-out.
+    #[tokio::test]
+    async fn containment_off_skips_startup_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut anchor, a) = spawn_anchor();
+        let mut member = spawn_member(a.pgid);
+        let record = record_for(&a, dead_pid());
+        let path = write_record(dir.path(), &record).unwrap();
+        orphan(&mut anchor);
+
+        let hold = recover_in(dir.path().to_path_buf(), true, false).await;
+
+        assert!(hold.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = running(&mut member) && running(&mut anchor);
+        reap(&mut member);
+        reap_anchor(&mut anchor);
+        assert!(alive, "recovery signalled a group with containment off");
+        assert!(path.exists(), "the record must be kept");
     }
 
     #[test]

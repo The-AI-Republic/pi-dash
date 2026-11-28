@@ -107,6 +107,12 @@ fn backend() -> BackendKind {
     })
 }
 
+/// Whether run containment is on (not `PIDASH_CONTAINMENT=off`, and a
+/// usable backend exists here). Startup recovery signals nothing when off.
+pub fn enabled() -> bool {
+    backend() != BackendKind::None
+}
+
 /// Pick a backend from the platform: cgroup on Linux (capability is
 /// verified per run, with process-group fallback inside the run) and
 /// process group elsewhere on Unix. Windows has no equivalent here.

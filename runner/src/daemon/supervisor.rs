@@ -133,8 +133,11 @@ impl Supervisor {
         // PDASHOSS01-417 part 3: process groups a dead daemon left (macOS)
         // are recovered from their records, then this daemon records its own.
         #[cfg(unix)]
-        let recovery_hold =
-            crate::util::group_recovery::recover_orphaned_groups(&paths.data_dir).await;
+        let recovery_hold = crate::util::group_recovery::recover_orphaned_groups(
+            &paths.data_dir,
+            containment::enabled(),
+        )
+        .await;
         #[cfg(unix)]
         crate::util::group_recovery::install(&paths.data_dir);
         for runner_cfg in &config.runners {
