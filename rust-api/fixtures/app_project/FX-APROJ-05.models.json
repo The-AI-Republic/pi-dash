@@ -85,8 +85,14 @@
           "type": "PositiveSmallIntegerField",
           "default": 2,
           "choices": [
-            ["0", "Secret"],
-            ["2", "Public"]
+            [
+              "0",
+              "Secret"
+            ],
+            [
+              "2",
+              "Public"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 2
@@ -272,14 +278,38 @@
           "max_length": 255,
           "default": "UTC",
           "choices": [
-            ["Africa/Abidjan", "Africa/Abidjan"],
-            ["Africa/Accra", "Africa/Accra"],
-            ["Africa/Addis_Ababa", "Africa/Addis_Ababa"],
-            ["Africa/Algiers", "Africa/Algiers"],
-            ["Africa/Asmara", "Africa/Asmara"],
-            ["Africa/Bamako", "Africa/Bamako"],
-            ["Africa/Bangui", "Africa/Bangui"],
-            ["Africa/Banjul", "Africa/Banjul"]
+            [
+              "Africa/Abidjan",
+              "Africa/Abidjan"
+            ],
+            [
+              "Africa/Accra",
+              "Africa/Accra"
+            ],
+            [
+              "Africa/Addis_Ababa",
+              "Africa/Addis_Ababa"
+            ],
+            [
+              "Africa/Algiers",
+              "Africa/Algiers"
+            ],
+            [
+              "Africa/Asmara",
+              "Africa/Asmara"
+            ],
+            [
+              "Africa/Bamako",
+              "Africa/Bamako"
+            ],
+            [
+              "Africa/Bangui",
+              "Africa/Bangui"
+            ],
+            [
+              "Africa/Banjul",
+              "Africa/Banjul"
+            ]
           ],
           "choices_truncated": true,
           "choices_count": 433
@@ -353,9 +383,18 @@
           "max_length": 24,
           "default": "pi_dash.core.agent_execution.get_default_agent_executor",
           "choices": [
-            ["local_runner", "Local Runner"],
-            ["cloud_agent", "Pi Dash Cloud Agent"],
-            ["managed_runner", "Pi Dash Agent"]
+            [
+              "local_runner",
+              "Local Runner"
+            ],
+            [
+              "cloud_agent",
+              "Pi Dash Cloud Agent"
+            ],
+            [
+              "managed_runner",
+              "Pi Dash Agent"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 3
@@ -371,25 +410,43 @@
       ],
       "meta": {
         "db_table": "projects",
-        "ordering": ["-created_at"],
+        "ordering": [
+          "-created_at"
+        ],
         "unique_together": [
-          ["identifier", "workspace", "deleted_at"],
-          ["name", "workspace", "deleted_at"]
+          [
+            "identifier",
+            "workspace",
+            "deleted_at"
+          ],
+          [
+            "name",
+            "workspace",
+            "deleted_at"
+          ]
         ],
         "constraints": [
           {
             "name": "project_unique_identifier_workspace_when_deleted_at_null",
-            "fields": ["identifier", "workspace"],
+            "fields": [
+              "identifier",
+              "workspace"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           },
           {
             "name": "project_unique_name_workspace_when_deleted_at_null",
-            "fields": ["name", "workspace"],
+            "fields": [
+              "name",
+              "workspace"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           },
           {
             "name": "project_unique_default_per_workspace",
-            "fields": ["workspace"],
+            "fields": [
+              "workspace"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True), ('is_default', True))"
           }
         ]
@@ -488,9 +545,18 @@
           "type": "PositiveSmallIntegerField",
           "default": 5,
           "choices": [
-            ["20", "Admin"],
-            ["15", "Member"],
-            ["5", "Guest"]
+            [
+              "20",
+              "Admin"
+            ],
+            [
+              "15",
+              "Member"
+            ],
+            [
+              "5",
+              "Guest"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 3
@@ -528,12 +594,23 @@
       ],
       "meta": {
         "db_table": "project_members",
-        "ordering": ["-created_at"],
-        "unique_together": [["project", "member", "deleted_at"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "member",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "project_member_unique_project_member_when_deleted_at_null",
-            "fields": ["project", "member"],
+            "fields": [
+              "project",
+              "member"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -644,9 +721,18 @@
           "type": "PositiveSmallIntegerField",
           "default": 5,
           "choices": [
-            ["20", "Admin"],
-            ["15", "Member"],
-            ["5", "Guest"]
+            [
+              "20",
+              "Admin"
+            ],
+            [
+              "15",
+              "Member"
+            ],
+            [
+              "5",
+              "Guest"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 3
@@ -654,7 +740,9 @@
       ],
       "meta": {
         "db_table": "project_member_invites",
-        "ordering": ["-created_at"],
+        "ordering": [
+          "-created_at"
+        ],
         "unique_together": [],
         "constraints": []
       }
@@ -735,12 +823,23 @@
       ],
       "meta": {
         "db_table": "project_identifiers",
-        "ordering": ["-created_at"],
-        "unique_together": [["name", "workspace", "deleted_at"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "workspace",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "unique_name_workspace_when_deleted_at_null",
-            "fields": ["name", "workspace"],
+            "fields": [
+              "name",
+              "workspace"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -863,12 +962,23 @@
       ],
       "meta": {
         "db_table": "project_user_properties",
-        "ordering": ["-created_at"],
-        "unique_together": [["user", "project", "deleted_at"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "user",
+            "project",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "project_user_property_unique_user_project_when_deleted_at_null",
-            "fields": ["user", "project"],
+            "fields": [
+              "user",
+              "project"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -989,8 +1099,15 @@
       ],
       "meta": {
         "db_table": "project_deploy_boards",
-        "ordering": ["-created_at"],
-        "unique_together": [["project", "anchor"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "anchor"
+          ]
+        ],
         "constraints": []
       }
     },
@@ -1075,12 +1192,23 @@
       ],
       "meta": {
         "db_table": "project_public_members",
-        "ordering": ["-created_at"],
-        "unique_together": [["project", "member", "deleted_at"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "project",
+            "member",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "project_public_member_unique_project_member_when_deleted_at_null",
-            "fields": ["project", "member"],
+            "fields": [
+              "project",
+              "member"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -1194,14 +1322,38 @@
           "max_length": 20,
           "default": "backlog",
           "choices": [
-            ["backlog", "Backlog"],
-            ["unstarted", "Unstarted"],
-            ["started", "Started"],
-            ["review", "Review"],
-            ["test", "Test"],
-            ["completed", "Completed"],
-            ["cancelled", "Cancelled"],
-            ["triage", "Triage"]
+            [
+              "backlog",
+              "Backlog"
+            ],
+            [
+              "unstarted",
+              "Unstarted"
+            ],
+            [
+              "started",
+              "Started"
+            ],
+            [
+              "review",
+              "Review"
+            ],
+            [
+              "test",
+              "Test"
+            ],
+            [
+              "completed",
+              "Completed"
+            ],
+            [
+              "cancelled",
+              "Cancelled"
+            ],
+            [
+              "triage",
+              "Triage"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 8
@@ -1237,12 +1389,23 @@
       ],
       "meta": {
         "db_table": "states",
-        "ordering": ["sequence"],
-        "unique_together": [["name", "project", "deleted_at"]],
+        "ordering": [
+          "sequence"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "project",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "state_unique_name_project_when_deleted_at_null",
-            "fields": ["name", "project"],
+            "fields": [
+              "name",
+              "project"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -1336,8 +1499,14 @@
           "max_length": 255,
           "default": "categories",
           "choices": [
-            ["categories", "Categories"],
-            ["points", "Points"]
+            [
+              "categories",
+              "Categories"
+            ],
+            [
+              "points",
+              "Points"
+            ]
           ],
           "choices_truncated": false,
           "choices_count": 2
@@ -1351,12 +1520,23 @@
       ],
       "meta": {
         "db_table": "estimates",
-        "ordering": ["name"],
-        "unique_together": [["name", "project", "deleted_at"]],
+        "ordering": [
+          "name"
+        ],
+        "unique_together": [
+          [
+            "name",
+            "project",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "estimate_unique_name_project_when_deleted_at_null",
-            "fields": ["name", "project"],
+            "fields": [
+              "name",
+              "project"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -1461,7 +1641,9 @@
       ],
       "meta": {
         "db_table": "estimate_points",
-        "ordering": ["value"],
+        "ordering": [
+          "value"
+        ],
         "unique_together": [],
         "constraints": []
       }
@@ -1609,12 +1791,23 @@
       ],
       "meta": {
         "db_table": "deploy_boards",
-        "ordering": ["-created_at"],
-        "unique_together": [["entity_name", "entity_identifier", "deleted_at"]],
+        "ordering": [
+          "-created_at"
+        ],
+        "unique_together": [
+          [
+            "entity_name",
+            "entity_identifier",
+            "deleted_at"
+          ]
+        ],
         "constraints": [
           {
             "name": "deploy_board_unique_entity_name_entity_identifier_when_deleted_at_null",
-            "fields": ["entity_name", "entity_identifier"],
+            "fields": [
+              "entity_name",
+              "entity_identifier"
+            ],
             "condition": "(AND: ('deleted_at__isnull', True))"
           }
         ]
@@ -1800,8 +1993,14 @@
       }
     ],
     "Project_NETWORK_CHOICES": [
-      [0, "Secret"],
-      [2, "Public"]
+      [
+        0,
+        "Secret"
+      ],
+      [
+        2,
+        "Public"
+      ]
     ],
     "IntakeIssueStatus": [
       {
@@ -1910,32 +2109,44 @@
     "missing": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     },
     "missing_uuid": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     },
     "wrong_workspace": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     },
     "none_value": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     },
     "int_value": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     },
     "deleted": {
       "ok": false,
       "exc": "Http404",
-      "args": ["Project not found"]
+      "args": [
+        "Project not found"
+      ]
     }
   },
   "resolve_id": {

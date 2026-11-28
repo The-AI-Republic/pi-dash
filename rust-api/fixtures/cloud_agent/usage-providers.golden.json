@@ -5,74 +5,107 @@
       "api_pattern": "https://api\\.anthropic\\.com",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["cached_tokens"],
+          "path": [
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["input_tokens"],
+          "path": [
+            "input_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["cache_creation_input_tokens"],
+          "path": [
+            "cache_creation_input_tokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cache_read_input_tokens"],
+          "path": [
+            "cache_read_input_tokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cache_creation_input_tokens"],
+          "path": [
+            "cache_creation_input_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["cache_creation", "ephemeral_5m_input_tokens"],
+          "path": [
+            "cache_creation",
+            "ephemeral_5m_input_tokens"
+          ],
           "dest": "cache_write_5m_tokens",
           "required": false
         },
         {
-          "path": ["cache_creation", "ephemeral_1h_input_tokens"],
+          "path": [
+            "cache_creation",
+            "ephemeral_1h_input_tokens"
+          ],
           "dest": "cache_write_1h_tokens",
           "required": false
         },
         {
-          "path": ["cache_read_input_tokens"],
+          "path": [
+            "cache_read_input_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["server_tool_use", "web_search_requests"],
+          "path": [
+            "server_tool_use",
+            "web_search_requests"
+          ],
           "dest": "web_searches",
           "required": false
         },
         {
-          "path": ["output_tokens_details", "thinking_tokens"],
+          "path": [
+            "output_tokens_details",
+            "thinking_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["output_tokens"],
+          "path": [
+            "output_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -83,44 +116,64 @@
       "api_pattern": "https://api\\.arcee\\.ai(?:/|$)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -138,32 +191,44 @@
       "chat": null,
       "default": [
         {
-          "path": ["inputTokens"],
+          "path": [
+            "inputTokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["cacheReadInputTokens"],
+          "path": [
+            "cacheReadInputTokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cacheWriteInputTokens"],
+          "path": [
+            "cacheWriteInputTokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cacheReadInputTokens"],
+          "path": [
+            "cacheReadInputTokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["cacheWriteInputTokens"],
+          "path": [
+            "cacheWriteInputTokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["outputTokens"],
+          "path": [
+            "outputTokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -174,37 +239,56 @@
       "api_pattern": "(https?://)?([^.]*\\.)?(?:openai\\.azure\\.com|azure-api\\.net|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -216,32 +300,48 @@
       "api_pattern": "https://inference\\.baseten\\.co(?:/|$)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -253,17 +353,24 @@
       "api_pattern": "https://api\\.cerebras\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -275,39 +382,56 @@
       "api_pattern": "https://api\\.cloudflare\\.com/client/v4/accounts/[^/]+/ai(?:/|$)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -319,12 +443,16 @@
       "chat": null,
       "default": [
         {
-          "path": ["input_tokens"],
+          "path": [
+            "input_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["output_tokens"],
+          "path": [
+            "output_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -341,27 +469,40 @@
       "api_pattern": "https://api\\.deepseek\\.com",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -373,27 +514,40 @@
       "api_pattern": "https://api\\.doubleword\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -405,27 +559,40 @@
       "api_pattern": "https://api\\.fireworks\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -437,22 +604,32 @@
       "api_pattern": "https://api\\.githubcopilot\\.com",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -464,44 +641,64 @@
       "api_pattern": "https://(.*\\.)?googleapis\\.com",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["promptTokenCount"],
+          "path": [
+            "promptTokenCount"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cachedContentTokenCount"],
+          "path": [
+            "cachedContentTokenCount"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
@@ -761,27 +958,37 @@
           "required": false
         },
         {
-          "path": ["candidatesTokenCount"],
+          "path": [
+            "candidatesTokenCount"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["thoughtsTokenCount"],
+          "path": [
+            "thoughtsTokenCount"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["thoughtsTokenCount"],
+          "path": [
+            "thoughtsTokenCount"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["toolUsePromptTokenCount"],
+          "path": [
+            "toolUsePromptTokenCount"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["toolUsePromptTokenCount"],
+          "path": [
+            "toolUsePromptTokenCount"
+          ],
           "dest": "input_tool_tokens",
           "required": false
         },
@@ -963,32 +1170,48 @@
       "chat": null,
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         }
@@ -999,74 +1222,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/cerebras",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1077,74 +1338,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/fireworks-ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1155,74 +1454,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/groq",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1233,74 +1570,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/hyperbolic",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1311,74 +1686,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/nebius",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1389,74 +1802,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/novita",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1467,74 +1918,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/nscale",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1545,74 +2034,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/ovhcloud",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1623,74 +2150,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/publicai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1701,74 +2266,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/sambanova",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1779,74 +2382,112 @@
       "api_pattern": "https://router\\.huggingface\\.co/together",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1857,54 +2498,76 @@
       "api_pattern": "https://api\\.minimax(i)?\\.(?:com|io)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["input_tokens"],
+          "path": [
+            "input_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["cache_creation_input_tokens"],
+          "path": [
+            "cache_creation_input_tokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cache_read_input_tokens"],
+          "path": [
+            "cache_read_input_tokens"
+          ],
           "dest": "input_tokens",
           "required": false
         },
         {
-          "path": ["cache_creation_input_tokens"],
+          "path": [
+            "cache_creation_input_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["cache_read_input_tokens"],
+          "path": [
+            "cache_read_input_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["output_tokens"],
+          "path": [
+            "output_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1916,22 +2579,32 @@
       "chat": null,
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1942,27 +2615,39 @@
       "api_pattern": "https://[^/]+\\.modal\\.(?:run|direct)(?:/|$)",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["reasoning_tokens"],
+          "path": [
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -1974,22 +2659,32 @@
       "api_pattern": "https://api\\.moonshot\\.",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2007,37 +2702,56 @@
       "api_pattern": "https://api\\.openai\\.com",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2049,37 +2763,56 @@
       "api_pattern": "https://(api\\.)?openrouter\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2091,74 +2824,112 @@
       "api_pattern": "https://oai\\.endpoints\\.kepler\\.ai\\.cloud\\.ovh\\.net",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2170,37 +2941,51 @@
       "chat": null,
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["reasoning_tokens"],
+          "path": [
+            "reasoning_tokens"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["reasoning_tokens"],
+          "path": [
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["citation_tokens"],
+          "path": [
+            "citation_tokens"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["citation_tokens"],
+          "path": [
+            "citation_tokens"
+          ],
           "dest": "output_citation_tokens",
           "required": false
         },
         {
-          "path": ["num_search_queries"],
+          "path": [
+            "num_search_queries"
+          ],
           "dest": "web_searches",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2211,37 +2996,56 @@
       "api_pattern": "https://api\\.quicksilverpro\\.io",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "cache_write_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cache_write_tokens"
+          ],
           "dest": "cache_write_tokens",
           "required": false
         },
         {
-          "path": ["prompt_tokens_details", "audio_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "input_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2260,12 +3064,16 @@
       "chat": null,
       "default": [
         {
-          "path": ["input_tokens"],
+          "path": [
+            "input_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["output_tokens"],
+          "path": [
+            "output_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2282,59 +3090,85 @@
       "api_pattern": "https://api\\.x\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "audio_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "audio_tokens"
+          ],
           "dest": "output_audio_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
       ],
       "default": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["cached_prompt_text_tokens"],
+          "path": [
+            "cached_prompt_text_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["reasoning_tokens"],
+          "path": [
+            "reasoning_tokens"
+          ],
           "dest": "output_tokens",
           "required": false
         },
         {
-          "path": ["reasoning_tokens"],
+          "path": [
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2345,22 +3179,32 @@
       "api_pattern": "https://api\\.z\\.ai",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }
@@ -2372,22 +3216,32 @@
       "api_pattern": "https://open\\.bigmodel\\.cn",
       "chat": [
         {
-          "path": ["prompt_tokens"],
+          "path": [
+            "prompt_tokens"
+          ],
           "dest": "input_tokens",
           "required": true
         },
         {
-          "path": ["prompt_tokens_details", "cached_tokens"],
+          "path": [
+            "prompt_tokens_details",
+            "cached_tokens"
+          ],
           "dest": "cache_read_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens_details", "reasoning_tokens"],
+          "path": [
+            "completion_tokens_details",
+            "reasoning_tokens"
+          ],
           "dest": "output_reasoning_tokens",
           "required": false
         },
         {
-          "path": ["completion_tokens"],
+          "path": [
+            "completion_tokens"
+          ],
           "dest": "output_tokens",
           "required": true
         }

@@ -171,7 +171,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-A3"],
+      "dispatched": [
+        "run-A3"
+      ],
       "logs": []
     },
     "A4_cross_stage_fresh": {
@@ -280,7 +282,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-A4"],
+      "dispatched": [
+        "run-A4"
+      ],
       "logs": []
     },
     "A5_handback_resume_parent": {
@@ -289,7 +293,9 @@
       "resume": "run-A5-impl",
       "result": "run-A5",
       "parent": "run-A5-impl",
-      "dispatched": ["run-A5"]
+      "dispatched": [
+        "run-A5"
+      ]
     },
     "A6_local_no_creator": {
       "issue": "FX8-25",

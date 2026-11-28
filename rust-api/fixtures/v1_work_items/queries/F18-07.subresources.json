@@ -128,11 +128,15 @@
       "source": "api/views/issue.py:2971-3008",
       "sql": "SELECT COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"issue_id\" ) FILTER (WHERE (\"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'blocked_by')), '{}'::uuid[]) AS \"blocking_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"related_issue_id\" ) FILTER (WHERE (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'blocked_by')), '{}'::uuid[]) AS \"blocked_by_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"related_issue_id\" ) FILTER (WHERE (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'duplicate')), '{}'::uuid[]) AS \"duplicate_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"issue_id\" ) FILTER (WHERE (\"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'duplicate')), '{}'::uuid[]) AS \"duplicate_ids_related\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"related_issue_id\" ) FILTER (WHERE (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'relates_to')), '{}'::uuid[]) AS \"relates_to_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"issue_id\" ) FILTER (WHERE (\"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'relates_to')), '{}'::uuid[]) AS \"relates_to_ids_related\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"issue_id\" ) FILTER (WHERE (\"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'start_before')), '{}'::uuid[]) AS \"start_after_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"related_issue_id\" ) FILTER (WHERE (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'start_before')), '{}'::uuid[]) AS \"start_before_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"issue_id\" ) FILTER (WHERE (\"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'finish_before')), '{}'::uuid[]) AS \"finish_after_ids\", COALESCE(ARRAY_AGG(DISTINCT \"issue_relations\".\"related_issue_id\" ) FILTER (WHERE (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid AND \"issue_relations\".\"relation_type\" = 'finish_before')), '{}'::uuid[]) AS \"finish_before_ids\" FROM \"issue_relations\" INNER JOIN \"workspaces\" ON (\"issue_relations\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid OR \"issue_relations\".\"related_issue_id\" = 'a7509d00345f47fbbee36bcf7d3339e2'::uuid) AND \"workspaces\".\"slug\" = 'ws-conv659-2')",
       "aggregate_result": {
-        "blocking_ids": ["25ace52e-c64d-4043-a700-911b1e42bffc"],
+        "blocking_ids": [
+          "25ace52e-c64d-4043-a700-911b1e42bffc"
+        ],
         "blocked_by_ids": [],
         "duplicate_ids": [],
         "duplicate_ids_related": [],
-        "relates_to_ids": ["2143bf91-62b6-45b6-8fe0-702122483419"],
+        "relates_to_ids": [
+          "2143bf91-62b6-45b6-8fe0-702122483419"
+        ],
         "relates_to_ids_related": [],
         "start_after_ids": [],
         "start_before_ids": [],
@@ -156,7 +160,11 @@
         "implemented_by": "implemented_by",
         "implements": "implemented_by"
       },
-      "is_reverse": ["blocking", "start_after", "finish_after"],
+      "is_reverse": [
+        "blocking",
+        "start_after",
+        "finish_after"
+      ],
       "refetch_note": "post create refetches by (issue/related pairs + actual_relation) with select_related issue__state, related_issue__state (:3111-3130); reverse uses RelatedIssueSerializer else IssueRelationSerializer"
     },
     "workpad_get_queryset": {

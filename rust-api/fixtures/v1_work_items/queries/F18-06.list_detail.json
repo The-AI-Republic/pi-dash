@@ -198,7 +198,15 @@
           "error": "Invalid assignee id(s): zzz. Expected user UUIDs."
         }
       },
-      "state_group_order": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled"]
+      "state_group_order": [
+        "backlog",
+        "unstarted",
+        "started",
+        "review",
+        "test",
+        "completed",
+        "cancelled"
+      ]
     },
     "ordering": {
       "source": "api/views/issue.py:361-437",
@@ -292,12 +300,18 @@
         "next_page_results": true,
         "prev_page_results": false
       },
-      "page1_ids": ["8cf74359-a898-48e9-95ac-0b6595ed4ff2", "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba"],
+      "page1_ids": [
+        "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+        "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba"
+      ],
       "page2": {
         "status": 200,
         "prev_cursor": "2:0:1",
         "next_cursor": "2:2:0",
-        "ids": ["a0481077-6fbd-47aa-9b27-ac2595085857", "772ffddc-9da2-4b8d-a49e-d195778bfce7"]
+        "ids": [
+          "a0481077-6fbd-47aa-9b27-ac2595085857",
+          "772ffddc-9da2-4b8d-a49e-d195778bfce7"
+        ]
       },
       "per_page_invalid": {
         "status": 400,

@@ -65,7 +65,9 @@ Reading material only: `tests/unit/bg_tasks/test_agent_ticker.py` (564),
 - `rrule/cron_to_rrule.golden.json` — `bgtasks/_rrule.py:125-212`
   (FREQ picker 159-175, `*/N` INTERVAL 179-195, BY* clauses 196-210);
   field grammar `:67-122`; DOW `7→0` `:147-149`; DOM+DOW rejection
-  `:151-157`. Vectors cover every FREQ path (incl. `0 */6 \* \* \*`→`FREQ=DAILY;BYHOUR=0,6,12,18`, not `HOURLY;INTERVAL=6`), Sunday `0`vs`7`, and all bad-grammar rejections (error type + message).
+  `:151-157`. Vectors cover every FREQ path (incl. `0 */6 * * *` →
+  `FREQ=DAILY;BYHOUR=0,6,12,18`, not `HOURLY;INTERVAL=6`), Sunday `0`
+  vs `7`, and all bad-grammar rejections (error type + message).
 - `rrule/validate.golden.json` — `bgtasks/_rrule.py:218-263`
   (empty ok `:230-231`; SECONDLY rejected `:256-259`).
 - `rrule/next_fire.golden.json` — `bgtasks/_rrule.py:269-336`

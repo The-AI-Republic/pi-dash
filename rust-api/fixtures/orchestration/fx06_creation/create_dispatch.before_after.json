@@ -161,7 +161,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-C1"],
+      "dispatched": [
+        "run-C1"
+      ],
       "on_commit": []
     },
     "C2_created_with_parent_and_pin": {
@@ -321,7 +323,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-C2"],
+      "dispatched": [
+        "run-C2"
+      ],
       "on_commit": []
     },
     "C3_fresh_session_drops_parent_and_pin": {
@@ -437,7 +441,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-C3"],
+      "dispatched": [
+        "run-C3"
+      ],
       "on_commit": []
     },
     "C5_render_failed": {
@@ -476,7 +482,9 @@
         "ended_at": "2026-06-01T12:00:00+00:00"
       },
       "dispatched": [],
-      "on_commit": ["finalize_agent_run.<locals>.<lambda>"]
+      "on_commit": [
+        "finalize_agent_run.<locals>.<lambda>"
+      ]
     },
     "C6_executor_unavailable_no_run": {
       "before_runs": 0,

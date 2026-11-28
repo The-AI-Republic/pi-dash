@@ -14,11 +14,11 @@ Add a second queue inside the shared dev-machine daemon. Keep cloud selection an
 
 Example with five runners and a configured limit of two:
 
-| Moment                                           | Executing | Waiting locally | Unoccupied runners |
-| ------------------------------------------------ | --------: | --------------: | -----------------: |
-| Before new assignments                           |         1 |               0 |                  4 |
-| After four assignments arrive                    |         2 |               3 |                  0 |
-| After one execution finishes and the next starts |         2 |               2 |                  1 |
+| Moment | Executing | Waiting locally | Unoccupied runners |
+| --- | ---: | ---: | ---: |
+| Before new assignments | 1 | 0 | 4 |
+| After four assignments arrive | 2 | 3 | 0 |
+| After one execution finishes and the next starts | 2 | 2 | 1 |
 
 The cloud may assign another issue to the newly unoccupied runner; that assignment joins the local queue's tail. Waiting runs keep their original runner. The daemon does not choose a different runner or return a run to the pod just because its machine is at capacity.
 
@@ -49,22 +49,22 @@ Default: **three concurrent AgentRun executions per daemon**, independent of the
 
 ## 3. Findings in the current code
 
-| Area                        | Evidence                                                                                                                                                    | Design consequence                                                                                                                                                          |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cloud matching              | `apps/api/pi_dash/runner/services/matcher.py`, `drain_pod` / `drain_for_runner`; `rust-api/crates/services/src/runner_sessions/live_drains.rs`, `drain_pod` | Cloud locks eligible idle runners, chooses a run for each, persists its runner and `assigned` status, then delivers an assignment. Keep this algorithm.                     |
-| Busy reservation            | Python `matcher.py`, `BUSY_STATUSES`; Rust `runner_sessions/guards.rs`                                                                                      | `assigned` already occupies a runner. A new top-level run status is unnecessary for local capacity waiting.                                                                 |
-| Independent local execution | `runner/src/daemon/supervisor.rs`, `spawn_instance_tasks`, `RunnerLoop`, `ServerMsg::Assign`                                                                | Each instance has its own `current_run`. Assignment currently spawns an `AssignWorker` immediately. No shared execution permit exists in this path.                         |
-| Local busy rejection        | `RunnerLoop::nack_assign` and assignment guards                                                                                                             | Another issue or active chat on the same runner produces `AssignRejectedBusy`. Queue capacity exhaustion must not use that rejection: it is an accepted local wait.         |
-| Early heartbeat identity    | Assignment stamps `CurrentRunSummary` with `preparing` before worker setup                                                                                  | Waiting must likewise expose `in_flight_run` immediately. The field means “held assignment,” not only “agent process executing.”                                            |
-| Transport acknowledgment    | `RunnerLoop::run` sends `AckEntry` after handling the frame; `runner/src/cloud/http.rs` owns transport                                                      | A received assignment can be acknowledged long before completion. Persist queue ownership before transport acknowledgment.                                                  |
-| Execution acceptance        | `AssignWorker::handle_assign_inner` resolves the workspace, sends `Accept`, then spawns the bridge                                                          | Gate before workspace setup. Receiving a queued assignment must not send `Accept`.                                                                                          |
-| Cloud `Accept` semantics    | `apps/api/pi_dash/runner/views/run_endpoints.py`, `RunAcceptEndpoint`; Rust `api/src/runner_runs/run_endpoints.rs`, `run_accept_inner`                      | `Accept` changes status to `running`; `RunStarted` later records session metadata and start time. Preserve those semantics.                                                 |
-| Retired queue endpoint      | Python `RunQueuedEndpoint`; Rust `run_queued_inner`; `runner/src/cloud/protocol.rs`, `RunQueued`                                                            | `/queued/` now acknowledges and ignores the old worktree notice. Do not reuse it or revive `waiting_for_worktree`.                                                          |
-| Reconnect recovery          | Python `session_service.py`, `build_session_open_redeliver`, `reap_stale_busy_runs`; Rust `runner_sessions/session_service.rs`                              | Session open can redeliver assigned runs; matching reported in-flight IDs protect held runs. Recovery must reconcile durable local entries with cloud authority.            |
-| Offline/stall recovery      | Python `runner/tasks.py`, `fail_runs_on_offline_runners`, `reconcile_stalled_runs`; Rust jobs `runner_runs/offline_recovery.rs`, `sweeps_chat.rs`           | Offline expiry still applies. Agent-silence detection must distinguish fresh local waiting from an agent that actually stalled.                                             |
-| Shutdown                    | `runner/src/daemon/supervisor.rs`, shutdown drain; `runner/src/daemon/drain_journal.rs`                                                                     | Current shutdown reports held runs failed with `DaemonRestart`; the journal stores terminal delivery retries, not a durable work queue. Separate waiting from started work. |
-| Config/UI                   | `runner/src/config/schema.rs`, `DaemonConfig`; `runner/src/tui/app.rs`, `spawn_save_config`; `runner/src/service/reload.rs`                                 | Existing config save can restart the service. Add a dedicated live update path for the concurrency setting.                                                                 |
-| Shared IPC                  | `pidash-ipc/src/protocol.rs`; `runner/src/ipc/protocol.rs` re-exports it                                                                                    | Extend the shared protocol for settings and queue summaries, with additive/defaulted fields.                                                                                |
+| Area | Evidence | Design consequence |
+| --- | --- | --- |
+| Cloud matching | `apps/api/pi_dash/runner/services/matcher.py`, `drain_pod` / `drain_for_runner`; `rust-api/crates/services/src/runner_sessions/live_drains.rs`, `drain_pod` | Cloud locks eligible idle runners, chooses a run for each, persists its runner and `assigned` status, then delivers an assignment. Keep this algorithm. |
+| Busy reservation | Python `matcher.py`, `BUSY_STATUSES`; Rust `runner_sessions/guards.rs` | `assigned` already occupies a runner. A new top-level run status is unnecessary for local capacity waiting. |
+| Independent local execution | `runner/src/daemon/supervisor.rs`, `spawn_instance_tasks`, `RunnerLoop`, `ServerMsg::Assign` | Each instance has its own `current_run`. Assignment currently spawns an `AssignWorker` immediately. No shared execution permit exists in this path. |
+| Local busy rejection | `RunnerLoop::nack_assign` and assignment guards | Another issue or active chat on the same runner produces `AssignRejectedBusy`. Queue capacity exhaustion must not use that rejection: it is an accepted local wait. |
+| Early heartbeat identity | Assignment stamps `CurrentRunSummary` with `preparing` before worker setup | Waiting must likewise expose `in_flight_run` immediately. The field means “held assignment,” not only “agent process executing.” |
+| Transport acknowledgment | `RunnerLoop::run` sends `AckEntry` after handling the frame; `runner/src/cloud/http.rs` owns transport | A received assignment can be acknowledged long before completion. Persist queue ownership before transport acknowledgment. |
+| Execution acceptance | `AssignWorker::handle_assign_inner` resolves the workspace, sends `Accept`, then spawns the bridge | Gate before workspace setup. Receiving a queued assignment must not send `Accept`. |
+| Cloud `Accept` semantics | `apps/api/pi_dash/runner/views/run_endpoints.py`, `RunAcceptEndpoint`; Rust `api/src/runner_runs/run_endpoints.rs`, `run_accept_inner` | `Accept` changes status to `running`; `RunStarted` later records session metadata and start time. Preserve those semantics. |
+| Retired queue endpoint | Python `RunQueuedEndpoint`; Rust `run_queued_inner`; `runner/src/cloud/protocol.rs`, `RunQueued` | `/queued/` now acknowledges and ignores the old worktree notice. Do not reuse it or revive `waiting_for_worktree`. |
+| Reconnect recovery | Python `session_service.py`, `build_session_open_redeliver`, `reap_stale_busy_runs`; Rust `runner_sessions/session_service.rs` | Session open can redeliver assigned runs; matching reported in-flight IDs protect held runs. Recovery must reconcile durable local entries with cloud authority. |
+| Offline/stall recovery | Python `runner/tasks.py`, `fail_runs_on_offline_runners`, `reconcile_stalled_runs`; Rust jobs `runner_runs/offline_recovery.rs`, `sweeps_chat.rs` | Offline expiry still applies. Agent-silence detection must distinguish fresh local waiting from an agent that actually stalled. |
+| Shutdown | `runner/src/daemon/supervisor.rs`, shutdown drain; `runner/src/daemon/drain_journal.rs` | Current shutdown reports held runs failed with `DaemonRestart`; the journal stores terminal delivery retries, not a durable work queue. Separate waiting from started work. |
+| Config/UI | `runner/src/config/schema.rs`, `DaemonConfig`; `runner/src/tui/app.rs`, `spawn_save_config`; `runner/src/service/reload.rs` | Existing config save can restart the service. Add a dedicated live update path for the concurrency setting. |
+| Shared IPC | `pidash-ipc/src/protocol.rs`; `runner/src/ipc/protocol.rs` re-exports it | Extend the shared protocol for settings and queue summaries, with additive/defaulted fields. |
 
 One existing comment in the cloud matcher says chat and issue work can run concurrently; the current daemon's assignment handler explicitly rejects an assignment during an active chat on that runner. The daemon guard is the behavior this design preserves. Tests must cover the actual guard rather than relying on that comment.
 
@@ -139,14 +139,14 @@ Cloud admission and local cancellation cannot be one transaction. If cancellatio
 
 Keep the top-level state model:
 
-| Local phase                                 | Cloud AgentRun status     | Runner occupied? | Machine permit?           |
-| ------------------------------------------- | ------------------------- | ---------------- | ------------------------- |
-| Not delivered yet                           | `assigned`                | Yes              | No                        |
-| Waiting for capacity                        | `assigned`                | Yes              | No                        |
-| Preparing workspace                         | `assigned`                | Yes              | Yes                       |
-| Accepted / agent starting                   | `running`                 | Yes              | Yes                       |
-| Executing / approval or reauth              | Existing lifecycle status | Yes              | Yes while worker retained |
-| Terminal or fully stopped human-input pause | Existing lifecycle status | Existing rules   | No                        |
+| Local phase | Cloud AgentRun status | Runner occupied? | Machine permit? |
+| --- | --- | --- | --- |
+| Not delivered yet | `assigned` | Yes | No |
+| Waiting for capacity | `assigned` | Yes | No |
+| Preparing workspace | `assigned` | Yes | Yes |
+| Accepted / agent starting | `running` | Yes | Yes |
+| Executing / approval or reauth | Existing lifecycle status | Yes | Yes while worker retained |
+| Terminal or fully stopped human-input pause | Existing lifecycle status | Existing rules | No |
 
 Introduce the optional capability `machine_run_queue_v1`, advertised by the cloud session handshake. Implement it in the Rust backend and enable it only after the native schema upgrade succeeds. Legacy Python servers do not advertise it.
 
@@ -260,37 +260,37 @@ No cloud matcher algorithm change is required. Cloud availability still means an
 
 ## 13. Acceptance and test matrix
 
-| Scenario                                                                          | Required result                                                                               |
-| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Five runners, one executing, limit two, four assignments                          | One starts; three wait; all five runners are reserved.                                        |
-| Default config, ten runners with work                                             | At most three issue workers prepare/execute concurrently.                                     |
-| Multiple pods/workspaces and hot-added runners, including after a live limit edit | Every assignment uses the same daemon coordinator and its current effective limit.            |
-| Local FIFO                                                                        | Controlled arrival A/B/C starts in that order as slots free; new arrivals cannot jump ahead.  |
-| Duplicate waiting/starting/executing delivery                                     | One reservation, one queue position and at most one worker.                                   |
-| Same run ID with stale attempt token                                              | Stale entry cannot validate or launch.                                                        |
-| Cancel while waiting                                                              | No clone/agent launch; queue position updates; cancellation delivered idempotently.           |
-| Cancel races admission/start                                                      | Either never starts or follows executing cancellation; no permit leak.                        |
-| Running cancel with slow process exit                                             | Permit remains occupied until teardown completes.                                             |
-| Raise/lower limit live                                                            | Additional admission on raise; no preemption or new admission above reduced limit.            |
-| Config persistence failure                                                        | No reported successful setting change; current effective limit retained.                      |
-| Queue persistence failure before ACK                                              | No lost acknowledged assignment; diagnostic and transport recovery.                           |
-| Crash after receipt before ACK                                                    | Redelivery deduplicates and keeps persisted FIFO sequence.                                    |
-| Crash around admission/agent startup                                              | Potentially started entry is never automatically replayed.                                    |
-| Graceful restart with running and waiting work                                    | Running follows restart failure policy; confirmed waiting restores in order.                  |
-| Offline expiry while waiting                                                      | Cloud finalization wins; reconnect cannot launch that entry.                                  |
-| Fresh heartbeat with prolonged capacity wait                                      | No false missing-run, assignment-stall or agent-silence failure.                              |
-| Healthy capacity wait exceeds the latest 180-second assigned cutoff               | No reaping and no replacement scheduler run; stale/wrong-token waits retain bounded recovery. |
-| Terminal/cancel report arrives before delayed waiting report                      | No status/phase regression.                                                                   |
-| Waiting run and chat on same runner                                               | Reservation blocks new chat from taking the working directory lane.                           |
-| Old/new cloud and daemon combinations                                             | Explicit capability behavior; no use of retired worktree state.                               |
-| Different workspace viewers                                                       | See only authorized run details and aggregate capacity; no cross-workspace queue contents.    |
-| Duplicate transport message before durable receipt, then disk failure             | No inline ACK of the pending assignment; retry remains possible.                              |
-| Local chat starts while assignment storage is delayed                             | Exactly one lane reservation succeeds; no shared working-copy execution.                      |
-| Successful HTTP response with terminal/ignored/duplicate disposition              | No admission without explicit current `proceed`; response body is consumed.                   |
-| Old session attempts admission after session eviction                             | Admission rejected even with valid runner credentials.                                        |
-| Delayed terminal report from a superseded attempt                                 | New assignment remains unchanged.                                                             |
-| Completion channel closes before verified process exit                            | No premature permit release; teardown/recovery path owns the slot.                            |
-| Capability disappears while local work is queued                                  | No fallback that bypasses the configured limit.                                               |
+| Scenario | Required result |
+| --- | --- |
+| Five runners, one executing, limit two, four assignments | One starts; three wait; all five runners are reserved. |
+| Default config, ten runners with work | At most three issue workers prepare/execute concurrently. |
+| Multiple pods/workspaces and hot-added runners, including after a live limit edit | Every assignment uses the same daemon coordinator and its current effective limit. |
+| Local FIFO | Controlled arrival A/B/C starts in that order as slots free; new arrivals cannot jump ahead. |
+| Duplicate waiting/starting/executing delivery | One reservation, one queue position and at most one worker. |
+| Same run ID with stale attempt token | Stale entry cannot validate or launch. |
+| Cancel while waiting | No clone/agent launch; queue position updates; cancellation delivered idempotently. |
+| Cancel races admission/start | Either never starts or follows executing cancellation; no permit leak. |
+| Running cancel with slow process exit | Permit remains occupied until teardown completes. |
+| Raise/lower limit live | Additional admission on raise; no preemption or new admission above reduced limit. |
+| Config persistence failure | No reported successful setting change; current effective limit retained. |
+| Queue persistence failure before ACK | No lost acknowledged assignment; diagnostic and transport recovery. |
+| Crash after receipt before ACK | Redelivery deduplicates and keeps persisted FIFO sequence. |
+| Crash around admission/agent startup | Potentially started entry is never automatically replayed. |
+| Graceful restart with running and waiting work | Running follows restart failure policy; confirmed waiting restores in order. |
+| Offline expiry while waiting | Cloud finalization wins; reconnect cannot launch that entry. |
+| Fresh heartbeat with prolonged capacity wait | No false missing-run, assignment-stall or agent-silence failure. |
+| Healthy capacity wait exceeds the latest 180-second assigned cutoff | No reaping and no replacement scheduler run; stale/wrong-token waits retain bounded recovery. |
+| Terminal/cancel report arrives before delayed waiting report | No status/phase regression. |
+| Waiting run and chat on same runner | Reservation blocks new chat from taking the working directory lane. |
+| Old/new cloud and daemon combinations | Explicit capability behavior; no use of retired worktree state. |
+| Different workspace viewers | See only authorized run details and aggregate capacity; no cross-workspace queue contents. |
+| Duplicate transport message before durable receipt, then disk failure | No inline ACK of the pending assignment; retry remains possible. |
+| Local chat starts while assignment storage is delayed | Exactly one lane reservation succeeds; no shared working-copy execution. |
+| Successful HTTP response with terminal/ignored/duplicate disposition | No admission without explicit current `proceed`; response body is consumed. |
+| Old session attempts admission after session eviction | Admission rejected even with valid runner credentials. |
+| Delayed terminal report from a superseded attempt | New assignment remains unchanged. |
+| Completion channel closes before verified process exit | No premature permit release; teardown/recovery path owns the slot. |
+| Capability disappears while local work is queued | No fallback that bypasses the configured limit. |
 
 Use fake execution workers and controllable barriers to measure active preparation/execution count; do not rely on timing sleeps alone. Add backend contract tests against the Rust API and UI tests for live setting changes, waiting labels and stale snapshots. Crash-injection tests should cover every persistence/ACK/admission boundary.
 

@@ -216,7 +216,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-H5"],
+      "dispatched": [
+        "run-H5"
+      ],
       "logs": []
     },
     "H6_no_prior_fresh": {
@@ -368,7 +370,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-H6"],
+      "dispatched": [
+        "run-H6"
+      ],
       "logs": []
     },
     "H7a_wrapper_refused": {
@@ -556,7 +560,9 @@
           "resume_parent_run": null
         }
       },
-      "dispatched": ["run-H8"]
+      "dispatched": [
+        "run-H8"
+      ]
     },
     "H9_human_refused_rollback": {
       "issue": "FX8-34",

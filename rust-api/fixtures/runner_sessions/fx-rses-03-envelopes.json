@@ -29,8 +29,18 @@
     "decide",
     "resume_ack"
   ],
-  "valid_types_machine": ["config_push", "create_runner", "ping", "reconfigure_runner", "welcome"],
-  "offline_reject_machine": ["config_push", "create_runner", "reconfigure_runner"],
+  "valid_types_machine": [
+    "config_push",
+    "create_runner",
+    "ping",
+    "reconfigure_runner",
+    "welcome"
+  ],
+  "offline_reject_machine": [
+    "config_push",
+    "create_runner",
+    "reconfigure_runner"
+  ],
   "serialize": {
     "explicit_mid": {
       "mid": "mid-fixed-1",
@@ -218,7 +228,10 @@
       },
       {
         "cmd": "expire",
-        "args": ["'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'", "86400"],
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
         "kwargs": {},
         "result": "True"
       },
@@ -236,7 +249,10 @@
       },
       {
         "cmd": "expire",
-        "args": ["'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'", "86400"],
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
         "kwargs": {},
         "result": "True"
       },
@@ -254,7 +270,10 @@
       },
       {
         "cmd": "expire",
-        "args": ["'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'", "86400"],
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
         "kwargs": {},
         "result": "True"
       },
@@ -272,7 +291,10 @@
       },
       {
         "cmd": "expire",
-        "args": ["'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'", "86400"],
+        "args": [
+          "'runner_offline_stream:7b1bf059-c24d-4a55-ae1a-20b8b05a160b'",
+          "86400"
+        ],
         "kwargs": {},
         "result": "True"
       }
@@ -340,7 +362,9 @@
     "redis": [
       {
         "cmd": "delete",
-        "args": ["'session_pel_drained:028337e1-72e4-4f0e-98ec-bd2be4890179'"],
+        "args": [
+          "'session_pel_drained:028337e1-72e4-4f0e-98ec-bd2be4890179'"
+        ],
         "kwargs": {},
         "result": "0"
       },

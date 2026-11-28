@@ -69,19 +69,19 @@ The page/editor AI endpoints (`/api/workspaces/{slug}/ai-assistant/`, `/rephrase
 
 ## 3. Decisions
 
-| ID   | Decision                                                                                                                                                                                        |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D-1  | One catalog, edited in god mode, feeds all three surfaces.                                                                                                                                      |
-| D-2  | Each surface has its own saved choice. The list is shared; the choice is not.                                                                                                                   |
-| D-3  | The choice is stored on `profiles` as JSONB (revision 2: in the existing `profiles.settings` bag, section 4.1).                                                                                 |
-| D-4  | Changing the model in the composer picker changes that surface's default. No per-conversation model.                                                                                            |
-| D-5  | All three choices are made in Assistant Settings. The desktop agent's status area links there.                                                                                                  |
-| D-6  | BYOK model IDs are typed by the user. No provider model discovery.                                                                                                                              |
-| D-7  | A BYOK key holds a list of model IDs. A new key cannot be saved without at least one.                                                                                                           |
-| D-8  | Removing a model is always allowed. Removing the last one asks for confirmation and then deletes the key.                                                                                       |
-| D-9  | Every added model ID is smoke-tested before it is saved.                                                                                                                                        |
-| D-10 | The assistant picker shows catalog and BYOK models in one list. The same model ID through two connections is two choices.                                                                       |
-| D-11 | An invalid saved choice falls back to the catalog default.                                                                                                                                      |
+| ID | Decision |
+|---|---|
+| D-1 | One catalog, edited in god mode, feeds all three surfaces. |
+| D-2 | Each surface has its own saved choice. The list is shared; the choice is not. |
+| D-3 | The choice is stored on `profiles` as JSONB (revision 2: in the existing `profiles.settings` bag, section 4.1). |
+| D-4 | Changing the model in the composer picker changes that surface's default. No per-conversation model. |
+| D-5 | All three choices are made in Assistant Settings. The desktop agent's status area links there. |
+| D-6 | BYOK model IDs are typed by the user. No provider model discovery. |
+| D-7 | A BYOK key holds a list of model IDs. A new key cannot be saved without at least one. |
+| D-8 | Removing a model is always allowed. Removing the last one asks for confirmation and then deletes the key. |
+| D-9 | Every added model ID is smoke-tested before it is saved. |
+| D-10 | The assistant picker shows catalog and BYOK models in one list. The same model ID through two connections is two choices. |
+| D-11 | An invalid saved choice falls back to the catalog default. |
 | D-12 | The Pi Dash Agent stays OpenHub-only (BYOK keys are never sent to a client). OSS gets the same multi-model BYOK list and per-surface choice. Temporary smoke-test failures may be saved anyway. |
 
 ## 4. Data model
@@ -93,9 +93,9 @@ Stored in the existing bag under the namespace `assistant_models`:
 ```json
 {
   "assistant_models": {
-    "web_assistant": { "model": "moonshotai/kimi-k3", "connection_id": "6f1c…" },
+    "web_assistant":     { "model": "moonshotai/kimi-k3", "connection_id": "6f1c…" },
     "desktop_assistant": { "model": "gpt-6", "connection_id": "a93e…" },
-    "agent": { "model": "deepseek/deepseek-v4-pro" }
+    "agent":             { "model": "deepseek/deepseek-v4-pro" }
   }
 }
 ```
@@ -160,15 +160,15 @@ One resolver per build: `(user, surface) → Resolution { effective: Choice | No
 
 `AssistantModelSeam` (`rust-api/crates/services/src/extensions.rs:173`) and `TurnSeam` (`rust-api/crates/jobs/src/assistant/run_turn.rs`):
 
-| Method                                                   | Change                                                  |
-| -------------------------------------------------------- | ------------------------------------------------------- |
-| `has_usable_llm_config(user_id, has_api_key)`            | gains `surface`. True when the resolver finds a choice. |
-| `pidash_agent_profile(…)` / `pidash_agent_credential(…)` | resolve with `Surface::Agent`.                          |
-| `model_label(…)`                                         | gains `surface`.                                        |
-| `generate_title(TitleRequest)`                           | `TitleRequest` gains `surface`.                         |
-| new `resolve_choice(user_id, surface)`                   | returns the `Resolution` (used by section 6.1 GET).     |
-| new `validate_choice(user_id, surface, entry)`           | section 6.1 PUT validation.                             |
-| `TurnSeam::resolve_model` / `model_label`                | read `ctx.surface`.                                     |
+| Method | Change |
+|---|---|
+| `has_usable_llm_config(user_id, has_api_key)` | gains `surface`. True when the resolver finds a choice. |
+| `pidash_agent_profile(…)` / `pidash_agent_credential(…)` | resolve with `Surface::Agent`. |
+| `model_label(…)` | gains `surface`. |
+| `generate_title(TitleRequest)` | `TitleRequest` gains `surface`. |
+| new `resolve_choice(user_id, surface)` | returns the `Resolution` (used by section 6.1 GET). |
+| new `validate_choice(user_id, surface, entry)` | section 6.1 PUT validation. |
+| `TurnSeam::resolve_model` / `model_label` | read `ctx.surface`. |
 
 All callers in section 2.3 pass `Surface::Agent`. The direct CE call at `v1_work_items/handlers_actions.rs:1032` moves behind the seam, so the cloud build answers it. **Check during implementation** whether that direct call is already wrong in cloud today (it ignores the OpenHub lane); if so, fix it in the same change.
 
@@ -192,12 +192,12 @@ All callers in section 2.3 pass `Surface::Agent`. The direct CE call at `v1_work
 {
   "surfaces": {
     "web_assistant": {
-      "saved": { "model": "modelC", "connection_id": "a93e…" },
+      "saved":     { "model": "modelC", "connection_id": "a93e…" },
       "effective": { "model": "openhub_free_llm", "connection_id": "6f1c…" },
       "fallback_reason": "model_removed"
     },
     "desktop_assistant": { "saved": null, "effective": { "…": "…" }, "fallback_reason": "none_saved" },
-    "agent": { "saved": null, "effective": null, "fallback_reason": "lane_unavailable" }
+    "agent":             { "saved": null, "effective": null, "fallback_reason": "lane_unavailable" }
   }
 }
 ```
@@ -228,18 +228,11 @@ All three write paths: OSS `/config/`, cloud `/config/` override, cloud `/connec
 - Every write runs the smoke test (section 7.2) and returns per-ID results:
 
 ```json
-{
-  "models": [
-    { "model": "gpt-6", "status": "verified" },
-    {
-      "model": "gpt-6.3",
-      "status": "failed",
-      "code": "model_invalid",
-      "detail": "Model not accepted by the provider."
-    },
+{ "models": [
+    { "model": "gpt-6",   "status": "verified" },
+    { "model": "gpt-6.3", "status": "failed", "code": "model_invalid", "detail": "Model not accepted by the provider." },
     { "model": "gpt-6.2", "status": "unverified", "code": "provider_unreachable" }
-  ]
-}
+] }
 ```
 
 - A write is rejected (`400 model_test_failed`, same per-ID body, nothing saved) when any new ID is `failed`, or when an ID is `unverified` and the body did not set `"save_unverified": true` ("Save anyway").
@@ -267,11 +260,11 @@ The picker marks the effective choice. When `fallback_reason` is set and `saved`
 - **What:** the existing probe (`probe.rs`), unchanged prompt and `max_tokens: 16`, after the existing base-URL SSRF check. At most **4 probes in parallel** per request and a **20 s** per-probe timeout for save-time tests (the 60 s timeout stays for the single-model test button), so a 20-model save finishes in about 100 s at worst. The frontend shows per-ID progress.
 - **Result mapping** (on the existing `classify_probe` codes):
 
-| Probe code                              | Status       | Save                                                     |
-| --------------------------------------- | ------------ | -------------------------------------------------------- |
-| success                                 | `verified`   | saved, `model_verified_at[id] = now`                     |
-| `provider_auth_failed`, `model_invalid` | `failed`     | blocked; the form shows the detail next to the ID        |
-| `provider_unreachable`                  | `unverified` | "Save anyway"; saved without a `model_verified_at` entry |
+| Probe code | Status | Save |
+|---|---|---|
+| success | `verified` | saved, `model_verified_at[id] = now` |
+| `provider_auth_failed`, `model_invalid` | `failed` | blocked; the form shows the detail next to the ID |
+| `provider_unreachable` | `unverified` | "Save anyway"; saved without a `model_verified_at` entry |
 
 - `provider_unreachable` also covers a wrong base URL, so "Save anyway" can save a dead endpoint. That is accepted: the model shows "not verified" and the first turn shows the provider error with the model and connection named.
 - A new key is saved only if no new ID is `failed` (the user fixes or removes those first).
@@ -301,18 +294,18 @@ The picker marks the effective choice. When `fallback_reason` is set and `saved`
 
 ## 8. OSS and cloud split
 
-| Piece                                                                       | OSS (`pi-dash`)                                          | Cloud (`private-pi-dash`)                              |
-| --------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
-| `Surface` type, seam signature changes                                      | ✓                                                        | implement the new signatures                           |
-| `assistant_turn.surface`, `TurnContext.surface`, stamping in `post_message` | ✓                                                        |                                                        |
-| `settings.assistant_models` read/write helpers                              | ✓                                                        | uses them through `pidash-sdk`                         |
-| `model-selection` endpoints                                                 | ✓ route + OSS validation                                 | `validate_choice` / `resolve_choice`                   |
-| Resolver                                                                    | OSS (config only)                                        | `provider.rs` / `connections.rs`                       |
-| Agent gates in section 2.3 pass `Surface::Agent`                            | ✓                                                        | follows from the seam                                  |
-| BYOK `models` / `model_verified_at`                                         | `assistant_user_llm_config` + `/config/`                 | connection row + `/connections/` + `/config/` override |
-| Smoke test on save, per-model test                                          | `llm_config.rs`, `probe.rs` (parallel cap, save timeout) | `connections_routes.rs`, `config.rs`                   |
-| `openhub_model_labels`                                                      |                                                          | connections list                                       |
-| Merged picker, Settings "Models", BYOK editor                               | `web_new` (both editions)                                |                                                        |
+| Piece | OSS (`pi-dash`) | Cloud (`private-pi-dash`) |
+|---|---|---|
+| `Surface` type, seam signature changes | ✓ | implement the new signatures |
+| `assistant_turn.surface`, `TurnContext.surface`, stamping in `post_message` | ✓ | |
+| `settings.assistant_models` read/write helpers | ✓ | uses them through `pidash-sdk` |
+| `model-selection` endpoints | ✓ route + OSS validation | `validate_choice` / `resolve_choice` |
+| Resolver | OSS (config only) | `provider.rs` / `connections.rs` |
+| Agent gates in section 2.3 pass `Surface::Agent` | ✓ | follows from the seam |
+| BYOK `models` / `model_verified_at` | `assistant_user_llm_config` + `/config/` | connection row + `/connections/` + `/config/` override |
+| Smoke test on save, per-model test | `llm_config.rs`, `probe.rs` (parallel cap, save timeout) | `connections_routes.rs`, `config.rs` |
+| `openhub_model_labels` | | connections list |
+| Merged picker, Settings "Models", BYOK editor | `web_new` (both editions) | |
 
 ## 9. Implementation plan
 

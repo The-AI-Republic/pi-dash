@@ -288,7 +288,9 @@
         },
         "runs": 2
       },
-      "dispatched": ["run-M9"],
+      "dispatched": [
+        "run-M9"
+      ],
       "on_commit": []
     },
     "M10_no_run_rollback": {

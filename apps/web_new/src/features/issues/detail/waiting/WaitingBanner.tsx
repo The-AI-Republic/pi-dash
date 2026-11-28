@@ -76,7 +76,8 @@ export function WaitingBanner({
   if (capacity !== null && capacity.phase === "waiting_for_capacity") {
     const parts = ["Waiting for machine capacity"];
     if (capacity.queue_position != null) parts.push(`position ${capacity.queue_position}`);
-    if (capacity.active != null && capacity.limit != null) parts.push(`(${capacity.active}/${capacity.limit})`);
+    if (capacity.active != null && capacity.limit != null)
+      parts.push(`(${capacity.active}/${capacity.limit})`);
     if (capacity.reported_at != null) {
       const ago = formatRunnerSeenAgo(capacity.reported_at);
       const elapsedMs = Date.now() - Date.parse(capacity.reported_at);

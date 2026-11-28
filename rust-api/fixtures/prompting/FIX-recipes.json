@@ -2,7 +2,12 @@
   "bugs": [],
   "data": {
     "recipes": {
-      "all_kinds": ["coding-task", "review", "test", "scheduler"],
+      "all_kinds": [
+        "coding-task",
+        "review",
+        "test",
+        "scheduler"
+      ],
       "cloud_recipe_for_unknown": {
         "error": "RecipeNotFound: no Cloud Agent recipe for kind 'nope'",
         "ok": false
@@ -76,7 +81,7 @@
       "local_recipes": {
         "coding-task": [
           "this-run",
-          "intro",
+                    "intro",
           {
             "slot": "context"
           },
@@ -96,7 +101,7 @@
         ],
         "review": [
           "this-run",
-          "review-intro",
+                    "review-intro",
           {
             "slot": "context"
           },
@@ -112,7 +117,7 @@
         ],
         "test": [
           "this-run",
-          "test-intro",
+                    "test-intro",
           {
             "slot": "context"
           },
@@ -128,7 +133,7 @@
         ],
         "scheduler": [
           "this-run",
-          "scheduler-intro",
+                    "scheduler-intro",
           "session-framing",
           "pidash-cli",
           "scheduler-task",
@@ -253,8 +258,16 @@
             ]
           }
         },
-        "keys": ["general", "software"],
-        "slot_names": ["context", "execute", "review", "test"],
+        "keys": [
+          "general",
+          "software"
+        ],
+        "slot_names": [
+          "context",
+          "execute",
+          "review",
+          "test"
+        ],
         "types": {
           "general": {
             "description": "Any kind of task; deliverables are documents, project pages, or answers recorded on the issue.",

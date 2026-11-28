@@ -46,8 +46,8 @@ in this domain; `transfer_cycle_issues` is synchronous.
   `app/views/cycle/issue.py:40-106` (get_queryset sub_issues_count :55-60 +
   filters :61-68; apply_annotations cycle_id/link/attachment/sub counts
   :77-106; ComplexFilterBackend :43 + IssueFilterSet :44 + filterset_fields :49)
-  - list pipeline/group errors :108-221 + create move-vs-bulk_create :223-297 +
-    destroy :299-324.
+  + list pipeline/group errors :108-221 + create move-vs-bulk_create :223-297 +
+  destroy :299-324.
 
 ## Transfer
 

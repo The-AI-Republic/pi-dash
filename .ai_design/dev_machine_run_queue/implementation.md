@@ -6,21 +6,21 @@ Read [design.md](design.md), then this contract, then [tasks.md](tasks.md). [rev
 
 ## 1. Fixed decisions
 
-| Decision            | Required implementation                                                                                                                                                                            |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Scope               | Rust API + native Rust cloud migrator + shared daemon/IPC/TUI + new frontend. All cloud-assigned issue AgentRuns served by one daemon; chats on other runners excluded.                            |
-| Default             | `daemon.max_concurrent_agent_runs = 3`; valid range 1–65535; shared validation and `u16` storage.                                                                                                  |
-| Selection           | Cloud retains runner selection. The daemon never changes binding.                                                                                                                                  |
-| Scheduling          | FIFO by durable local sequence among ready entries; temporarily unready entries retain their sequence.                                                                                             |
-| Worker budget       | Workspace preparation through verified teardown, including approval/reauth and model backoff while the worker remains alive.                                                                       |
-| Cloud status        | Local capacity wait remains `assigned`; existing `Accept` drives `running`.                                                                                                                        |
-| Transport           | Queue v1 uses the current HTTP runner transport. Legacy WS never advertises support.                                                                                                               |
-| Storage             | One SQLite database for queue entries, sequence/revision allocation and managed terminal outbox; choose `rusqlite` with its bundled SQLite feature, executed on a dedicated blocking worker.       |
-| Durability          | WAL, `synchronous=FULL`, foreign keys enabled; one serialized writer; durable transaction commit precedes receipt ACK.                                                                             |
-| Machine ownership   | Hold a separate `fs2` exclusive nonblocking lock on `run_queue.lock` for the daemon lifetime, before opening sessions. A second daemon for the same data directory exits with an actionable error. |
-| Process recovery    | Managed launch scopes with an independent guard process and verified exit receipts; uncertain teardown blocks admission, never silently frees slots. See §6.                                       |
-| Unsupported server  | Legacy startup only with an empty managed store; explicitly display “limit not enforced: server unsupported.” Once supported, no runtime fallback to unbounded starts.                             |
-| Resource automation | Excluded; no CPU/RAM/disk sampling or automatic sizing.                                                                                                                                            |
+| Decision | Required implementation |
+| --- | --- |
+| Scope | Rust API + native Rust cloud migrator + shared daemon/IPC/TUI + new frontend. All cloud-assigned issue AgentRuns served by one daemon; chats on other runners excluded. |
+| Default | `daemon.max_concurrent_agent_runs = 3`; valid range 1–65535; shared validation and `u16` storage. |
+| Selection | Cloud retains runner selection. The daemon never changes binding. |
+| Scheduling | FIFO by durable local sequence among ready entries; temporarily unready entries retain their sequence. |
+| Worker budget | Workspace preparation through verified teardown, including approval/reauth and model backoff while the worker remains alive. |
+| Cloud status | Local capacity wait remains `assigned`; existing `Accept` drives `running`. |
+| Transport | Queue v1 uses the current HTTP runner transport. Legacy WS never advertises support. |
+| Storage | One SQLite database for queue entries, sequence/revision allocation and managed terminal outbox; choose `rusqlite` with its bundled SQLite feature, executed on a dedicated blocking worker. |
+| Durability | WAL, `synchronous=FULL`, foreign keys enabled; one serialized writer; durable transaction commit precedes receipt ACK. |
+| Machine ownership | Hold a separate `fs2` exclusive nonblocking lock on `run_queue.lock` for the daemon lifetime, before opening sessions. A second daemon for the same data directory exits with an actionable error. |
+| Process recovery | Managed launch scopes with an independent guard process and verified exit receipts; uncertain teardown blocks admission, never silently frees slots. See §6. |
+| Unsupported server | Legacy startup only with an empty managed store; explicitly display “limit not enforced: server unsupported.” Once supported, no runtime fallback to unbounded starts. |
+| Resource automation | Excluded; no CPU/RAM/disk sampling or automatic sizing. |
 
 SQLite replaces the first draft's suggested JSON file and two-file coordination. Add a matching Rust dependency using the repository's supported toolchain and commit the lockfile; dependency version selection is routine implementation work. The store schema uses `PRAGMA user_version = 1`. Unknown newer schema, failed integrity check or unusable storage enters `storage_blocked`; never erase the file or use an empty in-memory replacement.
 
@@ -32,13 +32,13 @@ Persist `queue_meta(next_sequence, next_revision, schema_version)` and entries w
 
 The composite attempt identity is unique. Enforce one nonterminal held attempt per runner. Terminal-delivery entries are not executable and may coexist with a later attempt only after cloud reconciliation proves the old attempt is no longer owned. Keep dedupe tombstones for 24 hours after authoritative terminal acknowledgment, without prompts; an unknown redelivery always passes cloud validation before it can execute, so tombstone expiry is not permission to replay.
 
-| Durable phase      | Permit                   | Restart action                                                         |
-| ------------------ | ------------------------ | ---------------------------------------------------------------------- |
-| `waiting`          | None                     | Reconcile, preserve sequence, then eligible.                           |
-| `starting`         | Held                     | Never replay; close/verify process scope and finalize restart failure. |
-| `executing`        | Held                     | Same as starting.                                                      |
-| `finishing`        | Held until verified exit | Complete teardown, then deliver persisted outcome.                     |
-| `terminal_pending` | None after verified exit | Retry exact terminal message; never execute.                           |
+| Durable phase | Permit | Restart action |
+| --- | --- | --- |
+| `waiting` | None | Reconcile, preserve sequence, then eligible. |
+| `starting` | Held | Never replay; close/verify process scope and finalize restart failure. |
+| `executing` | Held | Same as starting. |
+| `finishing` | Held until verified exit | Complete teardown, then deliver persisted outcome. |
+| `terminal_pending` | None after verified exit | Retry exact terminal message; never execute. |
 
 `receiving`, `validating`, `reconciling` and `recovery_blocked` are coordinator overlays. `receiving` holds an atomic lane reservation before the database transaction; failure releases the tentative reservation without ACK. Persist `starting` before any workspace command or process launch, even when immediate execution is possible. A canceled `waiting` entry transitions directly to `terminal_pending` in one transaction.
 
@@ -93,17 +93,17 @@ Actions are `waiting`, `admit`, `defer`, `reconcile`. `session_id` is mandatory.
 
 Successful responses always include `decision`, `status`, `assignment_token`, `assignment_protocol`, and `revision` (null where unavailable). `proceed` also includes `admission_id` equal to the persisted idempotency UUID of that admit call. `Idempotency-Key` is mandatory for mutations. Return complete responses even on retry:
 
-| Decision           | Meaning and daemon action                                                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `recorded`         | Waiting/defer report stored or already applied; no permission to execute.                                                             |
-| `retain`           | Reconcile confirms this never-started assigned attempt; keep its sequence.                                                            |
-| `proceed`          | Admit validates this session and attempt; re-check local cancellation/limit, then persist starting before preparation.                |
-| `cancel`           | Cloud has `cancel_requested`; persist cancellation, never start.                                                                      |
-| `terminal`         | Cloud already terminal; clean local never-started entry, or stop an existing scope before freeing it.                                 |
-| `stale_assignment` | Token/owner no longer matches; never execute or finalize the replacement attempt.                                                     |
-| `already_started`  | Status is running/approval/reauth; a restored waiting entry cannot execute it. Reconcile as interrupted or currently owned execution. |
-| `stale_report`     | Older report revision; ignore locally, refresh from authoritative state.                                                              |
-| `legacy_in_flight` | Legacy adoption refused; follow upgrade handling above.                                                                               |
+| Decision | Meaning and daemon action |
+| --- | --- |
+| `recorded` | Waiting/defer report stored or already applied; no permission to execute. |
+| `retain` | Reconcile confirms this never-started assigned attempt; keep its sequence. |
+| `proceed` | Admit validates this session and attempt; re-check local cancellation/limit, then persist starting before preparation. |
+| `cancel` | Cloud has `cancel_requested`; persist cancellation, never start. |
+| `terminal` | Cloud already terminal; clean local never-started entry, or stop an existing scope before freeing it. |
+| `stale_assignment` | Token/owner no longer matches; never execute or finalize the replacement attempt. |
+| `already_started` | Status is running/approval/reauth; a restored waiting entry cannot execute it. Reconcile as interrupted or currently owned execution. |
+| `stale_report` | Older report revision; ignore locally, refresh from authoritative state. |
+| `legacy_in_flight` | Legacy adoption refused; follow upgrade handling above. |
 
 HTTP 400 is invalid input; 401/403 is existing auth/authorization failure; 404 is deleted run; 409 with `session_evicted` requires reopening a session before retry; 503 with `runner_state_locked` or transient infrastructure error uses bounded retry. A missing capability/route never implies `proceed`. Do not expose status or tokens to a caller that fails runner authorization.
 

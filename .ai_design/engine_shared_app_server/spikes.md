@@ -41,7 +41,6 @@ credential in this environment; model TTFT is unchanged by the design either way
 ## S3 — concurrent writers to `CODEX_HOME/config.toml`: last-writer-wins, self-healing
 
 Three writers share the file:
-
 1. the engine appends `[projects."<cwd>"] trust_level = "trusted"` on
    `thread/start` (observed: the probe's `config.toml` gained the table right
    after the two starts);
@@ -51,12 +50,12 @@ Three writers share the file:
    has no `projects`/`trust` handling, so a refresh **drops** trust markings;
 3. per-run engine processes (`AgentRun`) share the same `CODEX_HOME` and mark
    trust the same way.
-   All writes are atomic renames, so the file is never torn — but a refresh can
-   drop a marking another writer just added, and a marking can land on a config a
-   refresh is about to replace. Impact is low: the marking is re-added silently on
-   the next `thread/start` in that `cwd` (the probe was never prompted). No design
-   change for MVP; if trust-flap ever prompts users, the fix is a
-   merge-preserving rewrite (read-modify-write of the `model`/`catalog` keys only).
+All writes are atomic renames, so the file is never torn — but a refresh can
+drop a marking another writer just added, and a marking can land on a config a
+refresh is about to replace. Impact is low: the marking is re-added silently on
+the next `thread/start` in that `cwd` (the probe was never prompted). No design
+change for MVP; if trust-flap ever prompts users, the fix is a
+merge-preserving rewrite (read-modify-write of the `model`/`catalog` keys only).
 
 ## S4 — baseline: time to thread-ready, per-session process vs shared server
 
@@ -75,7 +74,6 @@ re-measured with credentials before merge and posted on the issue.
 ## Design changes required by the spikes
 
 None to §4.1–4.6, O4 or O5. Two build notes (already reflected above):
-
 - Warm keeps resume-then-`thread/start` (S1 caveat makes the fallback load-bearing
   for zero-turn threads, not just unknown ids).
 - No merge-preserving config rewrite for MVP (S3 self-heals).

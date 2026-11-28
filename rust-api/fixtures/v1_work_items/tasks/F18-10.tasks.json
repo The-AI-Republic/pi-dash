@@ -842,8 +842,16 @@
     },
     "attachment_post_presign": {
       "status": 200,
-      "response_keys": ["asset_id", "asset_url", "attachment", "upload_data"],
-      "upload_data_keys": ["fields", "url"],
+      "response_keys": [
+        "asset_id",
+        "asset_url",
+        "attachment",
+        "upload_data"
+      ],
+      "upload_data_keys": [
+        "fields",
+        "url"
+      ],
       "presign_fields_keys": [
         "Content-Type",
         "key",
@@ -1057,7 +1065,9 @@
     },
     "page_create": {
       "status": 503,
-      "response_keys": ["error"],
+      "response_keys": [
+        "error"
+      ],
       "db_before": {
         "issues": 11,
         "issue_comments": 3,
@@ -1186,7 +1196,9 @@
         },
         {
           "task": "pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata",
-          "args": ["a9b33b6b-ca20-48bf-91fa-67620548ce28"],
+          "args": [
+            "a9b33b6b-ca20-48bf-91fa-67620548ce28"
+          ],
           "kwargs": {},
           "raw_len": 1091,
           "raw_head": "{\"body\": \"W1siYTliMzNiNmItY2EyMC00OGJmLTkxZmEtNjc2MjA1NDhjZTI4Il0sIHt9LCB7ImNhbGxiYWNrcyI6IG51bGwsICJlcnJiYWNrcyI6IG51bGwsICJjaGFpbiI6IG51bGwsICJjaG9yZCI6IG51bGx9XQ==\", \"content-encoding\": \"utf-8\", \"content-type\": \"application/json\", \"headers\": {\"lang\": \"py\", \"task\": \"pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata\", \"id\": \"3d0bf792-5f7c-482c-b7d4-6a01e13b8ff0\", \"shadow\": null, \"et"
@@ -1263,7 +1275,9 @@
         },
         {
           "task": "pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata",
-          "args": ["a9b33b6b-ca20-48bf-91fa-67620548ce28"],
+          "args": [
+            "a9b33b6b-ca20-48bf-91fa-67620548ce28"
+          ],
           "kwargs": {},
           "raw_len": 1091,
           "raw_head": "{\"body\": \"W1siYTliMzNiNmItY2EyMC00OGJmLTkxZmEtNjc2MjA1NDhjZTI4Il0sIHt9LCB7ImNhbGxiYWNrcyI6IG51bGwsICJlcnJiYWNrcyI6IG51bGwsICJjaGFpbiI6IG51bGwsICJjaG9yZCI6IG51bGx9XQ==\", \"content-encoding\": \"utf-8\", \"content-type\": \"application/json\", \"headers\": {\"lang\": \"py\", \"task\": \"pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata\", \"id\": \"7f6d2de1-6d8f-4042-b131-0ab41c97d520\", \"shadow\": null, \"et"

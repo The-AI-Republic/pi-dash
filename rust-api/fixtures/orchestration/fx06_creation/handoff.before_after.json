@@ -162,7 +162,9 @@
         "target_project_id": "66666666-aaaa-bbbb-cccc-000000000607",
         "replacement_run_id": "run-H2-replacement"
       },
-      "dispatched": ["run-H2-replacement"],
+      "dispatched": [
+        "run-H2-replacement"
+      ],
       "on_commit": []
     },
     "H3_replacement_id_idempotent": {
@@ -362,7 +364,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-H8-replacement"],
+      "dispatched": [
+        "run-H8-replacement"
+      ],
       "on_commit": []
     },
     "H9_active_race_returns_existing": {

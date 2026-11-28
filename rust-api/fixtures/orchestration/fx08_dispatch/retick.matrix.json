@@ -242,7 +242,9 @@
           "ended_at": null
         }
       },
-      "dispatched": ["run-R3"],
+      "dispatched": [
+        "run-R3"
+      ],
       "note": "grant lands (+10) but used(20) still hits the new cap(20), so the re-time stops POOL_SPENT \u2014 the run fires anyway"
     },
     "R3b_grant_pool_20": {
@@ -289,7 +291,9 @@
           "resume_parent_run": null
         }
       },
-      "dispatched": ["run-R3b"]
+      "dispatched": [
+        "run-R3b"
+      ]
     },
     "R4_paused_move_and_dispatch": {
       "issue": "FX8-38",
@@ -336,7 +340,9 @@
           "resume_parent_run": null
         }
       },
-      "dispatched": ["run-R4"]
+      "dispatched": [
+        "run-R4"
+      ]
     },
     "R5_dispatch_failed_rollback": {
       "issue": "FX8-39",
@@ -381,7 +387,9 @@
       },
       "ticker_unchanged": true,
       "runs": 0,
-      "dispatched": ["run-R4"]
+      "dispatched": [
+        "run-R4"
+      ]
     },
     "R6_no_in_progress_state": {
       "issue": "FX8D-1",
