@@ -139,13 +139,13 @@ pub const AGENT_NAME_ENV: &str = "PIDASH_AGENT_NAME";
 fn apply_run_env(cmd: &mut Command) {
     if let Ok(env) = RUN_ENV.try_with(|e| e.clone()) {
         cmd.env(RUN_ID_ENV, env.run_id.to_string());
-        if let Some(issue) = env.issue_identifier {
+        if let Some(issue) = &env.issue_identifier {
             cmd.env(ISSUE_IDENTIFIER_ENV, issue);
         }
-        if let Some(project) = env.project_identifier {
+        if let Some(project) = &env.project_identifier {
             cmd.env(PROJECT_ENV, project);
         }
-        if let Some(agent) = env.agent_name {
+        if let Some(agent) = &env.agent_name {
             cmd.env(AGENT_NAME_ENV, agent);
         }
         #[cfg(unix)]
