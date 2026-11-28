@@ -140,3 +140,66 @@ def test_tree_child_assignee_and_newest_active_run(api, world, seeder, db, state
     assert by_id[wip["id"]]["active_run"] == {"id": run["id"], "status": "running"}
     assert by_id[idle["id"]]["assignees"] == []
     assert by_id[idle["id"]]["active_run"] is None
+
+
+def test_tree_hidden_child_cuts_off_its_subtree(api, world, db):
+    epic_id = world["issue"]["id"]
+    hidden = make(api, world, "hidden", parent=epic_id)
+    make(api, world, "under hidden", parent=hidden["id"])
+    shown = make(api, world, "shown", parent=epic_id)
+    db.execute("UPDATE issues SET archived_at = now() WHERE id = %s", (hidden["id"],))
+
+    body = api.get(tree_url(world, epic_id, "?recursive=true")).json()
+    assert [child["id"] for child in body["children"]] == [shown["id"]]
+    assert body["rollup"]["total"] == 1
+
+
+def test_tree_parent_cycle_terminates(api, world, db):
+    epic_id = world["issue"]["id"]
+    a = make(api, world, "a", parent=epic_id)
+    b = make(api, world, "b", parent=a["id"])
+    db.execute("UPDATE issues SET parent_id = %s WHERE id = %s", (b["id"], epic_id))
+
+    body = api.get(tree_url(world, epic_id, "?recursive=true")).json()
+    assert [(child["id"], child["depth"]) for child in body["children"]] == [(a["id"], 1), (b["id"], 2)]
+    assert body["truncated"] is False
+
+
+def _clone_children(db, template_id, first, count):
+    """Insert ``count`` copies of the ``template_id`` issue under the same
+    parent, with sequence ids ``first + 1 ..``: cheaper than 1000 POSTs."""
+    columns = [
+        row["column_name"]
+        for row in db.fetchall(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'issues' AND is_generated = 'NEVER'
+               ORDER BY ordinal_position"""
+        )
+    ]
+    override = {"id": "gen_random_uuid()", "sequence_id": f"{first} + g", "name": "'bulk ' || g"}
+    select = ", ".join(override.get(name, f's."{name}"') for name in columns)
+    names = ", ".join(f'"{name}"' for name in columns)
+    db.execute(
+        f"INSERT INTO issues ({names}) SELECT {select} FROM issues s, generate_series(1, %s) g WHERE s.id = %s",
+        (count, template_id),
+    )
+
+
+def test_tree_truncated_only_past_node_limit(api, world, db):
+    epic_id = world["issue"]["id"]
+    first = make(api, world, "first", parent=epic_id)
+    _clone_children(db, first["id"], 100000, 999)
+
+    at_limit = api.get(tree_url(world, epic_id)).json()
+    assert at_limit["truncated"] is False
+    assert len(at_limit["children"]) == 1000
+    assert at_limit["rollup"]["total"] == 1000
+
+    _clone_children(db, first["id"], 200000, 1)
+    past = api.get(tree_url(world, epic_id)).json()
+    assert past["truncated"] is True
+    assert len(past["children"]) == 1000
+    assert past["rollup"]["total"] == 1000
+    # The cut keeps the lowest sequence ids.
+    assert past["children"][0]["id"] == first["id"]
+    assert past["children"][-1]["name"] == "bulk 999"
