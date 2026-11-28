@@ -247,9 +247,50 @@ class TestIssueTree:
         parent = epic
         for i in range(1000):
             parent = make_issue(f"c{i}", parent=parent)
-        resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as queries:
+            resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
         assert resp.status_code == http_status.HTTP_200_OK
+        # One set-based traversal, not one query per level: the request
+        # costs a fixed number of queries however deep the chain is.
+        assert len(queries) <= 15, len(queries)
         body = resp.json()
         assert len(body["children"]) == 1000
         assert body["children"][-1]["depth"] == 1000
+        assert body["truncated"] is False
+
+    def test_truncated_only_past_the_limit(self, api_key_client, workspace, make_issue, monkeypatch):
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        for name in ("a", "b", "c"):
+            make_issue(name, parent=epic)
+        at_limit = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert at_limit["truncated"] is False
+        assert [c["name"] for c in at_limit["children"]] == ["a", "b", "c"]
+        make_issue("d", parent=epic)
+        past = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert past["truncated"] is True
+        assert [c["name"] for c in past["children"]] == ["a", "b", "c"]
+
+    def test_hidden_child_cuts_off_its_subtree(self, api_key_client, workspace, make_issue, create_user):
+        epic = make_issue("Epic")
+        other = Project.objects.create(name="Other", identifier="OTH", workspace=workspace, created_by=create_user)
+        ProjectMember.objects.filter(project=other, member=create_user).update(is_active=False)
+        hidden = make_issue("hidden", parent=epic, project=other)
+        make_issue("visible grandchild", parent=hidden)
+        make_issue("shown", parent=epic)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert [c["name"] for c in body["children"]] == ["shown"]
+
+    def test_parent_cycle_terminates(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic)
+        b = make_issue("b", parent=a)
+        Issue.objects.filter(pk=epic.pk).update(parent=b)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert [(c["name"], c["depth"]) for c in body["children"]] == [("a", 1), ("b", 2)]
         assert body["truncated"] is False

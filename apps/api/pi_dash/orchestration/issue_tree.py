@@ -80,37 +80,57 @@ def rollup(groups: List[Any]) -> Dict[str, Any]:
     }
 
 
+def _descendants(issue: Issue, visible, *, recursive: bool):
+    """Ids of the listed children in ``(depth, sequence_id, id)`` order, and
+    whether the :data:`NODE_LIMIT` cut them short.
+
+    One recursive query instead of one query per level, so a deep chain
+    costs a single round trip. Only rows in ``visible`` are followed: a
+    hidden child stops the walk below it. The source is never re-entered,
+    which is the only way a parent cycle can be reached from it (every
+    item has one parent), and depth is capped at ``NODE_LIMIT + 1``: a
+    deeper row cannot rank inside the first ``NODE_LIMIT + 1`` rows, since
+    each level above it contributes at least one row. Ordering by depth
+    first keeps the earlier level-by-level result: every shallower level is
+    listed in full before the cut falls inside one level, by sequence_id.
+    """
+    from django.db import connections
+
+    pool_sql, pool_params = visible.order_by().values("id").query.sql_with_params()
+    table = connections[visible.db].ops.quote_name(Issue._meta.db_table)
+    sql = f"""
+        WITH RECURSIVE tree (id, depth) AS (
+            SELECT i.id, 1 FROM {table} i
+            WHERE i.parent_id = %s AND i.id <> %s AND i.id IN ({pool_sql})
+          UNION ALL
+            SELECT i.id, t.depth + 1 FROM {table} i JOIN tree t ON i.parent_id = t.id
+            WHERE %s AND t.depth <= %s AND i.id <> %s AND i.id IN ({pool_sql})
+        )
+        SELECT t.id FROM tree t JOIN {table} i ON i.id = t.id
+        ORDER BY t.depth, i.sequence_id, i.id
+        LIMIT %s
+    """  # noqa: S608 - only the quoted table name and Django-compiled SQL are interpolated
+    params = [issue.id, issue.id, *pool_params, recursive, NODE_LIMIT, issue.id, *pool_params, NODE_LIMIT + 1]
+    with connections[visible.db].cursor() as cursor:
+        cursor.execute(sql, params)
+        ids = [row[0] for row in cursor.fetchall()]
+    return ids[:NODE_LIMIT], len(ids) > NODE_LIMIT
+
+
 def issue_tree(issue: Issue, visible, *, recursive: bool = False) -> Dict[str, Any]:
     """Build the tree payload for ``issue`` over the ``visible`` queryset."""
     from pi_dash.runner.models import AgentRun
     from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
 
-    base = visible.select_related("project", "state").order_by()
+    rows, truncated = _descendants(issue, visible, recursive=recursive)
+    by_id = {row.id: row for row in visible.select_related("project", "state").order_by().filter(id__in=rows)}
     nodes: List[tuple] = []  # (issue, parent identifier, depth)
     children_of: Dict[Any, List[Issue]] = {}
-    seen = {issue.id}
-    frontier = [issue.id]
-    depth = 0
-    truncated = False
-    # Breadth-first fetch, one query per level.
-    while frontier and not truncated:
-        depth += 1
-        # Fetch only the remaining budget plus one row (to detect truncation),
-        # skipping already-visited items, so a wide level stays bounded.
-        remaining = NODE_LIMIT - (len(seen) - 1)
-        level = list(
-            base.filter(parent_id__in=frontier).exclude(id__in=seen).order_by("sequence_id", "id")[: remaining + 1]
-        )
-        frontier = []
-        for row in level:
-            if len(seen) - 1 >= NODE_LIMIT:
-                truncated = True
-                break
-            seen.add(row.id)
-            children_of.setdefault(row.parent_id, []).append(row)
-            frontier.append(row.id)
-        if not recursive:
-            break
+    # ``rows`` is in (depth, sequence_id, id) order, so each sibling list
+    # comes out by sequence_id.
+    for row_id in rows:
+        row = by_id[row_id]
+        children_of.setdefault(row.parent_id, []).append(row)
 
     # Depth-first pre-order with siblings by sequence_id. An explicit stack,
     # not recursion: a chain near NODE_LIMIT deep would exceed Python's
