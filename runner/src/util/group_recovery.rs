@@ -472,6 +472,43 @@ mod process_tests {
         assert!(!path.exists(), "the record must be removed");
     }
 
+    #[test]
+    fn a_lingering_anchor_survives_every_signal_but_sigkill() {
+        // Orphaned, the anchor is reaped by its new parent as soon as it
+        // dies, so only SIGKILL may end it: anything else would free its pid
+        // and group id between recovery's proof and its signal.
+        let (mut anchor, _) = spawn_anchor();
+        orphan(&mut anchor);
+        use nix::sys::signal::Signal;
+        let pid = anchor.id() as i32;
+        for sig in [
+            Signal::SIGHUP,
+            Signal::SIGINT,
+            Signal::SIGQUIT,
+            Signal::SIGTRAP,
+            Signal::SIGABRT,
+            Signal::SIGBUS,
+            Signal::SIGFPE,
+            Signal::SIGILL,
+            Signal::SIGSEGV,
+            Signal::SIGSYS,
+            Signal::SIGPIPE,
+            Signal::SIGALRM,
+            Signal::SIGTERM,
+            Signal::SIGXCPU,
+            Signal::SIGXFSZ,
+            Signal::SIGVTALRM,
+            Signal::SIGPROF,
+            Signal::SIGUSR1,
+            Signal::SIGUSR2,
+        ] {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), sig).unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            assert!(running(&mut anchor), "{sig} ended the anchor");
+        }
+        reap(&mut anchor);
+    }
+
     #[tokio::test]
     async fn an_orphaned_anchor_alone_is_stopped_too() {
         let dir = tempfile::tempdir().unwrap();

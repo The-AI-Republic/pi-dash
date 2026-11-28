@@ -124,11 +124,15 @@ struct Anchor {
 
 /// The anchor's shell script. With `linger` (macOS, where crashed groups
 /// are recovered) the anchor survives the daemon: when its stdin closes it
-/// becomes a `sleep` that keeps ignoring TERM, INT and HUP, so only SIGKILL
-/// ends it and the group id stays reserved for the next daemon's recovery.
+/// becomes a `sleep` that keeps ignoring every signal that would otherwise
+/// end it (ignored dispositions survive `exec`), so only SIGKILL ends it
+/// and the group id stays reserved for the next daemon's recovery. An
+/// orphaned anchor is reaped at once by its new parent, so any other way
+/// out would free its pid between recovery's proof and its signal.
 pub(crate) fn anchor_script(linger: bool) -> &'static str {
     if linger {
-        "trap '' TERM INT HUP; read _; exec sleep 2147483647"
+        "trap '' HUP INT QUIT TRAP ABRT BUS FPE ILL SEGV SYS PIPE ALRM TERM XCPU XFSZ VTALRM PROF USR1 USR2; \
+         read _; exec sleep 2147483647"
     } else {
         "trap '' TERM INT HUP; read _"
     }
@@ -136,7 +140,8 @@ pub(crate) fn anchor_script(linger: bool) -> &'static str {
 
 impl Anchor {
     /// Spawn the placeholder as the leader of a new process group. It
-    /// ignores SIGTERM, SIGINT and SIGHUP. Where crashed groups are not
+    /// ignores SIGTERM, SIGINT and SIGHUP (lingering, every other signal but
+    /// SIGKILL that would end it). Where crashed groups are not
     /// recovered it exits when the daemon closes its stdin (including when
     /// the daemon dies); on macOS it lingers instead ([`anchor_script`]).
     #[cfg(unix)]
