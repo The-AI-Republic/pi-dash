@@ -161,6 +161,38 @@ def _last_served_dedicated(runner: Runner) -> bool:
     )
 
 
+def borrowable_pin_q(runner: Runner) -> Q:
+    """Runs pinned for locality to another runner that is working now.
+
+    "Working now" means the pinned runner is online (``online``/``busy``
+    with a fresh heartbeat, as in ``runner_is_offline``) and holds a
+    BUSY_STATUSES run. A silent runner's pins are left to the offline
+    pin-release sweep and its grace period.
+
+    ``runner`` may take such a run (PDASHOSS01-419) when it takes pod work;
+    the caller adds that gate. Also used by the read-side ``runs_ahead``.
+    The runner check is a subquery, not a join, so the matcher's
+    ``select_for_update`` does not lock the pinned runner's row.
+    """
+    from pi_dash.runner.models import PinKind, RunnerStatus
+
+    return (
+        Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+        & Q(pin_kind=PinKind.LOCALITY, pinned_runner__isnull=False)
+        & ~Q(pinned_runner=runner)
+        & models.Exists(
+            Runner.objects.filter(
+                pk=models.OuterRef("pinned_runner_id"),
+                status__in=(RunnerStatus.ONLINE, RunnerStatus.BUSY),
+                last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            )
+        )
+        & models.Exists(
+            AgentRun.objects.filter(runner_id=models.OuterRef("pinned_runner_id"), status__in=BUSY_STATUSES)
+        )
+    )
+
+
 def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     """Return the next QUEUED run this runner should take.
 
@@ -187,10 +219,16 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     - an engine, ``pinned_only`` or not, still takes the legacy queued
       ``managed_runner`` runs pinned to it. No new run has that kind.
 
+    A pod member also takes a locality pin held by another runner that is
+    working right now (PDASHOSS01-419); it ranks after the runner's own
+    pins and the shared queue, and its pin is dropped when it is taken
+    (:func:`_assign`).
+
     Tier order follows §10.2: locality pins always first (0); unpinned
     shared work second (1); dedicated pins first (0) when the runner's
-    last run was not dedicated, demoted to last (2) when it was. Locality
-    pins and ``pod_once`` runs count as shared work.
+    last run was not dedicated, demoted to last (3) when it was. Locality
+    pins, borrowed locality pins and ``pod_once`` runs count as shared
+    work: a borrowed pin is 3 normally and 2 after a dedicated run.
 
     All of it must also pass the usage rule
     (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
@@ -202,16 +240,21 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     dedicated_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.DEDICATED)
     locality_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.LOCALITY)
     shared = Q(pinned_runner__isnull=True)
+    # A locality pin is a best-effort hint (``PinKind.LOCALITY``). While the
+    # runner it names is working, it is pod work: an idle pod member takes it
+    # rather than leaving the run queued behind the busy runner while it
+    # idles (PDASHOSS01-419). Dedicated pins are never borrowed.
+    borrowed = borrowable_pin_q(runner)
     if runner.is_engine:
         eligible = Q(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
         # §23.1: a dedicated pin is served whatever pod_dispatch.
         eligible |= dedicated_mine
         if engine_takes_pod_work(runner):
-            eligible |= local & (Q(pinned_runner=runner) | shared)
+            eligible |= (local & (Q(pinned_runner=runner) | shared)) | borrowed
     else:
         eligible = dedicated_mine | locality_mine
         if runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER:
-            eligible |= local & shared
+            eligible |= (local & shared) | borrowed
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
@@ -228,7 +271,11 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     if last_dedicated:
         rank = models.Case(
             models.When(pinned_runner=runner, pin_kind=PinKind.LOCALITY, then=models.Value(0)),
-            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(2)),
+            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(3)),
+            # A borrowed locality pin is shared work the runner owes after a
+            # dedicated run: behind the unpinned queue, ahead of its
+            # dedicated pins, so a steady dedicated queue cannot starve it.
+            models.When(pinned_runner__isnull=False, then=models.Value(2)),
             default=models.Value(1),
             output_field=models.IntegerField(),
         )
@@ -237,10 +284,37 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         # dedicated issues.
         rank = models.Case(
             models.When(pinned_runner=runner, then=models.Value(0)),
+            # Another runner's locality pin (``borrowed``) comes last.
+            models.When(pinned_runner__isnull=False, then=models.Value(3)),
             default=models.Value(1),
             output_field=models.IntegerField(),
         )
     return qs.annotate(_is_mine=rank).order_by("_is_mine", "created_at").first()
+
+
+def _assign(run: AgentRun, runner: Runner) -> None:
+    """Assign the locked ``run`` to ``runner`` (called by both drains).
+
+    A run taken from another runner's locality pin (see
+    :func:`next_for_runner`) loses the pin and its parent's resume hint,
+    as the release-pin paths do: the new runner has no session of the
+    parent's to resume against.
+    """
+    from pi_dash.runner.models import PinKind
+
+    fields = ["runner", "owner", "status", "assigned_at"]
+    if run.pin_kind == PinKind.LOCALITY and run.pinned_runner_id is not None and run.pinned_runner_id != runner.pk:
+        run.pinned_runner = None
+        fields.append("pinned_runner")
+        parent = run.parent_run if run.parent_run_id else None
+        if parent is not None and parent.thread_id:
+            parent.thread_id = ""
+            parent.save(update_fields=["thread_id"])
+    run.runner = runner
+    run.owner_id = runner.owner_id
+    run.status = AgentRunStatus.ASSIGNED
+    run.assigned_at = timezone.now()
+    run.save(update_fields=fields)
 
 
 def drain_pod(pod: Pod) -> int:
@@ -273,11 +347,7 @@ def drain_pod(pod: Pod) -> int:
             run = next_for_runner(runner)
             if run is None:
                 continue
-            run.runner = runner
-            run.owner_id = runner.owner_id
-            run.status = AgentRunStatus.ASSIGNED
-            run.assigned_at = timezone.now()
-            run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+            _assign(run, runner)
             assignments.append((runner, run))
 
     for runner, run in assignments:
@@ -326,11 +396,7 @@ def drain_for_runner(runner: Runner) -> bool:
         run = next_for_runner(locked)
         if run is None:
             return False
-        run.runner = locked
-        run.owner_id = locked.owner_id
-        run.status = AgentRunStatus.ASSIGNED
-        run.assigned_at = timezone.now()
-        run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+        _assign(run, locked)
         assignment = (locked, run)
 
     runner_obj, run = assignment
