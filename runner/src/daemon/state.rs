@@ -312,9 +312,11 @@ impl StateHandle {
     }
 
     /// Whether terminal reports are being held right now (not yet released,
-    /// and not taken by the shutdown drain).
-    pub fn holding_terminal(&self) -> bool {
-        matches!(*self.lock_terminal_hold(), TerminalHold::Holding { .. })
+    /// and not taken by the shutdown drain) and exactly one is held: the
+    /// first, which is the result delivery sends first and so the one the
+    /// terminal outbox keeps (first write wins).
+    pub fn holding_first_terminal(&self) -> bool {
+        matches!(&*self.lock_terminal_hold(), TerminalHold::Holding { msgs, .. } if msgs.len() == 1)
     }
 
     /// Defer clearing the in-flight run while reports are held, so the

@@ -6014,7 +6014,7 @@ impl AssignWorker {
             if let Some(now) = self.state.hold_terminal_msg(msg) {
                 self.deliver(now).await;
             } else if let Some(payload) = payload
-                && self.state.holding_terminal()
+                && self.state.holding_first_terminal()
             {
                 self.persist_held_terminal(run_id, &payload);
             }
@@ -6039,7 +6039,10 @@ impl AssignWorker {
     /// result lives only in memory, and a daemon that is killed (no
     /// graceful drain) would lose it, so the cloud would later reap a
     /// finished run as failed. The next daemon start replays the outbox
-    /// verbatim. Delivery and the slot release still wait for cleanup; a
+    /// verbatim. Only the first held report is persisted: delivery sends it
+    /// first, so a later one (say a history-write failure after an agent
+    /// failure) must not replace it. Delivery and the slot release still
+    /// wait for cleanup; a
     /// normal release ends with `complete`, which deletes the record.
     fn persist_held_terminal(&self, run_id: uuid::Uuid, payload: &[u8]) {
         let Some(coord) = self.coordinator.as_ref() else {
@@ -8390,6 +8393,67 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&replayed).unwrap(),
             serde_json::to_value(&result).unwrap()
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 5): when a second terminal report is
+    /// held for the same run (an agent failure, then a history-write
+    /// failure), the outbox keeps the first one, the result live delivery
+    /// sends first, so a crash during cleanup replays the real outcome.
+    #[tokio::test]
+    async fn the_first_held_result_is_the_one_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        let agent_failure = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::AgentCrash,
+            detail: Some("agent exited".into()),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        worker.send(agent_failure.clone()).await;
+        worker
+            .stage_internal_failure(run_id, Err(anyhow::anyhow!("history write failed")))
+            .await
+            .unwrap();
+        drop(worker);
+        drop(coord);
+        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let pending = after_crash.terminal_pending();
+        assert_eq!(pending.len(), 1);
+        let replayed: ClientMsg =
+            serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&agent_failure).unwrap(),
+            "a later held report replaced the first in the outbox"
         );
     }
 
