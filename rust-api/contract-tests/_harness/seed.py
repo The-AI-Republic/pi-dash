@@ -951,6 +951,8 @@ def create_project(
 ) -> dict:
     pid = new_id()
     now = now_iso()
+    # default_work_type: Project.save() writes "general" for a project
+    # with no repo_url (and "software" with one); this seed has none.
     conn.execute(
         """INSERT INTO projects (id, name, description, network, identifier,
             workspace_id, cycle_view, module_view, issue_views_view, page_view,
