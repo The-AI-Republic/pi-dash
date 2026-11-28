@@ -133,10 +133,10 @@ impl Supervisor {
         // PDASHOSS01-417 part 3: process groups a dead daemon left (macOS)
         // are recovered from their records, then this daemon records its own.
         #[cfg(unix)]
-        {
+        let recovery_hold =
             crate::util::group_recovery::recover_orphaned_groups(&paths.data_dir).await;
-            crate::util::group_recovery::install(&paths.data_dir);
-        }
+        #[cfg(unix)]
+        crate::util::group_recovery::install(&paths.data_dir);
         for runner_cfg in &config.runners {
             containment::run_end_hook(&runner_cfg.workspace.working_dir).await;
         }
@@ -167,6 +167,17 @@ impl Supervisor {
             .await?;
             instances.push(inst);
         }
+        // A group whose recovery is unresolved may still have the old run's
+        // processes in a runner's working copy: keep that runner reserved
+        // until a re-check resolves it (review of #3501 at 1524d8e).
+        #[cfg(unix)]
+        hold_runners_for_recovery(
+            recovery_hold,
+            instances
+                .iter()
+                .map(|i| (i.runner_id, i.state.clone()))
+                .collect(),
+        );
 
         let mailboxes = Arc::new(RwLock::new(
             instances
@@ -2053,6 +2064,55 @@ async fn replay_drain_journal_once(
     delivered
 }
 
+/// Reserve every runner a held recovery group may belong to, and re-check
+/// the held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
+/// releasing each runner once nothing held affects it. While reserved, a
+/// runner refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+#[cfg(unix)]
+fn hold_runners_for_recovery(
+    mut hold: crate::util::group_recovery::RecoveryHold,
+    runners: Vec<(uuid::Uuid, StateHandle)>,
+) {
+    if hold.is_empty() {
+        return;
+    }
+    let held = apply_recovery_hold(&hold, &runners, Vec::new());
+    tracing::warn!(
+        runners = held.len(),
+        "process groups of a crashed daemon could not be emptied; their runners stay reserved"
+    );
+    tokio::spawn(async move {
+        let mut held = held;
+        while !held.is_empty() {
+            tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK).await;
+            hold.recheck().await;
+            held = apply_recovery_hold(&hold, &runners, held);
+        }
+        tracing::info!("crashed daemon's process groups resolved; runners released");
+    });
+}
+
+/// Reserve the runners `hold` affects and release the ones in `held` (the
+/// runners it reserved before) it no longer affects. Returns the runners it
+/// now reserves.
+#[cfg(unix)]
+fn apply_recovery_hold(
+    hold: &crate::util::group_recovery::RecoveryHold,
+    runners: &[(uuid::Uuid, StateHandle)],
+    held: Vec<uuid::Uuid>,
+) -> Vec<uuid::Uuid> {
+    let mut now = Vec::new();
+    for (id, state) in runners {
+        if hold.affects(*id) {
+            state.set_cleanup_reserved(true);
+            now.push(*id);
+        } else if held.contains(id) {
+            state.set_cleanup_reserved(false);
+        }
+    }
+    now
+}
+
 /// Release a finished run's machine-queue slot. Once the shutdown drain
 /// took the run's report it owns the run's terminal outbox record (review
 /// of #3501 at 1524d8e): the slot is freed but the record stays until the
@@ -2993,6 +3053,20 @@ impl RunnerLoop {
                         );
                         continue;
                     }
+                    // Processes of an earlier run (or of a crashed daemon's
+                    // run) may still use the working copy.
+                    if self.state.cleanup_reserved() {
+                        tracing::warn!(
+                            %run_id,
+                            "assign received while an earlier run's processes are unresolved; rejecting"
+                        );
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: an earlier run's processes on this runner are not yet accounted for"
+                                .to_string(),
+                        );
+                        continue;
+                    }
                     // Pre-pickup credential check: without the agent's
                     // credentials the agent would fail at
                     // `run.lifecycle.started` before any work, and the failure
@@ -3137,8 +3211,9 @@ impl RunnerLoop {
                     model,
                 } => {
                     // One working dir per runner: chat cannot run during an issue
-                    // run. A concurrent chat means a second runner.
-                    if self.current_run.is_some() {
+                    // run (or while an earlier run's processes are unresolved).
+                    // A concurrent chat means a second runner.
+                    if self.current_run.is_some() || self.state.cleanup_reserved() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatFailed {
@@ -3210,8 +3285,9 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    // One working dir per runner: skip warm during an issue run.
-                    if self.current_run.is_some() {
+                    // One working dir per runner: skip warm during an issue run
+                    // (or while an earlier run's processes are unresolved).
+                    if self.current_run.is_some() || self.state.cleanup_reserved() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatEvent {
@@ -4804,7 +4880,8 @@ impl AssignWorker {
         // spawn below is contained. The guard empties the unit on drop,
         // covering every exit path — normal end, failure, cancellation,
         // daemon shutdown and task abort alike.
-        let mut guard = containment::create_run_group(run_id);
+        let mut guard =
+            containment::create_run_group_for(run_id, Some(self.runner_config.runner_id));
         // The run's terminal report is held while the run executes and
         // sent only after cleanup, so the cloud never sees the run finished
         // (and offers the runner new work) while its processes or its
@@ -8479,6 +8556,39 @@ mod tests {
             serde_json::to_value(&replayed).unwrap(),
             serde_json::to_value(&agent_failure).unwrap(),
             "a later held report replaced the first in the outbox"
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 2): a runner a crashed daemon's
+    /// unresolved group may belong to stays reserved (so Assign and chat are
+    /// refused) until a re-check resolves the group; other runners are free.
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolved_recovery_reserves_its_runner_until_resolved() {
+        let cfg = || crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        };
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let runners = vec![(a, StateHandle::new(cfg())), (b, StateHandle::new(cfg()))];
+        let hold = crate::util::group_recovery::RecoveryHold::for_tests(vec![Some(a)]);
+        let held = apply_recovery_hold(&hold, &runners, Vec::new());
+        assert_eq!(held, vec![a]);
+        assert!(
+            runners[0].1.cleanup_reserved(),
+            "the affected runner was not reserved"
+        );
+        assert!(!runners[1].1.cleanup_reserved());
+        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(apply_recovery_hold(&resolved, &runners, held).is_empty());
+        assert!(
+            !runners[0].1.cleanup_reserved(),
+            "the reservation outlived recovery"
         );
     }
 

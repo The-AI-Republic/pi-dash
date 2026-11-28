@@ -78,6 +78,17 @@ pub struct GroupRecord {
     pub anchor_start: u64,
     /// Pid of the daemon whose child the anchor is.
     pub owner_pid: i32,
+    /// The runner the group's run belongs to, when known: an unresolved
+    /// recovery keeps that runner reserved (every runner when unknown).
+    #[serde(default)]
+    pub runner_id: Option<Uuid>,
+    /// Members (pid, exact start) that survived a forced cleanup that also
+    /// ended the anchor. While one of them is alive with that identity the
+    /// group id is still reserved by it, so the group is still the run's:
+    /// it is tracked (never signalled again, nothing pins it through
+    /// delivery, and their SIGKILL is already pending) until they are gone.
+    #[serde(default)]
+    pub survivors: Vec<(i32, u64)>,
 }
 
 impl GroupRecord {
@@ -91,15 +102,15 @@ impl GroupRecord {
 
 /// Record a freshly anchored group if [`install`] was called. Dropping the
 /// owner's anchor removes the record.
-pub fn record_new_group(run_id: Uuid, owner: &mut GroupOwner) {
+pub fn record_new_group(run_id: Uuid, runner_id: Option<Uuid>, owner: &mut GroupOwner) {
     if let Some(dir) = INSTALLED_DIR.get() {
-        record_in(dir, run_id, owner);
+        record_in(dir, run_id, runner_id, owner);
     }
 }
 
 /// [`record_new_group`] into `dir`. A record that cannot be written only
 /// costs recovery for this run; the run itself goes ahead.
-pub(crate) fn record_in(dir: &Path, run_id: Uuid, owner: &mut GroupOwner) {
+pub(crate) fn record_in(dir: &Path, run_id: Uuid, runner_id: Option<Uuid>, owner: &mut GroupOwner) {
     let Some(anchor) = owner.anchor_identity() else {
         return;
     };
@@ -109,6 +120,8 @@ pub(crate) fn record_in(dir: &Path, run_id: Uuid, owner: &mut GroupOwner) {
         anchor_pid: anchor.pid,
         anchor_start: anchor.start,
         owner_pid: std::process::id() as i32,
+        runner_id,
+        survivors: Vec::new(),
     };
     match write_record(dir, &record) {
         Ok(path) => owner.set_record(path),
@@ -117,6 +130,16 @@ pub(crate) fn record_in(dir: &Path, run_id: Uuid, owner: &mut GroupOwner) {
             "run group record not written; this run's processes cannot be recovered after a crash"
         ),
     }
+}
+
+/// Rewrite the record at `path` atomically.
+fn write_record_at(path: &Path, record: &GroupRecord) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let written = write_record(dir, record)?;
+    if written != path {
+        std::fs::rename(&written, path)?;
+    }
+    Ok(())
 }
 
 fn record_path(dir: &Path, run_id: Uuid) -> PathBuf {
@@ -165,11 +188,26 @@ enum Verdict {
     Unproven(&'static str),
     /// The recorded anchor is alive, holds the group, and its daemon died.
     Orphaned,
+    /// The anchor is gone, but a recorded survivor of a forced cleanup is
+    /// alive with its exact identity and still holds the group: the group
+    /// is still the run's and not empty, but nothing pins it through
+    /// delivery, so it is only tracked, never signalled.
+    Survivors,
 }
 
 /// Judge `record` from one read of its anchor (`read`: process info and
 /// parent pid from the same kernel record).
 fn judge(record: &GroupRecord, read: impl Fn(i32) -> Option<(ProcInfo, i32)>) -> Verdict {
+    if !record.survivors.is_empty() {
+        let held = record.survivors.iter().any(|&(pid, start)| {
+            read(pid).is_some_and(|(p, _)| p.start == start && p.pgid == record.pgid && !p.zombie)
+        });
+        return if held {
+            Verdict::Survivors
+        } else {
+            Verdict::Unproven("the survivors of its forced cleanup are gone")
+        };
+    }
     let Some((anchor, parent)) = read(record.anchor_pid) else {
         return Verdict::Unproven("anchor is gone");
     };
@@ -202,16 +240,86 @@ pub enum Recovery {
     Discarded,
 }
 
-/// Recover every group a dead daemon left in `data_dir`. Runs at daemon
-/// start, before any run; a no-op where groups are not recovered.
-pub async fn recover_orphaned_groups(data_dir: &Path) {
-    if RECOVERS {
-        recover_dir(
-            record_dir(data_dir),
-            crate::util::containment::CLEANUP_GRACE,
-        )
-        .await;
+impl Recovery {
+    /// Whether the group may still have the run's processes in it: its
+    /// record is kept and its runner stays reserved.
+    pub fn is_unresolved(self) -> bool {
+        matches!(self, Recovery::Stopped(CleanupOutcome::Unresolved))
     }
+}
+
+/// Groups whose recovery is unresolved, for runner admission: a runner a
+/// held group affects stays reserved, since the old run's processes may
+/// still use its working copy.
+#[derive(Debug, Default)]
+pub struct RecoveryHold {
+    dir: PathBuf,
+    held: Vec<GroupRecord>,
+}
+
+impl RecoveryHold {
+    /// Whether nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Whether a held group may belong to `runner_id` (a record without a
+    /// runner may belong to any).
+    pub fn affects(&self, runner_id: Uuid) -> bool {
+        self.held
+            .iter()
+            .any(|r| r.runner_id.is_none_or(|id| id == runner_id))
+    }
+
+    /// A hold of records for `runners` (tests only).
+    #[cfg(test)]
+    pub fn for_tests(runners: Vec<Option<Uuid>>) -> Self {
+        Self {
+            dir: PathBuf::new(),
+            held: runners
+                .into_iter()
+                .map(|runner_id| GroupRecord {
+                    run_id: Uuid::new_v4(),
+                    pgid: 0,
+                    anchor_pid: 0,
+                    anchor_start: 0,
+                    owner_pid: 0,
+                    runner_id,
+                    survivors: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Recover the held records again; keep those still unresolved.
+    pub async fn recheck(&mut self) {
+        let dir = self.dir.clone();
+        let held = recover_dir(dir, crate::util::containment::CLEANUP_GRACE).await;
+        self.retain_unresolved(held);
+    }
+
+    fn retain_unresolved(&mut self, done: Vec<(PathBuf, Recovery, Option<GroupRecord>)>) {
+        self.held = done
+            .into_iter()
+            .filter(|(_, r, _)| r.is_unresolved())
+            .filter_map(|(_, _, record)| record)
+            .collect();
+    }
+}
+
+/// Recover every group a dead daemon left in `data_dir`. Runs at daemon
+/// start, before any run; a no-op where groups are not recovered. The
+/// groups that could not be resolved are returned so their runners stay
+/// reserved (review of #3501 at 1524d8e).
+pub async fn recover_orphaned_groups(data_dir: &Path) -> RecoveryHold {
+    let mut hold = RecoveryHold {
+        dir: record_dir(data_dir),
+        held: Vec::new(),
+    };
+    if RECOVERS {
+        hold.recheck().await;
+    }
+    hold
 }
 
 /// [`recover_orphaned_groups`] for one record dir.
@@ -219,7 +327,10 @@ pub async fn recover_orphaned_groups(data_dir: &Path) {
 /// for the pass): two daemons starting together after a crash would
 /// otherwise both adopt a group, and one could kill an anchor the other
 /// had just proven. A daemon that finds the lock held skips recovery.
-pub(crate) async fn recover_dir(dir: PathBuf, grace: Duration) -> Vec<(PathBuf, Recovery)> {
+pub(crate) async fn recover_dir(
+    dir: PathBuf,
+    grace: Duration,
+) -> Vec<(PathBuf, Recovery, Option<GroupRecord>)> {
     tokio::task::spawn_blocking(move || {
         let Some(_lock) = recovery_lock(&dir) else {
             return Vec::new();
@@ -227,20 +338,27 @@ pub(crate) async fn recover_dir(dir: PathBuf, grace: Duration) -> Vec<(PathBuf, 
         list_records(&dir)
             .into_iter()
             .map(|(path, record)| {
-                let done = match record {
-                    Some(record) => recover_record(&path, &record, grace),
+                let done = match &record {
+                    Some(record) => recover_record(&path, record, grace),
                     None => {
                         tracing::warn!(path = %path.display(), "unreadable run group record discarded");
                         let _ = std::fs::remove_file(&path);
                         Recovery::Discarded
                     }
                 };
-                (path, done)
+                // The record as it is now on disk (a forced cleanup may
+                // have rewritten it with its survivors).
+                let record = record.map(|r| read_record(&path).unwrap_or(r));
+                (path, done, record)
             })
             .collect()
     })
     .await
     .unwrap_or_default()
+}
+
+fn read_record(path: &Path) -> Option<GroupRecord> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 const RECOVERY_LOCK: &str = ".recovery.lock";
@@ -282,7 +400,36 @@ fn recover_record(path: &Path, record: &GroupRecord, grace: Duration) -> Recover
             Recovery::LeftRunning
         }
         Verdict::Orphaned => Recovery::Stopped(stop_adopted(path, record, grace)),
+        Verdict::Survivors => {
+            tracing::warn!(run_id = %record.run_id, pgid = record.pgid,
+                "orphaned run group still has survivors of its forced cleanup; record kept");
+            Recovery::Stopped(CleanupOutcome::Unresolved)
+        }
     }
+}
+
+/// What to keep of `record` after a forced cleanup that left its group
+/// unresolved (review of #3501 at 1524d8e): `verdict` judges the anchor
+/// now, `survivors` are the members a fresh proven scan still found. While
+/// the anchor lingers the record stays as it is. Once the group's SIGKILL
+/// has also ended the anchor, the record can only prove the group through
+/// its survivors, so it is rewritten with them; with none, nothing can
+/// prove the group any more and the record is dropped (`None`).
+fn after_forced_cleanup(
+    record: &GroupRecord,
+    verdict: Verdict,
+    survivors: Vec<(i32, u64)>,
+) -> Option<GroupRecord> {
+    if verdict == Verdict::Orphaned {
+        return Some(record.clone());
+    }
+    if survivors.is_empty() {
+        return None;
+    }
+    Some(GroupRecord {
+        survivors,
+        ..record.clone()
+    })
 }
 
 /// Stop an orphaned group judged [`Verdict::Orphaned`]. Every signal
@@ -294,8 +441,30 @@ fn stop_adopted(path: &Path, record: &GroupRecord, grace: Duration) -> CleanupOu
         crate::util::containment::stop_owned_group(record.run_id, &owner, grace);
     crate::util::containment::cleanup_report(record.run_id, "process-group-recovery", &stopped);
     if outcome != CleanupOutcome::Clean {
-        tracing::warn!(run_id = %record.run_id, pgid = record.pgid,
-            "orphaned run group could not be emptied; kept for the next daemon start");
+        let survivors = match crate::util::containment::lock_owner(&owner).observe() {
+            crate::util::group_ownership::Proof::Ours(live) => {
+                live.iter().map(|p| (p.pid, p.start)).collect()
+            }
+            _ => Vec::new(),
+        };
+        let verdict = judge(record, procinfo::info_with_parent);
+        match after_forced_cleanup(record, verdict, survivors) {
+            Some(kept) => {
+                if kept != *record
+                    && let Err(e) = write_record_at(path, &kept)
+                {
+                    tracing::warn!(run_id = %record.run_id, error = %e,
+                        "survivors of the forced cleanup not recorded");
+                }
+                tracing::warn!(run_id = %record.run_id, pgid = record.pgid,
+                    "orphaned run group could not be emptied; kept for the next check");
+            }
+            None => {
+                tracing::warn!(run_id = %record.run_id, pgid = record.pgid,
+                    "orphaned run group could not be emptied and can no longer be proven; left running");
+                let _ = std::fs::remove_file(path);
+            }
+        }
         return outcome;
     }
     // The group is empty but the lingering anchor may still hold it. Stop
@@ -332,6 +501,8 @@ mod tests {
             anchor_pid: 10,
             anchor_start: 500,
             owner_pid: 77,
+            runner_id: None,
+            survivors: Vec::new(),
         }
     }
 
@@ -343,6 +514,74 @@ mod tests {
             zombie,
             name: "sleep".into(),
         }
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 3): the group's SIGKILL also ends
+    /// the lingering anchor, so a record kept for a group that could not be
+    /// emptied must still prove that group at the next check: through the
+    /// survivors' exact identities, which keep the group id reserved.
+    #[test]
+    fn a_forced_cleanup_keeps_the_group_provable_through_its_survivors() {
+        let r = rec();
+        let gone = Verdict::Unproven("anchor is gone");
+        let kept = after_forced_cleanup(&r, gone, vec![(11, 600)]).expect("record kept");
+        let survivor = |start: u64, pgid: i32| {
+            move |pid: i32| (pid == 11).then(|| (anchor(11, pgid, start, false), 1))
+        };
+        assert_eq!(judge(&kept, survivor(600, 10)), Verdict::Survivors);
+        // A reused pid, a moved process, a dead survivor prove nothing.
+        assert!(matches!(
+            judge(&kept, survivor(601, 10)),
+            Verdict::Unproven(_)
+        ));
+        assert!(matches!(
+            judge(&kept, survivor(600, 12)),
+            Verdict::Unproven(_)
+        ));
+        assert!(matches!(judge(&kept, |_| None), Verdict::Unproven(_)));
+        // While the anchor lingers the record stays as it is; with neither
+        // anchor nor survivors there is nothing left to prove the group.
+        assert_eq!(
+            after_forced_cleanup(&r, Verdict::Orphaned, vec![(11, 600)]),
+            Some(r.clone())
+        );
+        assert_eq!(after_forced_cleanup(&r, gone, Vec::new()), None);
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 2): a group whose recovery is
+    /// unresolved keeps its runner reserved (every runner when the record
+    /// names none) until a re-check resolves it.
+    #[test]
+    fn an_unresolved_recovery_holds_its_runner() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let mut for_a = rec();
+        for_a.runner_id = Some(a);
+        let mut hold = RecoveryHold::default();
+        hold.retain_unresolved(vec![
+            (
+                PathBuf::from("a"),
+                Recovery::Stopped(CleanupOutcome::Unresolved),
+                Some(for_a.clone()),
+            ),
+            (PathBuf::from("c"), Recovery::LeftRunning, Some(rec())),
+        ]);
+        assert!(hold.affects(a) && !hold.affects(b));
+        hold.retain_unresolved(vec![(
+            PathBuf::from("n"),
+            Recovery::Stopped(CleanupOutcome::Unresolved),
+            Some(rec()),
+        )]);
+        assert!(
+            hold.affects(a) && hold.affects(b),
+            "an unknown runner holds all"
+        );
+        hold.retain_unresolved(vec![(
+            PathBuf::from("a"),
+            Recovery::Stopped(CleanupOutcome::Clean),
+            Some(for_a),
+        )]);
+        assert!(hold.is_empty() && !hold.affects(a));
     }
 
     #[test]
@@ -408,6 +647,11 @@ mod process_tests {
             .unwrap()
     }
 
+    /// The (path, outcome) pairs of a recovery pass.
+    fn outcomes(done: Vec<(PathBuf, Recovery, Option<GroupRecord>)>) -> Vec<(PathBuf, Recovery)> {
+        done.into_iter().map(|(p, r, _)| (p, r)).collect()
+    }
+
     /// The pid of a process that has exited and been reaped: a daemon that
     /// is gone.
     fn dead_pid() -> i32 {
@@ -438,6 +682,8 @@ mod process_tests {
             anchor_pid: anchor.pid,
             anchor_start: anchor.start,
             owner_pid,
+            runner_id: None,
+            survivors: Vec::new(),
         }
     }
 
@@ -477,7 +723,7 @@ mod process_tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(running(&mut anchor), "the anchor must survive TERM");
 
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
 
         assert_eq!(
             done,
@@ -572,7 +818,7 @@ mod process_tests {
         let path = write_record(dir.path(), &record_for(&a, dead_pid())).unwrap();
         orphan(&mut anchor);
 
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
 
         assert_eq!(
             done,
@@ -592,7 +838,7 @@ mod process_tests {
         let mut member = spawn_member(a.pgid);
         let path = write_record(dir.path(), &record_for(&a, std::process::id() as i32)).unwrap();
 
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
 
         assert_eq!(done, vec![(path.clone(), Recovery::LeftToOwner)]);
         assert!(running(&mut member) && running(&mut anchor));
@@ -611,7 +857,7 @@ mod process_tests {
         let path = write_record(dir.path(), &record).unwrap();
         orphan(&mut anchor);
 
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
 
         assert_eq!(done, vec![(path.clone(), Recovery::LeftRunning)]);
         assert!(running(&mut member) && running(&mut anchor));
@@ -657,7 +903,7 @@ mod process_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut owner = GroupOwner::new_anchored().expect("anchored group");
         let run_id = Uuid::new_v4();
-        record_in(dir.path(), run_id, &mut owner);
+        record_in(dir.path(), run_id, None, &mut owner);
         let path = record_path(dir.path(), run_id);
         let record: GroupRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let anchor = owner.anchor_identity().unwrap();
@@ -669,6 +915,8 @@ mod process_tests {
                 anchor_pid: anchor.pid,
                 anchor_start: anchor.start,
                 owner_pid: std::process::id() as i32,
+                runner_id: None,
+                survivors: Vec::new(),
             }
         );
         drop(owner);
@@ -685,13 +933,13 @@ mod process_tests {
         let held = std::fs::File::create(dir.path().join(RECOVERY_LOCK)).unwrap();
         held.lock_exclusive().unwrap();
 
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
 
         assert!(done.is_empty());
         assert!(running(&mut anchor) && path.exists());
         drop(held);
         assert_eq!(
-            recover_dir(dir.path().to_path_buf(), GRACE).await,
+            outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await),
             vec![(path, Recovery::Stopped(CleanupOutcome::Clean))]
         );
         let _ = anchor.wait();
@@ -702,7 +950,7 @@ mod process_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("junk.json");
         std::fs::write(&path, b"{").unwrap();
-        let done = recover_dir(dir.path().to_path_buf(), GRACE).await;
+        let done = outcomes(recover_dir(dir.path().to_path_buf(), GRACE).await);
         assert_eq!(done, vec![(path.clone(), Recovery::Discarded)]);
         assert!(!path.exists());
     }

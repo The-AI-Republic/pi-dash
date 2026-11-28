@@ -451,7 +451,7 @@ fn send_signal(pid: u32, sig: Signal) {
 
 /// Lock a group claim; a poisoned lock still holds a valid claim.
 #[cfg(unix)]
-fn lock_owner(owner: &Mutex<GroupOwner>) -> std::sync::MutexGuard<'_, GroupOwner> {
+pub(crate) fn lock_owner(owner: &Mutex<GroupOwner>) -> std::sync::MutexGuard<'_, GroupOwner> {
     owner.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -649,9 +649,15 @@ pub(crate) fn cleanup_report(run_id: Uuid, backend: &str, stopped: &[(u32, Strin
 /// failure (no delegation, cgroup v1, rootful layout) downgrades this
 /// run to the process group and warns — never a run failure.
 pub fn create_run_group(run_id: Uuid) -> RunGroup {
+    create_run_group_for(run_id, None)
+}
+
+/// [`create_run_group`] for a unit of `runner_id`'s, so a crash-recovery
+/// record left by it reserves only that runner.
+pub fn create_run_group_for(run_id: Uuid, runner_id: Option<Uuid>) -> RunGroup {
     let chosen = backend();
     let mut group = match chosen {
-        BackendKind::ProcessGroup => process_group_unit(run_id),
+        BackendKind::ProcessGroup => process_group_unit(run_id, runner_id),
         other => bare_group(run_id, other),
     };
     if chosen == BackendKind::Cgroup {
@@ -673,7 +679,7 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
                     BackendKind::ProcessGroup,
                     crate::util::procinfo::inspection_usable(),
                 ) {
-                    BackendKind::ProcessGroup => process_group_unit(run_id),
+                    BackendKind::ProcessGroup => process_group_unit(run_id, runner_id),
                     other => bare_group(run_id, other),
                 };
                 #[cfg(not(unix))]
@@ -704,13 +710,13 @@ fn bare_group(run_id: Uuid, backend: BackendKind) -> RunGroup {
 
 /// A process-group run unit, with its anchored group created up front so
 /// agents can be spawned into it.
-fn process_group_unit(run_id: Uuid) -> RunGroup {
+fn process_group_unit(run_id: Uuid, runner_id: Option<Uuid>) -> RunGroup {
     let mut group = bare_group(run_id, BackendKind::ProcessGroup);
     #[cfg(unix)]
     {
         match GroupOwner::new_anchored() {
             Some(mut owner) => {
-                crate::util::group_recovery::record_new_group(run_id, &mut owner);
+                crate::util::group_recovery::record_new_group(run_id, runner_id, &mut owner);
                 group.owner = Some(Arc::new(Mutex::new(owner)));
             }
             None => tracing::warn!(
@@ -1143,7 +1149,7 @@ mod tests {
     /// A run group on the process-group backend with a short grace.
     #[cfg(unix)]
     fn process_group_run() -> RunGroup {
-        let mut group = process_group_unit(Uuid::new_v4());
+        let mut group = process_group_unit(Uuid::new_v4(), None);
         group.grace = Duration::from_millis(300);
         group
     }
