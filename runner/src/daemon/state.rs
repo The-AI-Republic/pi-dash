@@ -65,6 +65,15 @@ impl DaemonShutdownTrigger {
     }
 }
 
+/// One cloud chat runtime counted as tearing down (see
+/// [`StateHandle::begin_chat_teardown`]).
+pub struct ChatTeardown(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ChatTeardown {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 #[derive(Clone)]
 pub struct StateHandle {
     inner: Arc<Inner>,
@@ -86,6 +95,10 @@ pub struct StateHandle {
     /// Set while a finished run's cleanup is unresolved: its processes may
     /// still use the working copy, so local chat must not claim it.
     cleanup_reserved: Arc<AtomicBool>,
+    /// Cloud chat runtimes being torn down whose first cleanup pass has not
+    /// ended: their agents may still use the working copy, so local chat
+    /// must not claim it (see [`StateHandle::begin_chat_teardown`]).
+    chat_teardowns: Arc<std::sync::atomic::AtomicUsize>,
     /// A released terminal report could not be sent: the run's terminal
     /// outbox record must outlive its slot release.
     terminal_undelivered: Arc<AtomicBool>,
@@ -276,6 +289,7 @@ impl StateHandle {
             shutdown_reason: Arc::new(std::sync::Mutex::new(None)),
             terminal_hold: Arc::new(std::sync::Mutex::new(TerminalHold::Off)),
             cleanup_reserved: Arc::new(AtomicBool::new(false)),
+            chat_teardowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             terminal_undelivered: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -443,6 +457,19 @@ impl StateHandle {
     /// may still use the working copy.
     pub fn cleanup_reserved(&self) -> bool {
         self.cleanup_reserved.load(Ordering::SeqCst)
+    }
+
+    /// Count a cloud chat runtime as tearing down until the guard drops.
+    /// Taken before its bridge shuts down, so local chat never sees the
+    /// working copy free while the runtime's agents are still stopping.
+    pub fn begin_chat_teardown(&self) -> ChatTeardown {
+        self.chat_teardowns.fetch_add(1, Ordering::SeqCst);
+        ChatTeardown(self.chat_teardowns.clone())
+    }
+
+    /// Whether a cloud chat runtime is still being torn down.
+    pub fn chat_teardown_pending(&self) -> bool {
+        self.chat_teardowns.load(Ordering::SeqCst) > 0
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

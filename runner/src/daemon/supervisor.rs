@@ -25,7 +25,7 @@ use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::{AgentHealthReport, DaemonShutdownTrigger, StateHandle};
+use crate::daemon::state::{AgentHealthReport, ChatTeardown, DaemonShutdownTrigger, StateHandle};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
@@ -2659,18 +2659,19 @@ fn spawn_chat_runtime(
     let (done_tx, done_rx) = oneshot::channel();
     let (clean_tx, clean_rx) = oneshot::channel();
     tokio::spawn(async move {
-        match worker.unit.as_ref().map(ChatUnit::env) {
+        let teardown = match worker.unit.as_ref().map(ChatUnit::env) {
             Some(env) => {
                 crate::util::shell::CHAT_ENV
                     .scope(env, worker.run(chat_session_id))
                     .await
             }
             None => worker.run(chat_session_id).await,
-        }
+        };
         let _ = done_tx.send(());
         if let Some(unit) = worker.unit.take() {
             finish_chat_unit(unit, &worker.state).await;
         }
+        drop(teardown);
         let _ = clean_tx.send(());
     });
     CurrentChat {
@@ -3263,6 +3264,20 @@ impl RunnerLoop {
                         );
                         continue;
                     }
+                    // Claim the working copy like a local turn before the
+                    // handoff, so no warm or send can start an agent in it
+                    // after the idle sessions are snapshotted. Held until the
+                    // run is published as in flight below (dropped on every
+                    // `continue`).
+                    let Some(_handoff) =
+                        crate::ipc::chat::claim_working_copy(&self.local_chat_active)
+                    else {
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: a chat turn is active on this runner".to_string(),
+                        );
+                        continue;
+                    };
                     // Hand the working copy over only once no chat agent can
                     // still be using it (PDASHOSS01-417): the cloud chat
                     // runtime and every idle local chat session are ended and
@@ -3276,17 +3291,6 @@ impl RunnerLoop {
                             run_id,
                             "assign rejected: a chat session's processes are still stopping on this runner"
                                 .to_string(),
-                        );
-                        continue;
-                    }
-                    // A local turn that began while the handoff waited.
-                    if self
-                        .local_chat_active
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        self.nack_assign(
-                            run_id,
-                            "assign rejected: a chat turn is active on this runner".to_string(),
                         );
                         continue;
                     }
@@ -3947,7 +3951,10 @@ impl ChatWorker {
         }
     }
 
-    async fn run(&mut self, chat_session_id: uuid::Uuid) {
+    /// Returns the runtime's teardown count when it has a unit: held until
+    /// the unit's first cleanup pass ends, so local chat stays refused while
+    /// the agents are stopping.
+    async fn run(&mut self, chat_session_id: uuid::Uuid) -> Option<ChatTeardown> {
         // A session's runtime idles out after 5 minutes of silence and the
         // worker exits. Chat runs in the runner's one working directory and
         // performs no git lifecycle of its own — the agent drives git per the
@@ -4098,11 +4105,18 @@ impl ChatWorker {
                 }
             }
         }
+        // Counted before the bridge shuts down: from here the agents are
+        // stopping, and local chat must not take the working copy.
+        let teardown = self
+            .unit
+            .is_some()
+            .then(|| self.state.begin_chat_teardown());
         if let Some(bridge) = bridge.take() {
             bridge.shutdown(Duration::from_secs(5)).await.ok();
         }
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
+        teardown
     }
 
     async fn send_timing_event(
@@ -7699,20 +7713,31 @@ mod tests {
         unit: ChatUnit,
     ) -> (ChatWorker, mpsc::Sender<ChatCommand>, watch::Receiver<bool>) {
         let config = runner_config("main", "WEB", PathBuf::from("/nonexistent"));
+        let state = StateHandle::new(Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![config.clone()],
+            cli: None,
+        });
+        idle_chat_worker_on(unit, state)
+    }
+
+    /// [`idle_chat_worker`] sharing `state` (a runner instance's).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_chat_worker_on(
+        unit: ChatUnit,
+        state: StateHandle,
+    ) -> (ChatWorker, mpsc::Sender<ChatCommand>, watch::Receiver<bool>) {
+        let config = runner_config("main", "WEB", PathBuf::from("/nonexistent"));
         let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (active_tx, active_rx) = watch::channel(false);
         let worker = ChatWorker {
             runner_config: config.clone(),
-            state: StateHandle::new(Config {
-                engine: Default::default(),
-                auth: Default::default(),
-                auth_event: None,
-                version: 2,
-                daemon: Default::default(),
-                runners: vec![config.clone()],
-                cli: None,
-            }),
+            state,
             approvals: ApprovalRouter::new(),
             out: RunnerOut::new(config.runner_id, out_tx),
             command_rx: cmd_rx,
@@ -7760,6 +7785,64 @@ mod tests {
             !process_alive(pid),
             "the chat agent's process outlived the handoff"
         );
+    }
+
+    /// While a cloud chat runtime's agents are being stopped (its first
+    /// cleanup pass, up to the TERM grace), local chat must not take the
+    /// working copy: the copy is reserved before teardown begins.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn local_chat_is_refused_while_a_cloud_chat_runtime_is_stopping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(
+            runner_config("main", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let id = uuid::Uuid::new_v4();
+        let mut unit = ChatUnit::new(id);
+        // Ignores TERM, so the unit's first pass lasts the whole grace.
+        let mut leftover = unit
+            .scoped(async {
+                crate::util::shell::login_shell_command(
+                    "sh",
+                    &["-c", "trap '' TERM; exec sleep 300"],
+                    None,
+                )
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+            })
+            .await;
+        let pid = leftover.id().unwrap();
+        unit.adopt(Some(pid));
+        let reaper = tokio::spawn(async move { leftover.wait().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (worker, tx, active_rx) = idle_chat_worker_on(unit, inst.state.clone());
+        let mut current = Some(spawn_chat_runtime(worker, id, tx, active_rx));
+        let mut stopping = None;
+        let (handed_over, busy_while_stopping) =
+            tokio::join!(release_chat_dir(&mut current, &mut stopping), async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let alive = process_alive(pid);
+                (
+                    crate::ipc::chat::try_begin_local_turn(&inst).is_err(),
+                    alive,
+                )
+            });
+        let _ = tokio::time::timeout(Duration::from_secs(5), reaper).await;
+        assert!(busy_while_stopping.1, "the agent was gone before the check");
+        assert!(
+            busy_while_stopping.0,
+            "local chat claimed the copy while the chat runtime's agents were stopping"
+        );
+        assert!(handed_over);
+        assert!(!process_alive(pid));
+        let _turn = crate::ipc::chat::try_begin_local_turn(&inst).expect("free once stopped");
     }
 
     /// PDASHOSS01-417: a chat runtime whose processes cannot be proven gone

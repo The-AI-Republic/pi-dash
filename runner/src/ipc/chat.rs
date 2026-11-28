@@ -239,6 +239,13 @@ impl ChatRegistry {
                 self.end_runtime(&mut rt, Duration::from_secs(5)).await;
             }
         }
+        self.settle_ended().await && free
+    }
+
+    /// Re-check the units of runtimes that ended unresolved. `true` only
+    /// when none is left and no runtime is still being ended: nothing an
+    /// ended runtime started may still be using the working copy.
+    pub(crate) async fn settle_ended(&self) -> bool {
         let mut lingering = self.lingering.lock().await;
         let mut left = Vec::new();
         for mut unit in lingering.drain(..) {
@@ -251,7 +258,7 @@ impl ChatRegistry {
         // unresolved is pushed there before it stops counting as ending,
         // so it is seen in one place or the other.
         let ending = self.ending.load(Ordering::SeqCst) > 0;
-        free && lingering.is_empty() && !ending
+        lingering.is_empty() && !ending
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
@@ -462,6 +469,11 @@ impl Drop for LocalTurnGuard {
     }
 }
 
+/// Why a warm or send is refused while an ended chat runtime's processes
+/// are not confirmed gone.
+const ENDED_RUNTIME_BUSY: &str =
+    "an ended chat session's processes are still being cleaned up on this runner's working copy";
+
 /// Why an issue run still holds the runner's working copy: it is in flight,
 /// or it finished but its run-end cleanup is unresolved, so its processes
 /// may still be using the working copy (PDASHOSS01-417).
@@ -472,6 +484,12 @@ fn working_copy_busy(inst: &RunnerInstance) -> Option<String> {
     if inst.state.cleanup_reserved() {
         return Some(
             "the last issue run's processes are still being cleaned up on this runner's working copy"
+                .to_string(),
+        );
+    }
+    if inst.state.chat_teardown_pending() {
+        return Some(
+            "a cloud chat runtime's processes are still stopping on this runner's working copy"
                 .to_string(),
         );
     }
@@ -506,6 +524,17 @@ pub(crate) fn try_begin_local_turn(
     Ok(LocalTurnGuard {
         flag: inst.chat_active.clone(),
     })
+}
+
+/// Claim the working copy for an Assign's handoff, as a local turn would:
+/// while held, no warm or send can start an agent in it. The Assign takes
+/// it before ending the idle local sessions and keeps it until the run is
+/// published as in flight, which then refuses local chat on its own.
+/// `None` while a local turn holds the copy.
+pub(crate) fn claim_working_copy(flag: &Arc<AtomicBool>) -> Option<LocalTurnGuard> {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()?;
+    Some(LocalTurnGuard { flag: flag.clone() })
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +587,16 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         }
     };
     let session = host.sessions.get_or_create(chat_session_id).await;
+    if !host.sessions.settle_ended().await {
+        sink.emit(Response::ChatEvent {
+            chat_session_id,
+            bridge_seq: 0,
+            kind: "chat_warm_failed".into(),
+            payload: serde_json::json!({ "detail": ENDED_RUNTIME_BUSY, "code": "runner_busy" }),
+        })
+        .await?;
+        return Ok(Response::Ack);
+    }
     let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
@@ -668,6 +707,14 @@ pub(crate) async fn handle_send<S: ChatSink>(
     };
 
     let session = host.sessions.get_or_create(chat_session_id).await;
+    if !host.sessions.settle_ended().await {
+        return Ok(Response::ChatFailed {
+            chat_session_id,
+            code: "runner_busy".into(),
+            detail: Some(ENDED_RUNTIME_BUSY.to_string()),
+            failed_at: Utc::now(),
+        });
+    }
     let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
@@ -808,6 +855,9 @@ pub(crate) async fn handle_close<S: ChatSink>(
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
         let mut rt = session.rt.lock().await;
+        // Counted as ending while it stops, so a warm or send of another
+        // session does not start an agent beside its processes.
+        let _ending = Ending::new(&host.sessions.ending);
         host.sessions
             .end_runtime(&mut rt, Duration::from_secs(5))
             .await;
@@ -2713,6 +2763,138 @@ mod tests {
             registry.release_idle().await,
             "the ended session still holds the copy"
         );
+    }
+
+    /// A closed or evicted session whose processes are not confirmed gone
+    /// still holds the working copy: a warm or send of any session must not
+    /// start a fresh agent beside them, and nothing unproven is signalled.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn local_chat_is_refused_while_an_ended_runtime_is_unresolved() {
+        use std::os::unix::process::CommandExt;
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = stranger.id();
+        let info = crate::util::procinfo::info(pid as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let inst = offline_instance();
+        let mut rt = SessionRuntime {
+            unit: Some(ChatUnit::from_group(
+                crate::util::containment::RunGroup::claimed_for_test(&recorded),
+            )),
+            ..SessionRuntime::default()
+        };
+        inst.chat_sessions
+            .end_runtime(&mut rt, Duration::from_secs(1))
+            .await;
+        let host = ChatHost::runner(&inst);
+        let id = Uuid::new_v4();
+        let mut sink = VecSink::default();
+        let warm = handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id: id,
+                cwd: None,
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let send = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id: id,
+                message_id: Uuid::new_v4(),
+                content: "hi".into(),
+                cwd: None,
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut VecSink::default(),
+        )
+        .await
+        .unwrap();
+        let alive = process_alive(pid);
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(matches!(warm, Response::Ack));
+        let warm_code = sink.frames.iter().find_map(|f| match f {
+            Response::ChatEvent { kind, payload, .. } if kind == "chat_warm_failed" => {
+                payload["code"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            warm_code.as_deref(),
+            Some("runner_busy"),
+            "warm was not refused as busy: {:?}",
+            sink.frames
+        );
+        assert!(
+            matches!(&send, Response::ChatFailed { code, .. } if code == "runner_busy"),
+            "send was not refused as busy: {send:?}"
+        );
+        assert!(alive, "an unproven group was signalled");
+        assert!(!inst.chat_active.load(Ordering::SeqCst));
+    }
+
+    /// An Assign's handoff claims the working copy before it ends the idle
+    /// sessions, so a warm that starts once the sessions are snapshotted
+    /// cannot put a fresh agent in the copy the run is about to take.
+    #[tokio::test]
+    async fn a_warm_during_an_assign_handoff_is_refused() {
+        let inst = offline_instance();
+        let claim = claim_working_copy(&inst.chat_active).expect("copy is free");
+        assert!(inst.chat_sessions.release_idle().await);
+        let host = ChatHost::runner(&inst);
+        let id = Uuid::new_v4();
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id: id,
+                cwd: None,
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let refused = sink.frames.iter().any(|f| {
+            matches!(f, Response::ChatEvent { kind, payload, .. }
+                if kind == "chat_warm_failed" && payload["code"] == "runner_busy")
+        });
+        if let Some(session) = inst.chat_sessions.get(id).await
+            && let Some(bridge) = session.rt.lock().await.bridge.take()
+        {
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+        }
+        assert!(
+            refused,
+            "warm started during the handoff: {:?}",
+            sink.frames
+        );
+        assert!(
+            claim_working_copy(&inst.chat_active).is_none(),
+            "a second claim was granted"
+        );
+        drop(claim);
+        let _turn = try_begin_local_turn(&inst).expect("claim after the handoff");
     }
 
     /// A warm starts an agent in the working copy, so it is refused while
