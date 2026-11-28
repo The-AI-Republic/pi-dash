@@ -399,13 +399,9 @@ impl Coordinator {
         }
         drop(inner);
         if removed {
-            let has_terminal = self
-                .store
-                .list_terminal_pending()
-                .is_ok_and(|pending| pending.iter().any(|e| e.run_id == run_id));
-            if !has_terminal {
-                let _ = self.store.delete_entry(run_id);
-            }
+            // The row's phase in SQLite decides: a terminal outbox record
+            // is never deleted here, even when it cannot be read.
+            let _ = self.store.delete_unless_terminal(run_id);
             self.admission.notify_waiters();
         }
         Ok(removed)
@@ -664,6 +660,37 @@ mod tests {
         // Successful redelivery clears.
         coord2.complete_terminal(e1.run_id).unwrap();
         assert!(coord2.terminal_pending().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Releasing a slot must not delete a terminal outbox record because
+    /// the outbox could not be read: only the row's phase in SQLite may
+    /// authorise the delete.
+    #[test]
+    fn release_slot_keeps_the_outbox_record_when_the_outbox_is_unreadable() {
+        let dir = std::env::temp_dir().join(format!("coord_unreadable_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        coord.enqueue(e1.clone()).unwrap();
+        assert!(coord.admit(e1.run_id).unwrap());
+        assert!(coord.persist_terminal(e1.run_id, b"{}", "mid-1").unwrap());
+        // Another outbox row the reader cannot decode makes the whole
+        // outbox read fail, while a delete still succeeds.
+        let raw = rusqlite::Connection::open(dir.join("run_queue.sqlite3")).unwrap();
+        raw.execute(
+            "INSERT INTO queue_entries (cloud_origin, runner_id, run_id, sequence, queued_at, phase, assignment_payload) VALUES ('test', 'r', 'other', 'not-a-number', 0, 'terminal_pending', x'')",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert!(coord.store.list_terminal_pending().is_err());
+        assert!(coord.release_slot(e1.run_id).unwrap());
+        assert_eq!(
+            coord.store_has_row(e1.run_id),
+            Some(true),
+            "the undelivered result's outbox record was deleted"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
