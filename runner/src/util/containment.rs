@@ -15,18 +15,20 @@
 //!   what remains; the run is clean only once `cgroup.events` reports the
 //!   whole subtree unpopulated. The start-up sweep finds
 //!   `pidash-run-*` children the previous daemon left behind.
-//! * **process group** (elsewhere Unix): the agent gets its own process
-//!   group (`process_group(0)`) and cleanup signals the group — but only
-//!   while a fresh snapshot proves the group is still the run's (see
-//!   [`crate::util::group_ownership`]): a pgid whose members all exited
-//!   can be handed to an unrelated group, and an unproven group is left
-//!   running rather than risk killing a stranger. An anchor process the
-//!   daemon keeps unreaped in the group reserves its id until cleanup
-//!   ends, so proof outlives the leader; when no anchor can be spawned,
-//!   members are learned by a periodic observer instead. A child that calls `setsid` escapes the group — a documented
-//!   limit of this backend. Platforms without process inspection (not
-//!   Linux or macOS) could never prove a group empty, so they get no
-//!   containment (as if `off`), not a runner held forever. Cleanup cannot sweep after a crash (a dead PGID can be
+//! * **process group** (elsewhere Unix): when the run starts, the daemon
+//!   creates the run's process group, led by an anchor process it keeps
+//!   unreaped until cleanup ends, and every agent of the run is spawned
+//!   into that group (`process_group(pgid)`). Cleanup signals the group
+//!   only while a fresh snapshot proves it is still the run's (see
+//!   [`crate::util::group_ownership`]); the anchor reserves the group id,
+//!   so it cannot be handed to an unrelated group in between. When no
+//!   anchor can be spawned, each agent leads a group of its own, which is
+//!   never signalled: an unpinned group is left running rather than risk
+//!   killing a stranger. A child that calls `setsid` escapes the group — a
+//!   documented limit of this backend. Platforms without process
+//!   inspection (not Linux or macOS) could never prove a group empty, so
+//!   they get no containment (as if `off`), not a runner held forever.
+//!   Cleanup cannot sweep after a crash (a dead PGID can be
 //!   reused by the OS), so swept recovery only exists on the cgroup
 //!   backend.
 //! * **none**: `PIDASH_CONTAINMENT=off` (diagnosis escape hatch) or
@@ -72,10 +74,6 @@ use crate::util::group_ownership::{GroupOwner, GroupSignal, Proof};
 pub const CLEANUP_GRACE: Duration = Duration::from_secs(10);
 /// How long a run-end hook may run before the runner stops it.
 pub const HOOK_TIMEOUT: Duration = Duration::from_secs(120);
-/// How often a live run's process group is re-observed, so members are
-/// remembered (and keep proving the group) after the leader exits.
-#[cfg(unix)]
-const OBSERVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Prefix of the cgroups the sweep looks for under the daemon's cgroup.
 const CGROUP_PREFIX: &str = "pidash-run-";
 
@@ -163,15 +161,11 @@ pub struct RunGroup {
     /// be read right after spawn (then nothing is ever signalled).
     #[cfg(unix)]
     owner: Option<Arc<Mutex<GroupOwner>>>,
-    /// Process-group backend: the agent's group when its leader could not
-    /// be claimed. Never signalled; only checked for live members, so an
-    /// unknown group is reported as unresolved rather than as clean.
+    /// Process-group backend: the agent's own group when the run has no
+    /// anchored group. Never signalled; only checked for live members, so
+    /// an unknown group is reported as unresolved rather than as clean.
     #[cfg(unix)]
     unclaimed_pgid: Option<i32>,
-    /// Background task re-observing an unanchored `owner` while the run
-    /// is live.
-    #[cfg(unix)]
-    observer: Option<tokio::task::JoinHandle<()>>,
     /// TERM → KILL grace ([`CLEANUP_GRACE`]; shorter in tests).
     grace: Duration,
     workspace: Option<PathBuf>,
@@ -199,9 +193,11 @@ impl RunGroup {
     /// a user's `bashrc` already backgrounded in the bash-init window
     /// can race past the move.
     ///
-    /// On the process-group backend the child already got its own process
-    /// group from `login_shell_command`; this claims it (leader pid plus
-    /// exact start time) and starts the observer that remembers members.
+    /// On the process-group backend there is nothing to do: the agent was
+    /// spawned into the run's anchored group (see [`Self::agent_pgid`]), so
+    /// the claim never depends on reading a pid the bridge may already have
+    /// reaped. Without an anchored group the agent led a group of its own,
+    /// which is never signalled.
     pub fn move_pid(&mut self, pid: Option<u32>) {
         let Some(pid) = pid else { return };
         match self.backend {
@@ -221,40 +217,36 @@ impl RunGroup {
                     ),
                 }
             }
-            BackendKind::ProcessGroup => {
+            BackendKind::ProcessGroup =>
+            {
                 #[cfg(unix)]
-                {
+                if self.agent_pgid().is_none() {
                     let Ok(pid) = i32::try_from(pid) else { return };
-                    match GroupOwner::claim_pid(pid) {
-                        Some(owner) => self.set_owner(owner),
-                        None => {
-                            self.unclaimed_pgid = Some(pid);
-                            tracing::warn!(
-                                run_id = %self.run_id, pid,
-                                "agent process group cannot be proven; its processes will not be signalled at run end"
-                            );
-                        }
-                    }
+                    self.unclaimed_pgid = Some(pid);
+                    tracing::warn!(
+                        run_id = %self.run_id, pid,
+                        "run has no pinned process group; its processes will not be signalled at run end"
+                    );
                 }
             }
             BackendKind::None => {}
         }
     }
 
-    /// Install the group claim. An anchored claim needs no observer; an
-    /// unanchored one is observed so members are remembered.
-    #[cfg(unix)]
-    fn set_owner(&mut self, owner: GroupOwner) {
-        let anchored = owner.is_anchored();
-        let owner = Arc::new(Mutex::new(owner));
-        if let Some(old) = self.observer.take() {
-            old.abort();
+    /// Process group the run's agents must join (`process_group(pgid)`):
+    /// the run's anchored group on the process-group backend. `None`: each
+    /// agent leads a group of its own (never signalled).
+    pub fn agent_pgid(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let owner = self.owner.as_ref()?;
+            let o = lock_owner(owner);
+            o.is_anchored().then(|| o.pgid())
         }
-        self.observer = tokio::runtime::Handle::try_current()
-            .ok()
-            .filter(|_| !anchored)
-            .map(|h| h.spawn(observe_loop(owner.clone())));
-        self.owner = Some(owner);
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// Empty the unit: SIGTERM everything, wait [`CLEANUP_GRACE`], then
@@ -324,9 +316,6 @@ impl RunGroup {
             BackendKind::ProcessGroup => {
                 #[cfg(unix)]
                 {
-                    if let Some(observer) = &self.observer {
-                        observer.abort();
-                    }
                     let Some(owner) = self.owner.clone() else {
                         return (
                             Vec::new(),
@@ -459,19 +448,29 @@ fn lock_owner(owner: &Mutex<GroupOwner>) -> std::sync::MutexGuard<'_, GroupOwner
     owner.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Re-observe an unanchored live run's group at once and then every
-/// [`OBSERVE_INTERVAL`], so members are remembered while it is still
-/// provably the run's. Stops once the group is empty or can no longer be
-/// proven: neither ever becomes ours again. A failed inspection is retried.
+/// One relist of the TERM → KILL grace poll for a claimed group: the live
+/// members to keep waiting on (and KILL if they remain). A group that
+/// cannot be inspected or proven right now repeats the last proven list,
+/// so the grace is not cut short and the KILL step still runs (it re-proves
+/// the group before signalling); a lost proof is recorded in `lost` so the
+/// processes left behind are reported, not counted as stopped.
 #[cfg(unix)]
-async fn observe_loop(owner: Arc<Mutex<GroupOwner>>) {
-    loop {
-        let o = owner.clone();
-        match tokio::task::spawn_blocking(move || lock_owner(&o).observe()).await {
-            Ok(Proof::Ours(_) | Proof::Unknown) => {}
-            _ => return,
+fn grace_relist(
+    proof: Proof,
+    last_known: &mut Vec<(u32, String)>,
+    lost: &mut Option<Vec<crate::util::procinfo::ProcInfo>>,
+) -> Vec<(u32, String)> {
+    match proof {
+        Proof::Ours(live) => {
+            *last_known = live.into_iter().map(|p| (p.pid as u32, p.name)).collect();
+            last_known.clone()
         }
-        tokio::time::sleep(OBSERVE_INTERVAL).await;
+        Proof::Unknown => last_known.clone(),
+        Proof::Unproven(live) => {
+            *lost = Some(live);
+            last_known.clone()
+        }
+        Proof::Empty => Vec::new(),
     }
 }
 
@@ -531,10 +530,8 @@ fn stop_owned_group(
         uninspectable(lock_owner(owner).pgid());
         return (Vec::new(), CleanupOutcome::Unresolved);
     };
-    // A relist that cannot inspect the group repeats the last proven list,
-    // so the grace is not cut short and the KILL step is still attempted
-    // (which re-proves the group itself before signalling).
     let mut last_known = first.clone();
+    let mut lost = None;
     let stopped = stop_members(
         first,
         |_| {
@@ -546,16 +543,7 @@ fn stop_owned_group(
                 Proof::Ours(_) | Proof::Empty => {}
             }
         },
-        || match lock_owner(owner).observe() {
-            Proof::Ours(live) => {
-                last_known = names(live);
-                last_known.clone()
-            }
-            Proof::Unknown => last_known.clone(),
-            // Gone, or no longer provable (reported when signalling):
-            // nothing this run may still touch.
-            Proof::Empty | Proof::Unproven(_) => Vec::new(),
-        },
+        || grace_relist(lock_owner(owner).observe(), &mut last_known, &mut lost),
         |_| {
             let mut o = lock_owner(owner);
             let pgid = o.pgid();
@@ -567,6 +555,11 @@ fn stop_owned_group(
         },
         grace,
     );
+    // Proof lost during the grace: what is left is reported as left
+    // running, never as stopped by this run.
+    if let Some(live) = &lost {
+        unproven(live, lock_owner(owner).pgid());
+    }
     // Clean only when a fresh snapshot shows the group empty: survivors of
     // SIGKILL, an unprovable group and a group that cannot be inspected
     // all leave the run unresolved.
@@ -650,7 +643,10 @@ fn cleanup_report(run_id: Uuid, backend: &str, stopped: &[(u32, String)]) {
 /// run to the process group and warns — never a run failure.
 pub fn create_run_group(run_id: Uuid) -> RunGroup {
     let chosen = backend();
-    let mut group = bare_group(run_id, chosen);
+    let mut group = match chosen {
+        BackendKind::ProcessGroup => process_group_unit(run_id),
+        other => bare_group(run_id, other),
+    };
     if chosen == BackendKind::Cgroup {
         let created = self_cgroup_dir()
             .ok_or_else(|| {
@@ -666,8 +662,13 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
                 // Fall back to the process group for this run too, so
                 // something still gets cleaned up at run end.
                 tracing::warn!(run_id = %run_id, error = %e, "cgroup creation failed; process-group fallback for this run");
-                group.backend =
-                    usable_backend(BackendKind::ProcessGroup, crate::util::procinfo::SUPPORTED);
+                group = match usable_backend(
+                    BackendKind::ProcessGroup,
+                    crate::util::procinfo::SUPPORTED,
+                ) {
+                    BackendKind::ProcessGroup => process_group_unit(run_id),
+                    other => bare_group(run_id, other),
+                };
                 #[cfg(not(unix))]
                 {
                     group.backend = BackendKind::None;
@@ -688,12 +689,27 @@ fn bare_group(run_id: Uuid, backend: BackendKind) -> RunGroup {
         owner: None,
         #[cfg(unix)]
         unclaimed_pgid: None,
-        #[cfg(unix)]
-        observer: None,
         grace: CLEANUP_GRACE,
         workspace: None,
         cleaned: false,
     }
+}
+
+/// A process-group run unit, with its anchored group created up front so
+/// agents can be spawned into it.
+fn process_group_unit(run_id: Uuid) -> RunGroup {
+    let mut group = bare_group(run_id, BackendKind::ProcessGroup);
+    #[cfg(unix)]
+    {
+        match GroupOwner::new_anchored() {
+            Some(owner) => group.owner = Some(Arc::new(Mutex::new(owner))),
+            None => tracing::warn!(
+                run_id = %run_id,
+                "run process group could not be anchored; its processes will not be signalled at run end"
+            ),
+        }
+    }
+    group
 }
 
 /// The daemon's own cgroup directory on cgroup v2, from `/proc/self/cgroup`.
@@ -901,9 +917,7 @@ impl RunGroup {
     pub(crate) fn claimed_for_test(leader: &crate::util::procinfo::ProcInfo) -> Self {
         let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
         group.grace = Duration::from_millis(300);
-        if let Some(owner) = GroupOwner::claim(leader) {
-            group.set_owner(owner);
-        }
+        group.owner = GroupOwner::claim(leader).map(|o| Arc::new(Mutex::new(o)));
         group
     }
 }
@@ -921,10 +935,6 @@ impl Drop for RunGroup {
         if self.cleaned || self.backend == BackendKind::None {
             return;
         }
-        #[cfg(unix)]
-        if let Some(observer) = self.observer.take() {
-            observer.abort();
-        }
         let detached = RunGroup {
             run_id: self.run_id,
             backend: self.backend,
@@ -933,8 +943,6 @@ impl Drop for RunGroup {
             owner: self.owner.take(),
             #[cfg(unix)]
             unclaimed_pgid: self.unclaimed_pgid,
-            #[cfg(unix)]
-            observer: None,
             grace: self.grace,
             workspace: None,
             cleaned: true,
@@ -1124,7 +1132,7 @@ mod tests {
     /// A run group on the process-group backend with a short grace.
     #[cfg(unix)]
     fn process_group_run() -> RunGroup {
-        let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
+        let mut group = process_group_unit(Uuid::new_v4());
         group.grace = Duration::from_millis(300);
         group
     }
@@ -1152,7 +1160,7 @@ mod tests {
             ..stranger
         };
         let mut group = process_group_run();
-        group.set_owner(GroupOwner::claim(&recorded).unwrap());
+        group.owner = Some(Arc::new(Mutex::new(GroupOwner::claim(&recorded).unwrap())));
         let outcome = group.cleanup().await;
         group.mark_cleaned();
         let survived = child.try_wait().unwrap().is_none();
@@ -1165,16 +1173,17 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn process_group_cleanup_stops_members_that_outlive_the_leader() {
+    async fn process_group_cleanup_stops_a_child_whose_leader_was_reaped_unobserved() {
         use std::io::BufRead;
         use std::os::unix::process::CommandExt;
-        // Fallback without an anchor: the leader starts a background child
-        // in its group, then dies and is reaped; the observer must have
-        // learned the child for cleanup to prove (and stop) the group
-        // without its leader.
+        // Review items (#3497, both reviews): the agent starts its only
+        // surviving child and is reaped before the run could read it, as
+        // when the bridge's wait task reaps it first. The group must still
+        // be provably the run's at cleanup, and the child stopped.
+        let mut group = process_group_run();
         let mut leader = std::process::Command::new("sh")
-            .args(["-c", "sleep 300 & echo $!; wait"])
-            .process_group(0)
+            .args(["-c", "sleep 300 & echo $!"])
+            .process_group(group.agent_pgid().unwrap_or(0))
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -1183,62 +1192,10 @@ mod tests {
             .read_line(&mut line)
             .unwrap();
         let orphan: i32 = line.trim().parse().unwrap();
-        let mut group = process_group_run();
-        let info = crate::util::procinfo::info(leader.id() as i32).unwrap();
-        group.set_owner(GroupOwner::claim(&info).unwrap());
-        let owner = group.owner.clone().expect("leader claimed");
-        assert!(!lock_owner(&owner).is_anchored());
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !lock_owner(&owner).knows_pid(orphan) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "observer never learned the child"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        leader.kill().unwrap();
         leader.wait().unwrap();
+        group.move_pid(Some(leader.id()));
         assert!(alive(orphan));
         let outcome = group.cleanup().await;
-        group.mark_cleaned();
-        assert_eq!(outcome, CleanupOutcome::Clean);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while alive(orphan) && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(
-            !alive(orphan),
-            "member outliving the leader was left running"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn process_group_cleanup_stops_a_child_whose_leader_was_reaped_unobserved() {
-        use std::io::{BufRead, Write};
-        use std::os::unix::process::CommandExt;
-        // Review item (#3497): the leader starts its only surviving child
-        // and is reaped before any observation could learn that child.
-        // The group must still be provably the run's at cleanup.
-        let mut leader = std::process::Command::new("sh")
-            .args(["-c", "read _; sleep 300 & echo $!"])
-            .process_group(0)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut group = process_group_run();
-        group.move_pid(Some(leader.id()));
-        assert!(group.owner.is_some(), "leader claimed");
-        leader.stdin.take().unwrap().write_all(b"go\n").unwrap();
-        let mut line = String::new();
-        std::io::BufReader::new(leader.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let orphan: i32 = line.trim().parse().unwrap();
-        leader.wait().unwrap();
-        assert!(alive(orphan));
-        group.cleanup().await;
         group.mark_cleaned();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while alive(orphan) && std::time::Instant::now() < deadline {
@@ -1252,13 +1209,64 @@ mod tests {
             );
         }
         assert!(!survived, "child of a reaped leader was left running");
+        assert_eq!(outcome, CleanupOutcome::Clean);
+    }
+
+    /// Second review of #3497, item 2: without an anchor nothing keeps the
+    /// group id reserved between the last proof and `killpg`, so an
+    /// unpinned group is never signalled, even when it is provably ours.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unpinned_group_is_never_signalled() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let info = crate::util::procinfo::info(child.id() as i32).unwrap();
+        let mut group = process_group_run();
+        group.owner = Some(Arc::new(Mutex::new(GroupOwner::claim(&info).unwrap())));
+        let outcome = group.cleanup().await;
+        group.mark_cleaned();
+        let survived = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(survived, "an unpinned process group was signalled");
+        assert_eq!(outcome, CleanupOutcome::Unresolved);
+    }
+
+    /// Second review of #3497, item 3: losing proof during the grace must
+    /// not read as "all stopped". The poll keeps the last proven list, so
+    /// the KILL step still runs (and re-proves before signalling), and the
+    /// processes left behind are recorded for the report.
+    #[cfg(unix)]
+    #[test]
+    fn losing_proof_during_the_grace_is_reported_not_read_as_empty() {
+        let stranger = crate::util::procinfo::ProcInfo {
+            pid: 42,
+            pgid: 10,
+            start: 1,
+            zombie: false,
+            name: "survivor".into(),
+        };
+        let mut last_known = vec![(11, "agent".to_string())];
+        let mut lost = None;
+        let relisted = grace_relist(
+            Proof::Unproven(vec![stranger.clone()]),
+            &mut last_known,
+            &mut lost,
+        );
+        assert_eq!(relisted, vec![(11, "agent".to_string())]);
+        assert_eq!(lost, Some(vec![stranger]));
+        assert!(grace_relist(Proof::Empty, &mut last_known, &mut lost).is_empty());
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn process_group_without_a_claim_signals_nothing() {
-        let mut group = process_group_run();
-        // The leader exited before it could be read: no claim, no signal.
+        let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
+        // No anchored group could be created: no claim, no signal.
         group.move_pid(Some(u32::MAX));
         assert!(group.owner.is_none());
         assert_eq!(group.stop_all().await, (Vec::new(), CleanupOutcome::Clean));
@@ -1274,8 +1282,9 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        let mut group = process_group_run();
-        // The leader could not be claimed, but its group has members.
+        let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
+        group.grace = Duration::from_millis(300);
+        // No anchored group: the agent led its own, which has members.
         group.unclaimed_pgid = Some(child.id() as i32);
         let outcome = group.cleanup().await;
         group.mark_cleaned();

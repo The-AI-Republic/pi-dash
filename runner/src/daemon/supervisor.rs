@@ -4794,6 +4794,7 @@ impl AssignWorker {
             crate::util::shell::RunEnv {
                 run_id,
                 backend: guard.backend_kind(),
+                process_group: guard.agent_pgid(),
                 runner_bin_dir: Some(crate::util::shell::ensure_daemon_pidash_link(
                     &self.daemon_paths.data_dir,
                 )),
