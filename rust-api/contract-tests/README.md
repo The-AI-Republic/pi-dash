@@ -31,8 +31,9 @@ classic parser, and recorded fixtures pin the 3.12.10 behavior. In CI,
 the jobs that run the parser-sensitive `tasks_webhooks/test_link_crawl_*`
 tests pin `python-version: "3.12.10"` on `ubuntu-24.04`: `contract-tests`
 in `rust-api-contract-tests.yml` and `live` in `rust-api-contract.yml`.
-The other `rust-api-*` workflows use `"3.12.x"`. Match 3.12.10 locally (e.g. a 3.12.10 venv or
-container) before recording or re-recording fixtures.
+The other `rust-api-*` workflows use `"3.12.x"`. Match 3.12.10
+locally (e.g. a 3.12.10 venv or container) before recording or
+re-recording fixtures.
 
 ## Layout
 
