@@ -47,30 +47,29 @@ clone of removed pool "repo". Runs now execute here directly instead of in a
 leased worktree.
 runner "claude": shared removed pool "repo" with another runner, which keeps the
 canonical clone "/home/me/repo". This runner now has its own working_dir
-"…/workspaces/test_claude_1a2b3c4d" (created empty; the repo is cloned into it on
-first run). Its previous working_dir "/home/me/repo" is no longer used.
+"…/workspaces/test_claude_1a2b3c4d" (created empty; the agent clones the repo
+itself if the task needs it). Its previous working_dir "/home/me/repo" is no
+longer used.
 ```
 
 Nothing moves silently — every displaced runner is named in the log with both
 its old and new directory.
 
-### Why a displaced runner needs a clone, not just an empty folder
+### Why a displaced runner needs a repo, not just an empty folder
 
-A runner's working directory isn't a bare scratch folder — it has to contain a
-**checkout of the project repository**, because that's where the agent reads and
-edits code, commits, and pushes. Under the old pool, the sharing runners didn't
-each own a copy: they shared one canonical clone and got cheap git worktrees off
-it. Splitting them to one-dir-per-runner means each displaced runner needs its
-own copy of the repo.
+A runner's working directory isn't a bare scratch folder — for code tasks it has
+to contain a **checkout of the project repository**, because that's where the
+agent reads and edits code, commits, and pushes. Under the old pool, the
+sharing runners didn't each own a copy: they shared one canonical clone and got
+cheap git worktrees off it. Splitting them to one-dir-per-runner means each
+displaced runner needs its own copy of the repo.
 
-That copy is created **lazily, not at upgrade time**. The new directory starts
-empty; on the runner's first run the cloud hands it the repository URL, and
-`workspace::resolve` clones into the empty directory then (an empty dir + a repo
-URL → `git clone`). So the upgrade itself does no network I/O and can't be slow —
-you just pay a one-time clone the first time each displaced runner actually runs.
-If you'd rather not wait for that first-run clone, you can pre-populate the new
-directory with your own clone of the repo; the runner will detect the existing
-`.git` and use it as-is.
+The platform never clones on the user's behalf (PDASHOSS01-279). The new
+directory starts empty; the agent receives the repository facts (url, base
+branch, work branch) in its prompt and clones itself if the task needs the
+repo. If you'd rather not have the agent clone on its first run, pre-populate
+the new directory with your own clone of the repo; the runner will detect the
+existing `.git` and use it as-is.
 
 ## Case 3 — legacy runners with `working_dir` and no `[[workdir]]`
 
