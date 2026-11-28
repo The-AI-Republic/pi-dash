@@ -101,8 +101,8 @@ fn select_issue_columns(stmt: &mut SelectStatement) {
     }
 }
 
-/// The joined extras (`ISSUE_EXTRA_COLS`): the URL parts and the state
-/// group.
+/// The joined extras (`ISSUE_EXTRA_COLS`): the URL parts, the state
+/// group and the state name (`state_detail`, PDASHOSS01-404).
 fn select_extras(stmt: &mut SelectStatement) {
     stmt.expr_as(
         Expr::col((projects::Entity, projects::Column::Identifier)),
@@ -115,6 +115,10 @@ fn select_extras(stmt: &mut SelectStatement) {
     .expr_as(
         Expr::col((states::Entity, states::Column::Group)),
         a("state_group"),
+    )
+    .expr_as(
+        Expr::col((states::Entity, states::Column::Name)),
+        a("state_name"),
     );
 }
 
@@ -718,6 +722,7 @@ pub fn page_statement(
                 states::Entity.into_iden(),
                 states::Column::Group.into_iden(),
             ),
+            (states::Entity.into_iden(), states::Column::Name.into_iden()),
         ]);
     }
     stmt.order_by_expr(order.order_expr, order.direction)
@@ -972,6 +977,7 @@ struct IssueRow {
     project_identifier: String,
     workspace_slug: String,
     state_group: Option<String>,
+    state_name: Option<String>,
 }
 
 impl IssueRow {
@@ -1017,6 +1023,7 @@ impl IssueRow {
             project_identifier: self.project_identifier,
             workspace_slug: self.workspace_slug,
             state_group: self.state_group,
+            state_name: self.state_name,
         }
     }
 }
@@ -1088,7 +1095,7 @@ mod tests {
                 "{alias}: {text}"
             );
         }
-        assert!(text.contains(r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group" FROM "issues""#), "{text}");
+        assert!(text.contains(r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group", "states"."name" AS "state_name" FROM "issues""#), "{text}");
         assert!(text.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" LEFT JOIN "issues" AS "parent_issue" ON "issues"."parent_id" = "parent_issue"."id" WHERE"#), "{text}");
         assert!(text.contains(r#""issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND (NOT "issues"."archived_at" IS NOT NULL) AND (NOT "projects"."archived_at" IS NOT NULL) AND (NOT "issues"."is_draft")"#), "{text}");
         assert!(
@@ -1230,7 +1237,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#"LEFT JOIN "issue_labels" AS "order_issue_labels" ON "issues"."id" = "order_issue_labels"."issue_id" LEFT JOIN "labels" AS "order_labels" ON "order_issue_labels"."label_id" = "order_labels"."id""#), "{text}");
-        assert!(text.contains(r#"GROUP BY "issues"."id", "projects"."identifier", "workspaces"."slug", "states"."group" ORDER BY MAX("order_labels"."name") DESC LIMIT 10"#), "{text}");
+        assert!(text.contains(r#"GROUP BY "issues"."id", "projects"."identifier", "workspaces"."slug", "states"."group", "states"."name" ORDER BY MAX("order_labels"."name") DESC LIMIT 10"#), "{text}");
         let text = sql(&page_statement(
             SLUG,
             Uuid::nil(),

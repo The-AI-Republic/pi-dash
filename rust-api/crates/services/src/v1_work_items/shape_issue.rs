@@ -291,6 +291,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "description_markdown",
     "assigned_runner_detail",
     "dispatch_wait",
+    "state_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -358,6 +359,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "url",
     "assigned_runner_detail",
     "dispatch_wait",
+    "state_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -1348,6 +1350,29 @@ pub struct IssueRow<'a> {
     /// when no QUEUED pinned run exists — renders `null` (Django
     /// `get_dispatch_wait` returns `None` for list parents).
     pub dispatch_wait: Option<&'a Value>,
+    /// The issue's state name and group (`get_state_detail`,
+    /// PDASHOSS01-404), `None` when the issue has no state — renders
+    /// `null`. List and detail reads take it from the `states` join.
+    pub state_detail: Option<StateDetail<'a>>,
+}
+
+/// `state_detail` (`serializers/issue.py` `get_state_detail`,
+/// PDASHOSS01-404): `{"name", "group"}` of the issue's state, read
+/// through the FK descriptor (base manager, so no soft-delete filter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateDetail<'a> {
+    pub name: &'a str,
+    pub group: &'a str,
+}
+
+impl StateDetail<'_> {
+    /// The wire object, keys in Django dict order (`name`, `group`).
+    pub fn to_value(self) -> Value {
+        let mut out = Map::with_capacity(2);
+        out.insert("name".to_string(), Value::String(self.name.to_string()));
+        out.insert("group".to_string(), Value::String(self.group.to_string()));
+        Value::Object(out)
+    }
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1563,6 +1588,10 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
                 Some(value) => value.clone(),
                 None => Value::Null,
             },
+            "state_detail" => match row.state_detail {
+                Some(detail) => detail.to_value(),
+                None => Value::Null,
+            },
             // `filter_fields` only ever yields `FIELDS_IN_ORDER` names, and
             // every non-write-only one is matched above.
             _ => unreachable!("render_issue matched every kept readable field"),
@@ -1709,6 +1738,7 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const F18_01: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1829,7 +1859,7 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 40);
+        assert_eq!(FIELDS_IN_ORDER.len(), 41);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
@@ -1838,6 +1868,8 @@ mod tests {
         // (Django `serializers/issue.py:156,165` declared order).
         let pos = |name: &str| FIELDS_IN_ORDER.iter().position(|f| *f == name).unwrap();
         assert_eq!(pos("dispatch_wait"), pos("assigned_runner_detail") + 1);
+        // state_detail follows dispatch_wait (PDASHOSS01-404 declared order).
+        assert_eq!(pos("state_detail"), pos("dispatch_wait") + 1);
     }
 
     #[test]
@@ -1847,7 +1879,7 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 37);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 38);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
         assert!(READABLE_FIELDS_IN_ORDER.contains(&"dispatch_wait"));
         assert_eq!(
@@ -2756,6 +2788,10 @@ mod tests {
             assigned_runner: None,
             assigned_runner_detail: None,
             dispatch_wait: None,
+            state_detail: Some(StateDetail {
+                name: "Todo",
+                group: "unstarted",
+            }),
         }
     }
 
@@ -2825,7 +2861,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 41);
+        assert_eq!(keys.len(), 42);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
@@ -3229,6 +3265,52 @@ mod tests {
             expansions: no_expansions,
         });
         assert!(matches!(err, Err(RenderError::Fields(_))));
+    }
+
+    #[test]
+    fn render_state_detail_name_and_group() {
+        // PDASHOSS01-404: `{name, group}` next to the bare `state` UUID,
+        // on list rows too, and `fields=state_detail` keeps only that key.
+        let row = full_row();
+        let out = render_with(&row, None, &[], true, &[], &[], &[], None, None);
+        assert_eq!(
+            out["state_detail"],
+            json!({"name": "Todo", "group": "unstarted"})
+        );
+        assert_eq!(out["state"], json!("97b22834-b823-4109-a527-b39aa310ceae"));
+        let keys: Vec<&str> = out.keys().map(String::as_str).collect();
+        let at = keys.iter().position(|key| *key == "state_detail").unwrap();
+        assert_eq!(keys[at - 1], "dispatch_wait");
+        assert_eq!(keys[at + 1], "created_at");
+
+        let fields = includes(&["state_detail"]);
+        let out = render_with(&row, Some(&fields), &[], true, &[], &[], &[], None, None);
+        assert_eq!(
+            Value::Object(out),
+            json!({"state_detail": {"name": "Todo", "group": "unstarted"}})
+        );
+
+        let stateless = IssueRow {
+            state: None,
+            state_detail: None,
+            ..full_row()
+        };
+        let fields = includes(&["state", "state_detail"]);
+        let out = render_with(
+            &stateless,
+            Some(&fields),
+            &[],
+            true,
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(
+            Value::Object(out),
+            json!({"state": null, "state_detail": null})
+        );
     }
 
     #[test]

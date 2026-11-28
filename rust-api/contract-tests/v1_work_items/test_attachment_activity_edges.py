@@ -394,3 +394,50 @@ def test_attachment_post_external_duplicate_picks_newest(api, world, seeder, db)
         "error": "Issue with the same external id and external source already exists",
         "id": newer_id,
     }
+
+
+def test_expand_issue_carries_state_detail(api, world, seeder, db):
+    """PDASHOSS01-404: the nested work item on activity, comment and link
+    lists (``expand=issue``) carries ``state_detail``, read with the issue
+    row; ``null`` without a state."""
+    issue_id = world["issue"]["id"]
+    seeder.create_issue_activity(
+        world["workspace"]["id"], world["project"]["id"], issue_id, verb="updated"
+    )
+    comment = api.post(
+        sub_url(world, issue_id, "comments"),
+        json={"comment_html": "<p>hi</p>", "access": "EXTERNAL"},
+    )
+    assert comment.status_code == 201, comment.text
+    link = api.post(
+        sub_url(world, issue_id, "links"), json={"url": "https://example.com/sd"}
+    )
+    assert link.status_code == 201, link.text
+    lists = [
+        activities_url(world, issue_id),
+        sub_url(world, issue_id, "comments"),
+        sub_url(world, issue_id, "links"),
+    ]
+
+    for url in lists:
+        response = api.get(url, params={"expand": "issue"})
+        assert response.status_code == 200, (url, response.text)
+        rows = response.json()["results"]
+        assert rows, url
+        assert all(row["issue"]["state_detail"] is None for row in rows), url
+
+    state = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Shipped", group="completed"
+    )
+    db.execute("UPDATE issues SET state_id = %s WHERE id = %s", (state["id"], issue_id))
+    try:
+        for url in lists:
+            response = api.get(url, params={"expand": "issue"})
+            assert response.status_code == 200, (url, response.text)
+            for row in response.json()["results"]:
+                assert row["issue"]["state_detail"] == {
+                    "name": "Shipped",
+                    "group": "completed",
+                }, url
+    finally:
+        db.execute("UPDATE issues SET state_id = NULL WHERE id = %s", (issue_id,))
