@@ -126,13 +126,21 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   // document-level capture also covers an open popup that has lost focus to
   // the dialog itself, such as after a click on its non-focusable content.
   // An Escape that cancels an input method's composition is kept from the
-  // dialog too, but otherwise left to the input method: the popup stays open.
+  // dialog too, but otherwise left to the input method: the popup stays open,
+  // and so do the repeats of that press if the key stays down after the
+  // composition ends. `isComposing` covers the usual case; the deprecated
+  // `keyCode` 229 is the fallback for browsers (Safari, older Chromium) that
+  // send the composition-ending keydown with `isComposing` already false.
   React.useEffect(() => {
     if (!open) return;
     function onEscape(event: KeyboardEvent): void {
       if (event.key !== "Escape") return;
       event.stopPropagation();
-      if (event.isComposing || event.keyCode === 229) return;
+      if (event.isComposing || event.keyCode === 229) {
+        holdEscape();
+        return;
+      }
+      if (event.repeat && releaseEscapeRef.current !== null) return;
       event.preventDefault();
       setOpen(false);
       triggerRef.current?.focus();
@@ -248,12 +256,10 @@ function BulkInstallForm({
   workspaceSlug,
   scheduler,
   onClose,
-  startsAtRef,
 }: {
   workspaceSlug: string;
   scheduler: Scheduler;
   onClose: () => void;
-  startsAtRef: React.Ref<HTMLInputElement>;
 }): React.ReactElement {
   const queryClient = useQueryClient();
   const projects = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
@@ -261,6 +267,19 @@ function BulkInstallForm({
   const [detecting, setDetecting] = React.useState(true);
   const [submitting, setSubmitting] = React.useState(false);
   const schedule = useScheduleDraft(emptySchedule());
+
+  // The schedule's start field takes the dialog's open-time focus: it is
+  // the first control present the moment the dialog opens, while the
+  // projects picker waits on its read. The form focuses it on mount and the
+  // dialog takes no initial focus of its own (initialFocus={false}): the
+  // kit's deferred pass would pick the header's Close button, and even
+  // pointed at this field it can land after the reader has clicked into a
+  // control or opened the picker, eating their input or closing the picker
+  // on a busy host (NEWFRONT-1055, 1058).
+  const startsAtRef = React.useRef<HTMLInputElement | null>(null);
+  React.useEffect(() => {
+    startsAtRef.current?.focus();
+  }, []);
 
   const joined = React.useMemo(() => joinedProjects(projects.data ?? []), [projects.data]);
 
@@ -383,13 +402,6 @@ function BulkInstallForm({
 }
 
 export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkInstallDialogProps): React.ReactElement {
-  // The schedule's start field takes the dialog's open-time focus: it is
-  // the first control present the moment the dialog opens, while the
-  // projects picker waits on its read. Left to the kit's default, the
-  // deferred initial-focus pass picks the header's Close button and can
-  // land after the reader has clicked into a field, eating their input on a
-  // busy host (NEWFRONT-1055, 1058).
-  const startsAtRef = React.useRef<HTMLInputElement | null>(null);
   return (
     <Dialog
       open={scheduler !== null}
@@ -399,16 +411,10 @@ export function BulkInstallDialog({ workspaceSlug, scheduler, onClose }: BulkIns
       title={scheduler === null ? "Install scheduler" : `Install ${scheduler.name}`}
       description="One schedule applies to every selected project."
       className="max-w-2xl"
-      initialFocus={startsAtRef}
+      initialFocus={false}
     >
       {scheduler === null ? null : (
-        <BulkInstallForm
-          key={scheduler.id}
-          workspaceSlug={workspaceSlug}
-          scheduler={scheduler}
-          onClose={onClose}
-          startsAtRef={startsAtRef}
-        />
+        <BulkInstallForm key={scheduler.id} workspaceSlug={workspaceSlug} scheduler={scheduler} onClose={onClose} />
       )}
     </Dialog>
   );

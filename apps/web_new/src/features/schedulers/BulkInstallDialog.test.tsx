@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, type ProjectDetails, type Scheduler } from "@pidash/api-client";
 import * as React from "react";
@@ -253,6 +253,33 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     // Past the kit's deferred pass, the field still holds the caret.
     await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
     expect(field).toHaveFocus();
+  });
+
+  it("keeps the picker open when the dialog's open-time focus pass runs after the user opened it", async () => {
+    // A busy host can run the deferred focus pass late: holding the frame
+    // callbacks back lets the user open the picker first.
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    try {
+      contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+      renderDialog();
+      const trigger = await screen.findByRole("button", { name: /project/ }, { timeout: 10_000 });
+      fireEvent.click(trigger);
+      const search = await screen.findByLabelText("Search projects");
+      await waitFor(() => expect(search).toHaveFocus());
+
+      act(() => {
+        for (const callback of frames.splice(0)) callback(performance.now());
+      });
+
+      expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+      expect(search).toHaveFocus();
+    } finally {
+      raf.mockRestore();
+    }
   });
 
   it("selects every unlocked target, then clears them", async () => {
@@ -544,6 +571,28 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(event.defaultPrevented).toBe(false);
     expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
     expect(search).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps the repeats of an Escape held through a composition cancel from closing the picker", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    fireEvent.keyDown(search, { key: "Escape", isComposing: true });
+    // Composition has ended, but the key is still down.
+    fireEvent.keyDown(search, { key: "Escape", repeat: true });
+    fireEvent.keyDown(search, { key: "Escape", repeat: true });
+
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A fresh press after the release closes only the picker.
+    fireEvent.keyUp(search, { key: "Escape" });
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
   });
 
