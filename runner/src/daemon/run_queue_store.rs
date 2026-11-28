@@ -209,6 +209,24 @@ impl Store {
         Ok(n)
     }
 
+    /// [`Self::set_terminal_pending`] only for a row without a terminal
+    /// outbox record yet.
+    pub fn set_terminal_pending_if_absent(
+        &self,
+        run_id: Uuid,
+        payload: &[u8],
+        message_id: &str,
+    ) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE queue_entries SET phase = 'terminal_pending', pending_terminal_payload = ?1, pending_terminal_message_id = ?2 WHERE run_id = ?3 AND phase <> 'terminal_pending'",
+                rusqlite::params![payload, message_id, run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// All terminal-pending outbox records in FIFO order for startup retry.
     pub fn list_terminal_pending(&self) -> Result<Vec<QueueEntry>, String> {
         let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
@@ -286,6 +304,18 @@ impl Store {
         let n = conn
             .execute(
                 "DELETE FROM queue_entries WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// Delete `run_id`'s row unless it holds a terminal outbox record.
+    pub fn delete_unless_terminal(&self, run_id: Uuid) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM queue_entries WHERE run_id = ?1 AND phase <> 'terminal_pending'",
                 rusqlite::params![run_id.to_string()],
             )
             .map_err(|e| e.to_string())?;

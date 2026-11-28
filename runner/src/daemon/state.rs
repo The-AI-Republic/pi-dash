@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::approval::ApprovalRouter;
-use crate::cloud::protocol::RunnerStatus;
+use crate::cloud::protocol::{ClientMsg, RunnerStatus};
 use crate::config::schema::{AgentWatchdogConfig, Config};
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
@@ -79,6 +79,41 @@ pub struct StateHandle {
     reconnect: Arc<tokio::sync::Notify>,
     shutdown: Arc<tokio::sync::Notify>,
     shutdown_reason: Arc<std::sync::Mutex<Option<DaemonShutdownTrigger>>>,
+    /// Terminal reports of the runner's run held until run-end cleanup ends
+    /// (PDASHOSS01-417). Shared so the shutdown drain sends the run's real
+    /// result rather than a restart failure.
+    terminal_hold: Arc<std::sync::Mutex<TerminalHold>>,
+    /// Set while a finished run's cleanup is unresolved: its processes may
+    /// still use the working copy, so local chat must not claim it.
+    cleanup_reserved: Arc<AtomicBool>,
+    /// A released terminal report could not be sent: the run's terminal
+    /// outbox record must outlive its slot release.
+    terminal_undelivered: Arc<AtomicBool>,
+    /// A finished run whose terminal report could not be sent: it stays
+    /// reported in flight (so the cloud's heartbeat reaper never fails it)
+    /// until the outbox retry delivers the report.
+    report_pending: Arc<std::sync::Mutex<Option<Uuid>>>,
+}
+
+/// See [`StateHandle::hold_terminal`].
+#[derive(Debug, Default)]
+enum TerminalHold {
+    #[default]
+    Off,
+    Holding {
+        msgs: Vec<ClientMsg>,
+        clear_current_run: bool,
+    },
+    /// The worker is sending the held reports. They stay here until the
+    /// in-flight run is cleared, so a shutdown drain that lands mid-send
+    /// still finds the run's real result (and takes over the send).
+    Releasing {
+        msgs: Vec<ClientMsg>,
+        clear_current_run: bool,
+    },
+    /// The shutdown drain reported the run; later reports are dropped so
+    /// the cloud gets one terminal report per run.
+    Drained,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,7 +278,208 @@ impl StateHandle {
             reconnect: Arc::new(tokio::sync::Notify::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_reason: Arc::new(std::sync::Mutex::new(None)),
+            terminal_hold: Arc::new(std::sync::Mutex::new(TerminalHold::Off)),
+            cleanup_reserved: Arc::new(AtomicBool::new(false)),
+            terminal_undelivered: Arc::new(AtomicBool::new(false)),
+            report_pending: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    fn lock_terminal_hold(&self) -> std::sync::MutexGuard<'_, TerminalHold> {
+        self.terminal_hold.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Start holding the run's terminal reports (and the clearing of the
+    /// in-flight run) until [`Self::begin_release`]. Once the shutdown
+    /// drain has reported the run, nothing more is held or sent.
+    pub fn hold_terminal(&self) {
+        self.terminal_undelivered.store(false, Ordering::SeqCst);
+        let mut hold = self.lock_terminal_hold();
+        if !matches!(*hold, TerminalHold::Drained) {
+            *hold = TerminalHold::Holding {
+                msgs: Vec::new(),
+                clear_current_run: false,
+            };
+        }
+    }
+
+    /// Route a terminal report: `Some` to send it now, `None` when it was
+    /// held, or dropped because the shutdown drain already reported the run.
+    pub fn hold_terminal_msg(&self, msg: ClientMsg) -> Option<ClientMsg> {
+        match &mut *self.lock_terminal_hold() {
+            TerminalHold::Off | TerminalHold::Releasing { .. } => Some(msg),
+            TerminalHold::Holding { msgs, .. } => {
+                msgs.push(msg);
+                None
+            }
+            TerminalHold::Drained => {
+                tracing::info!(
+                    "run already reported by the shutdown drain; terminal report dropped"
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether terminal reports are being held right now (not yet released,
+    /// and not taken by the shutdown drain) and exactly one is held: the
+    /// first, which is the result delivery sends first and so the one the
+    /// terminal outbox keeps (first write wins).
+    pub fn holding_first_terminal(&self) -> bool {
+        matches!(&*self.lock_terminal_hold(), TerminalHold::Holding { msgs, .. } if msgs.len() == 1)
+    }
+
+    /// Defer clearing the in-flight run while reports are held, so the
+    /// shutdown drain still sees the run. `false`: clear it now.
+    pub fn defer_clear_current_run(&self) -> bool {
+        match &mut *self.lock_terminal_hold() {
+            TerminalHold::Holding {
+                clear_current_run, ..
+            } => {
+                *clear_current_run = true;
+                true
+            }
+            TerminalHold::Off | TerminalHold::Releasing { .. } | TerminalHold::Drained => false,
+        }
+    }
+
+    /// Stop holding and start sending: the held reports to send, in order.
+    /// They stay visible to the shutdown drain until
+    /// [`Self::finish_release`]; check [`Self::releasing`] before each
+    /// send, since once the drain took them it owns the send.
+    pub fn begin_release(&self) -> Vec<ClientMsg> {
+        let mut hold = self.lock_terminal_hold();
+        match std::mem::take(&mut *hold) {
+            TerminalHold::Holding {
+                msgs,
+                clear_current_run,
+            } => {
+                let out = msgs.clone();
+                *hold = TerminalHold::Releasing {
+                    msgs,
+                    clear_current_run,
+                };
+                out
+            }
+            TerminalHold::Off => Vec::new(),
+            other => {
+                *hold = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Whether the worker still owns sending the released reports (the
+    /// shutdown drain has not taken them).
+    pub fn releasing(&self) -> bool {
+        matches!(*self.lock_terminal_hold(), TerminalHold::Releasing { .. })
+    }
+
+    /// Whether the in-flight run must be cleared once the released reports
+    /// are sent: its clearing was deferred, or the drain reported it.
+    pub fn release_clears_current_run(&self) -> bool {
+        match &*self.lock_terminal_hold() {
+            TerminalHold::Releasing {
+                clear_current_run, ..
+            } => *clear_current_run,
+            TerminalHold::Drained => true,
+            TerminalHold::Off | TerminalHold::Holding { .. } => false,
+        }
+    }
+
+    /// End the release: call after the in-flight run was cleared (when
+    /// [`Self::release_clears_current_run`] asked for it), so the drain
+    /// never sees an in-flight run with its result already gone.
+    pub fn finish_release(&self) {
+        let mut hold = self.lock_terminal_hold();
+        if matches!(*hold, TerminalHold::Releasing { .. }) {
+            *hold = TerminalHold::Off;
+        }
+    }
+
+    /// Whether the shutdown drain has taken this runner's terminal reports
+    /// (and with them the run's terminal outbox record).
+    pub fn terminal_drained(&self) -> bool {
+        matches!(*self.lock_terminal_hold(), TerminalHold::Drained)
+    }
+
+    /// For the shutdown drain: take the reports held so far (empty while the
+    /// run is still executing), including ones the worker is sending right
+    /// now, and drop any later ones. From here the drain owns the send.
+    pub fn take_terminal_for_drain(&self) -> Vec<ClientMsg> {
+        self.take_terminal_for_drain_then(|msgs| msgs)
+    }
+
+    /// [`Self::take_terminal_for_drain`], running `then` on the taken
+    /// reports while the hold is still locked. The worker cannot see the
+    /// hold as drained (and release the run's queue slot on that basis)
+    /// until `then` returns, so the drain can durably record the result
+    /// before the slot it belongs to can go.
+    pub fn take_terminal_for_drain_then<R>(&self, then: impl FnOnce(Vec<ClientMsg>) -> R) -> R {
+        let mut hold = self.lock_terminal_hold();
+        let msgs = match std::mem::replace(&mut *hold, TerminalHold::Drained) {
+            TerminalHold::Holding { msgs, .. } | TerminalHold::Releasing { msgs, .. } => msgs,
+            TerminalHold::Off | TerminalHold::Drained => Vec::new(),
+        };
+        then(msgs)
+    }
+
+    /// Record that the worker failed to send a released terminal report.
+    pub fn note_terminal_undelivered(&self) {
+        self.terminal_undelivered.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the last released terminal report went unsent (and reset the
+    /// mark): its outbox record must then be kept for the retry.
+    pub fn take_terminal_undelivered(&self) -> bool {
+        self.terminal_undelivered.swap(false, Ordering::SeqCst)
+    }
+
+    /// Keep `run_id` reported in flight until its report is delivered
+    /// (see [`Self::clear_report_pending`]).
+    pub fn set_report_pending(&self, run_id: Uuid) {
+        *self
+            .report_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(run_id);
+    }
+
+    /// The finished run kept in flight until its report is delivered.
+    pub fn report_pending(&self) -> Option<Uuid> {
+        *self
+            .report_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `run_id`'s report reached the cloud (or was rejected for good): stop
+    /// reporting it in flight, unless a later run has replaced it.
+    pub async fn clear_report_pending(&self, run_id: Uuid) {
+        let cleared = {
+            let mut pending = self
+                .report_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (*pending == Some(run_id)).then(|| pending.take()).is_some()
+        };
+        if cleared && *self.rx_in_flight.borrow() == Some(run_id) {
+            self.set_current_run(None).await;
+        }
+    }
+
+    /// Mark whether a finished run's cleanup is unresolved.
+    /// While set, the runner reports `Busy` (with no in-flight run): it
+    /// refuses every assignment, so it must not advertise itself as idle.
+    pub async fn set_cleanup_reserved(&self, reserved: bool) {
+        self.cleanup_reserved.store(reserved, Ordering::SeqCst);
+        self.recompute_status().await;
+        self.tick();
+    }
+
+    /// Whether a finished run's cleanup is unresolved, so its processes
+    /// may still use the working copy.
+    pub fn cleanup_reserved(&self) -> bool {
+        self.cleanup_reserved.load(Ordering::SeqCst)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -420,7 +656,8 @@ impl StateHandle {
 
     /// Recompute and publish the derived reported status from the two lanes.
     /// `AwaitingReauth` / `Reconnecting` (run-lane overrides) win; otherwise
-    /// `Busy` if the run lane is `Busy` or the chat lane is active; else `Idle`.
+    /// `Busy` if the run lane is `Busy`, the chat lane is active, or a
+    /// finished run's cleanup is unresolved; else `Idle`.
     async fn recompute_status(&self) {
         let run_status = *self.inner.run_status.lock().await;
         let chat_active = *self.inner.chat_active.lock().await;
@@ -428,7 +665,7 @@ impl StateHandle {
             RunnerStatus::AwaitingReauth | RunnerStatus::Reconnecting => run_status,
             RunnerStatus::Busy => RunnerStatus::Busy,
             RunnerStatus::Idle => {
-                if chat_active {
+                if chat_active || self.cleanup_reserved() {
                     RunnerStatus::Busy
                 } else {
                     RunnerStatus::Idle
@@ -740,6 +977,28 @@ mod tests {
             started_at: Utc::now(),
             events: 0,
         }
+    }
+
+    /// Review of #3501 at 5542f04 (MUST 4): a runner held by unresolved
+    /// run-end cleanup refuses every assignment, so it must not report
+    /// `Idle` once the finished run is cleared; it reports `Busy` (with no
+    /// in-flight run) until the reservation clears.
+    #[tokio::test]
+    async fn a_cleanup_reserved_runner_reports_busy_without_a_run() {
+        let state = empty_state();
+        let run_id = Uuid::new_v4();
+        state
+            .set_current_run(Some(summary(run_id, "running")))
+            .await;
+        state.set_cleanup_reserved(true).await;
+        state.set_current_run(None).await;
+        assert!(state.rx_in_flight.borrow().is_none());
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "a cleanup-reserved runner reported Idle"
+        );
+        state.set_cleanup_reserved(false).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
     }
 
     #[tokio::test]
