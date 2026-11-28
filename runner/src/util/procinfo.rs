@@ -1,11 +1,20 @@
 //! Read-only process inspection for ownership-proven group signalling
 //! (PDASHOSS01-417, part 1; adapted from PR #2952's `procinfo`).
 //!
-//! [`crate::util::containment`]'s process-group backend uses this to prove
-//! that a recorded process group is still the one the run created before
-//! it signals it. A process is identified by its pid together with its
-//! **exact** kernel start time ([`ProcInfo::start`]): a reused pid has a
-//! different start time, so it can never be mistaken for the original.
+//! [`crate::util::containment`]'s process-group backend uses this to tell
+//! whether a recorded process group is still the one the run created. A
+//! process is fingerprinted by its pid together with its **exact** kernel
+//! start time ([`ProcInfo::start`]): a pid reused by normal wraparound has
+//! a different start time.
+//!
+//! The fingerprint is not proof that signalling is safe (review of #3496).
+//! Linux exposes the start in clock ticks, and a pid reused within the
+//! same tick — possible with privileged checkpoint/restore (`clone3`
+//! `set_tid`) — reads the same. The kernel-backed identity is the run's
+//! anchor (part 1b, `group_ownership`): an unreaped child of the daemon
+//! that leads the run's group, so neither its pid nor the group id can be
+//! handed to another process while it lives. A group is signalled only
+//! while that anchor holds it; the fingerprint only adds a cross-check.
 //!
 //! * Linux: `/proc/<pid>/stat` (state, pgid, `starttime` in clock ticks
 //!   since boot, compared raw — never converted, so never rounded).
@@ -33,10 +42,11 @@ pub struct ProcInfo {
     /// macOS: microseconds since the epoch). Opaque: only ever compared for
     /// exact equality with another value read on the same host.
     pub start: u64,
-    /// Exited but not reaped yet, or (macOS) already exiting. Still holds
-    /// its pid and group membership, but can never run again. On Linux a
-    /// process whose leader thread exited is a zombie only once none of
-    /// its threads can run.
+    /// Exited but not reaped yet (Linux `Z`/`X`, macOS `SZOMB`). Still holds
+    /// its pid and group membership, but can never run again. A process
+    /// that is still exiting is not a zombie: one of its threads may run.
+    /// On Linux a process whose leader thread exited is a zombie only once
+    /// none of its threads can run.
     pub zombie: bool,
     /// Short command name, for logs only.
     pub name: String,
@@ -142,15 +152,16 @@ fn fetch_retrying<T>(
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MACOS_SZOMB: u32 = 5;
 /// `P_WEXIT` from macOS `<sys/proc.h>`: the process is working on exiting.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 const MACOS_P_WEXIT: i32 = 0x0000_2000;
 
-/// Whether a macOS `kinfo_proc` entry can never run again: a zombie, or a
-/// process still exiting (right after SIGKILL macOS reports `SRUN` with
-/// `P_WEXIT` before `SZOMB`).
+/// Whether a macOS `kinfo_proc` entry can never run again: `SZOMB` only.
+/// `P_WEXIT` does not count (review of #3496): XNU sets it before it
+/// terminates the task's threads, so another thread of an exiting
+/// process may still run. `p_flag` is ignored on purpose.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_exited_or_exiting(p_stat: u32, p_flag: i32) -> bool {
-    p_stat == MACOS_SZOMB || p_flag & MACOS_P_WEXIT != 0
+fn macos_exited_or_exiting(p_stat: u32, _p_flag: i32) -> bool {
+    p_stat == MACOS_SZOMB
 }
 
 /// Whether a failed read of `/proc/<pid>/stat` means the process is gone
@@ -980,10 +991,14 @@ mod tests {
     }
 
     #[test]
-    fn an_exiting_macos_entry_counts_as_unable_to_run() {
+    fn only_a_macos_szomb_entry_is_a_zombie() {
+        // Review item 2 on #3496: XNU exports P_WEXIT (from P_LEXIT) before
+        // it terminates the task's threads, so an exiting multithreaded
+        // process may still run. Only SZOMB means it never runs again.
         const SRUN: u32 = 2;
-        assert!(macos_exited_or_exiting(SRUN, MACOS_P_WEXIT));
+        assert!(!macos_exited_or_exiting(SRUN, MACOS_P_WEXIT));
         assert!(macos_exited_or_exiting(MACOS_SZOMB, 0));
+        assert!(macos_exited_or_exiting(MACOS_SZOMB, MACOS_P_WEXIT));
         assert!(!macos_exited_or_exiting(SRUN, 0));
         assert!(!macos_exited_or_exiting(SRUN, 0x0000_0004));
     }
