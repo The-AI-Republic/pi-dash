@@ -1306,6 +1306,15 @@ fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
             inst.name
         );
     }
+    // A chat runtime whose agents are still stopping (a cloud runtime's
+    // first cleanup pass, or a local session being ended or left
+    // unresolved) still uses the working copy.
+    if inst.state.chat_teardown_pending() || inst.chat_sessions.cleanup_pending() {
+        anyhow::bail!(
+            "runner {:?} is still stopping a chat session's processes; try again when it is idle",
+            inst.name
+        );
+    }
     Ok(())
 }
 
@@ -9735,6 +9744,37 @@ mod tests {
             "a runner still cleaning up was treated as idle"
         );
         inst.state.set_cleanup_reserved(false).await;
+        assert!(ensure_idle(&inst).is_ok());
+    }
+
+    /// Review item 3 on #3502 at bf9a2ba: a chat runtime whose agents are
+    /// still stopping (a cloud runtime's first cleanup pass, or a local
+    /// session being ended) still uses the working copy, so a credential or
+    /// config change must not hot-restart the runner.
+    #[tokio::test]
+    async fn a_runner_with_chat_cleanup_pending_is_not_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let teardown = inst.state.begin_chat_teardown();
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a cloud chat runtime still stopping was treated as idle"
+        );
+        drop(teardown);
+        assert!(ensure_idle(&inst).is_ok());
+
+        let ending = inst.chat_sessions.begin_ending_for_test();
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a local chat session still being ended was treated as idle"
+        );
+        drop(ending);
         assert!(ensure_idle(&inst).is_ok());
     }
 

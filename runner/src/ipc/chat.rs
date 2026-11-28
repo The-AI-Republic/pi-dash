@@ -242,6 +242,27 @@ impl ChatRegistry {
         self.settle_ended().await && free
     }
 
+    /// Whether an ended or ending runtime's processes may still be using
+    /// the working copy, without waiting: a unit left unresolved, a runtime
+    /// still being ended, or a `lingering` list another task holds right now
+    /// (read as pending). Used where the caller cannot wait, such as the
+    /// idle check before a runner is replaced.
+    pub(crate) fn cleanup_pending(&self) -> bool {
+        if self.ending.load(Ordering::SeqCst) > 0 {
+            return true;
+        }
+        self.lingering
+            .try_lock()
+            .map_or(true, |lingering| !lingering.is_empty())
+    }
+
+    /// Count one runtime as being ended, as an eviction does, until the
+    /// guard drops.
+    #[cfg(test)]
+    pub(crate) fn begin_ending_for_test(&self) -> impl Drop {
+        Ending::new(&self.ending)
+    }
+
     /// Re-check the units of runtimes that ended unresolved. `true` only
     /// when none is left and no runtime is still being ended: nothing an
     /// ended runtime started may still be using the working copy.
