@@ -1263,6 +1263,10 @@ impl RunnerSpawnCtx {
         self.recovery
             .reserve_if_held(inst.runner_id, &inst.state)
             .await;
+        // A replaced runner's undelivered result stays reported in flight.
+        if let Some(coord) = self.run_coordinator.as_ref() {
+            restore_pending_report_for(coord, inst.runner_id, &inst.state).await;
+        }
         {
             let mut mailboxes = self.mailboxes.write().await;
             mailboxes.insert(inst.runner_id, inst.mailbox_tx.clone());
@@ -1301,7 +1305,13 @@ fn same_block(running: &RunnerConfig, on_disk: &RunnerConfig) -> bool {
 /// chat turn holding its working copy, or a finished run whose cleanup is
 /// unresolved.
 fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
-    if let Some(run_id) = *inst.state.rx_in_flight.borrow() {
+    // A finished run kept in flight only until its undelivered result is
+    // sent does not block a restart (review of #3502 at 7ba3185): its
+    // result is in the outbox, and the replacement reports it in flight
+    // again ([`restore_pending_report_for`]) and retries it with the new
+    // credentials. Refusing would keep a re-login from ever taking effect.
+    let in_flight = *inst.state.rx_in_flight.borrow();
+    if let Some(run_id) = in_flight.filter(|id| inst.state.report_pending() != Some(*id)) {
         anyhow::bail!(
             "runner {:?} is mid-run (run {run_id}); try again when it is idle",
             inst.name
@@ -2289,14 +2299,25 @@ async fn restore_pending_reports(
     runners: &Arc<RwLock<HelloRunnerMap>>,
 ) {
     let guard = runners.read().await;
+    for (runner_id, (_, state, _)) in guard.iter() {
+        restore_pending_report_for(coord, *runner_id, state).await;
+    }
+}
+
+/// [`restore_pending_reports`] for one runner's state: also used when a
+/// runner is replaced (credential rotation, reconfigure) while a finished
+/// run's result is still undelivered.
+async fn restore_pending_report_for(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runner_id: uuid::Uuid,
+    state: &StateHandle,
+) {
     for entry in coord.terminal_pending() {
-        if entry.pending_terminal_payload.is_none() || coord.holds_run(entry.run_id) {
-            continue;
-        }
-        let Some((_, state, _)) = guard.get(&entry.runner_id) else {
-            continue;
-        };
-        if state.rx_in_flight.borrow().is_some() {
+        if entry.runner_id != runner_id
+            || entry.pending_terminal_payload.is_none()
+            || coord.holds_run(entry.run_id)
+            || state.rx_in_flight.borrow().is_some()
+        {
             continue;
         }
         state
@@ -2334,6 +2355,13 @@ async fn replay_terminal_outbox_once(
             continue;
         };
         let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+            // In-process, a runner can be missing only for a moment while
+            // it is replaced (credential rotation, reconfigure); its record
+            // stays for the replacement. Startup drops records of runners
+            // that are gone.
+            if skip_held {
+                continue;
+            }
             tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: runner no longer configured");
             let _ = coord.complete_terminal(entry.run_id);
             continue;
@@ -9665,6 +9693,76 @@ mod tests {
         drop(coord);
         let after = reopen_queue(queue_dir);
         assert!(after.terminal_pending().is_empty());
+    }
+
+    /// Review of #3502 at 7ba3185 (MUST 1): a runner whose only "work" is
+    /// a finished run's undelivered result must still be replaceable, so a
+    /// re-login can rotate its credentials; the replacement picks the
+    /// pending result back up from the outbox. A real run still blocks.
+    #[tokio::test]
+    async fn a_runner_only_reporting_a_result_can_be_restarted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let cfg = runner_config("reporting", "WEB", tmp.path().join("wd"));
+        let runner_id = cfg.runner_id;
+        let inst = RunnerInstance::new(cfg.clone(), &paths, out_tx.clone());
+        let run_id = uuid::Uuid::new_v4();
+        let summary = CurrentRunSummary {
+            run_id,
+            thread_id: None,
+            status: "reporting".to_string(),
+            started_at: Utc::now(),
+            events: 0,
+        };
+        inst.state.set_current_run(Some(summary.clone())).await;
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a live run was treated as idle"
+        );
+        inst.state.set_report_pending(run_id);
+        assert!(
+            ensure_idle(&inst).is_ok(),
+            "a runner only waiting to report a result blocks credential rotation"
+        );
+
+        // The replacement reports the same run in flight until delivery.
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        assert!(coord.persist_terminal(run_id, b"{}", "held").unwrap());
+        coord.release_slot(run_id).unwrap();
+        assert!(!coord.holds_run(run_id));
+        let fresh = RunnerInstance::new(cfg, &paths, out_tx);
+        restore_pending_report_for(&coord, runner_id, &fresh.state).await;
+        assert_eq!(*fresh.state.rx_in_flight.borrow(), Some(run_id));
+        assert_eq!(fresh.state.report_pending(), Some(run_id));
+        // While the runner is between stop and start it is absent from the
+        // registry; the in-process retry must not drop its record then.
+        let empty: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(HashMap::new()));
+        assert_eq!(replay_terminal_outbox_once(&coord, &empty, true).await, 0);
+        assert_eq!(
+            coord.terminal_pending().len(),
+            1,
+            "a restarting runner's undelivered result was dropped"
+        );
     }
 
     /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup
