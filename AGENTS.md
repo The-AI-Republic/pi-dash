@@ -4,11 +4,15 @@
 
 This repo is a polyglot monorepo — one pnpm workspace, plus standalone Rust crates and a Django backend:
 
-- **TypeScript (pnpm + Turbo):** `apps/*` (including `apps/web_new/` — the new frontend — and legacy `apps/web/`) and `packages/*` (including `packages/api-client/`). Managed by `pnpm-workspace.yaml`.
-- **Django backend:** `apps/api/` (Python, port 8000) — excluded from the pnpm workspace.
+- **TypeScript (pnpm + Turbo):** `apps/*` (including `apps/web_new/` — the frontend — and the **deprecated** legacy `apps/web/`) and `packages/*` (including `packages/api-client/`). Managed by `pnpm-workspace.yaml`.
+- **Django backend (deprecated):** `apps/api/` (Python, port 8000) — excluded from the pnpm workspace. Replaced by `rust-api/`; still owns schema migrations.
 - **Rust backend:** `rust-api/` — workspace of crates under `rust-api/crates/` (`compat → types → {auth, db} → storage → services → jobs → {api, ops} → sdk`), plus the server binary in `rust-api/bin/pidash-api/`, contract tests in `rust-api/contract-tests/`, and fixtures in `rust-api/fixtures/`.
 - **Daemon:** `runner/` — its own Cargo crate (package `pidash`, binary `pidash`). It connects developer machines to the cloud and drives issue work. Shared desktop/daemon wire types live in `pidash-ipc/`.
 - **Desktop app:** `desktop/` (Tauri host in `desktop/src-tauri/`), pairing with `apps/web_new/` in desktop mode.
+
+## Deprecated code
+
+`apps/api/` and `apps/web/` are deprecated (replaced in production by `rust-api/` and `apps/web_new/` on 2026-11-12). Don't add features or refactors there. Only security fixes, deployment unblockers and Django schema migrations are allowed. See each directory's `DEPRECATED.md`.
 
 ## Agent vocabulary
 

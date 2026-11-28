@@ -28,3 +28,11 @@
 # ---------------------------------------------------------------------------
 /LICENSE.txt                       @irichard00
 /README.md                         @irichard00
+
+# ---------------------------------------------------------------------------
+# Deprecated legacy stack (replaced by rust-api/ and apps/web_new/). Changes
+# need owner sign-off: security fixes, deploy unblockers and schema
+# migrations only. See apps/api/DEPRECATED.md and apps/web/DEPRECATED.md.
+# ---------------------------------------------------------------------------
+/apps/api/                         @irichard00
+/apps/web/                         @irichard00
