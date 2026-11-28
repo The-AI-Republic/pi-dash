@@ -140,23 +140,27 @@ function updateEnvFile() {
         else
             # Rewrite the line in bash, not with a sed replacement, where
             # "&", "\\" and the delimiter are special: the value is kept
-            # byte for byte. Writing back through the same file keeps its
-            # owner and mode.
-            # The original is only replaced, by a rename, once a complete
-            # copy is written beside it with the same mode.
+            # byte for byte. The original is only replaced, by a rename,
+            # once a complete copy is written beside it with the same mode.
             local tmp line
             if ! tmp=$(mktemp "$(dirname "$file")/.pi_dash.env.XXXXXX") || [ -z "$tmp" ]; then
                 echo "Could not update $key in $file: no temporary file" >&2
                 return 1
             fi
-            cp -p "$file" "$tmp" 2>/dev/null
-            if ! { while IFS= read -r line || [ -n "$line" ]; do
+            if ! cp -p "$file" "$tmp" 2>/dev/null; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file: copying its mode failed" >&2
+                return 1
+            fi
+            # Stop at the first failed write (exit leaves only the subshell):
+            # the loop's own status is only its last command's.
+            if ! (while IFS= read -r line || [ -n "$line" ]; do
                 if [[ $line == "$key="* ]]; then
-                    printf '%s=%s\n' "$key" "$value"
+                    printf '%s=%s\n' "$key" "$value" || exit 1
                 else
-                    printf '%s\n' "$line"
+                    printf '%s\n' "$line" || exit 1
                 fi
-            done < "$file" > "$tmp"; } 2>/dev/null; then
+            done < "$file") > "$tmp" 2>/dev/null; then
                 rm -f "$tmp"
                 echo "Could not update $key in $file: writing a temporary copy failed" >&2
                 return 1
@@ -428,8 +432,9 @@ def say(status, service, detail=""):
     print(f"credential-check\t{status}\t{service}\t{detail}", flush=True)
 
 
-class Deadline(Exception):
-    """Raised by the alarm when one attempt hangs past every client timeout."""
+class Deadline(BaseException):
+    """Raised by the alarm when one attempt hangs past every client timeout.
+    A BaseException, so an attempt's `except Exception` cannot swallow it."""
 
 
 def give_up(signum, frame):

@@ -374,6 +374,25 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(results["PostgreSQL"][0], "SKIP", out)
         self.assertIn("no host", results["PostgreSQL"][1])
 
+    def test_the_hard_deadline_is_not_swallowed_by_a_broad_except(self):
+        # The RabbitMQ attempt catches Exception to classify errors; the
+        # deadline must still end the check.
+        script = (
+            "import time\n"
+            f"exec(compile({self.source!r}, 'probe', 'exec'))\n"
+            "SECONDS, TIMEOUT, INTERVAL = 1, 0, 0.1\n"
+            "def attempt():\n"
+            "    try:\n"
+            "        time.sleep(30)\n"
+            "    except Exception:\n"
+            "        return ('RETRY', 'swallowed')\n"
+            "retry('RabbitMQ', attempt)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=20
+        )
+        self.assertIn("credential-check\tNOTREADY\tRabbitMQ\tno answer within 1s", result.stdout, result.stdout + result.stderr)
+
     def test_postgres_external_host_is_skipped(self):
         results, out = self.run_probe({"DATABASE_URL": "postgresql://app:secret@external-db/app"}, services="db")
         self.assertEqual(results["PostgreSQL"][0], "SKIP", out)

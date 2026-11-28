@@ -283,6 +283,33 @@ updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
     assert.deepEqual(leftovers, [], "temporary copy left behind");
   });
 
+  it("does not replace the env file when an early line fails to write", () => {
+    // Only the first write fails; the loop's final status alone would hide it.
+    const env = "A=1\nDATABASE_URL=old\nB=2\n";
+    const { file, out, leftovers } = runEnv(
+      `writes=0
+printf() { writes=$((writes + 1)); [ "$writes" -eq 1 ] && return 1; builtin printf "$@"; }
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; status=$?
+unset -f printf; echo "status=$status"`,
+      { env }
+    );
+    assert.equal(file, env, out);
+    assert.match(out, /status=[1-9]/);
+    assert.deepEqual(leftovers, []);
+  });
+
+  it("does not replace the env file when its mode cannot be copied", () => {
+    const env = "A=1\nDATABASE_URL=old\n";
+    const { file, out, leftovers } = runEnv(
+      `cp() { return 1; }
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
+      { env }
+    );
+    assert.equal(file, env, out);
+    assert.match(out, /status=[1-9]/);
+    assert.deepEqual(leftovers, []);
+  });
+
   it("keeps the env file's mode across a rewrite and leaves no temporary file", () => {
     const { file, mode, out, leftovers } = runEnv(
       `chmod 640 "$DOCKER_ENV_PATH"
