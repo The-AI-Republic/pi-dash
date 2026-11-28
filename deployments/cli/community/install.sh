@@ -380,22 +380,103 @@ function download() {
 DEFAULT_DATABASE_URL="postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash"
 DEFAULT_AMQP_URL="amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash"
 
+# Percent-decoding as Python's urllib.parse.unquote does it, which is what
+# Kombu and dj-database-url use: a literal "+" and backslashes stay as they are.
 function urlDecode() {
-    local value="${1//+/ }"
-    printf '%b' "${value//%/\\x}"
+    local s=$1 out="" hex
+    while [[ $s == *%* ]]; do
+        out+=${s%%[%]*}
+        s=${s#*[%]}
+        hex=${s:0:2}
+        if [[ $hex =~ ^[0-9A-Fa-f]{2}$ ]]; then
+            printf -v hex '%b' "\\x$hex"
+            out+=$hex
+            s=${s:2}
+        else
+            out+=%
+        fi
+    done
+    printf '%s' "$out$s"
 }
 
-# Prints "user<TAB>password<TAB>host<TAB>path" for scheme://user:pass@host[:port]/path
+# Decodes the body of a JSON string (Compose writes & < > as \u00XX).
+function jsonUnescape() {
+    local s=$1 out="" c code
+    while [[ $s == *\\* ]]; do
+        out+=${s%%\\*}
+        s=${s#*\\}
+        c=${s:0:1}
+        s=${s:1}
+        case $c in
+            n) out+=$'\n' ;;
+            t) out+=$'\t' ;;
+            r) out+=$'\r' ;;
+            b) out+=$'\b' ;;
+            f) out+=$'\f' ;;
+            u)
+                code=${s:0:4}
+                s=${s:4}
+                if [[ $code =~ ^00[0-7][0-9A-Fa-f]$ ]]; then
+                    printf -v c '%b' "\\x${code:2:2}"
+                else
+                    printf -v c '%b' "\\u$code"
+                fi
+                out+=$c
+                ;;
+            *) out+=$c ;;
+        esac
+    done
+    printf '%s' "$out$s"
+}
+
+# Prints the value of environment variable $2 for service $1 as Compose
+# resolves it (exported variables, then the env file, then the compose
+# defaults), which is what the app receives. Fails when Compose cannot print
+# its configuration as JSON or the service does not set the variable.
+function composeServiceEnv() {
+    local service=$1 key=$2 line
+    local json
+    json=$($COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH config --format json "$service" 2>/dev/null) || return 1
+    while IFS= read -r line; do
+        if [[ $line =~ ^[[:space:]]*\"$key\":[[:space:]]*\"(.*)\",?[[:space:]]*$ ]]; then
+            jsonUnescape "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done <<< "$json"
+    return 1
+}
+
+# The URL the app connects with: Compose's resolved value, or, with a Compose
+# that cannot print JSON, the env file's value and the compose default.
+function appServiceUrl() {
+    local key=$1 default=$2 value
+    if value=$(composeServiceEnv api "$key"); then
+        printf '%s' "$value"
+        return
+    fi
+    value=$(getEnvValue "$key" "$DOCKER_ENV_PATH")
+    printf '%s' "${value:-$default}"
+}
+
+# Splits scheme://user:pass@host:port/path?query the way Python's urlsplit
+# does and prints user, password, host, port and the decoded path, separated
+# by the unit separator (\x1f) so empty fields survive `read`.
 function splitServiceUrl() {
     local rest=${1#*://}
-    local auth=${rest%@*}
-    local hostpath=${rest##*@}
-    local host=${hostpath%%/*}
-    host=${host%%:*}
-    local path=""
-    if [[ $hostpath == */* ]]; then path=${hostpath#*/}; fi
-    path=${path%%\?*}
-    printf '%s\t%s\t%s\t%s\n' "$(urlDecode "${auth%%:*}")" "$(urlDecode "${auth#*:}")" "$host" "$(urlDecode "$path")"
+    local netloc=${rest%%[/?#]*}
+    local path=${rest:${#netloc}}
+    path=${path#/}
+    path=${path%%[?#]*}
+    local auth="" hostport=$netloc
+    if [[ $netloc == *@* ]]; then
+        auth=${netloc%@*}
+        hostport=${netloc##*@}
+    fi
+    local user=${auth%%:*} password=""
+    if [[ $auth == *:* ]]; then password=${auth#*:}; fi
+    local host=${hostport%%:*} port=""
+    if [[ $hostport == *:* ]]; then port=${hostport#*:}; fi
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$(urlDecode "$user")" "$(urlDecode "$password")" "$host" "$port" "$(urlDecode "$path")"
 }
 
 function credentialMismatch() {
@@ -412,6 +493,15 @@ function credentialMismatch() {
     echo "   Stop the data services with: ./setup.sh stop" >&2
 }
 
+function serviceNotReady() {
+    local service=$1 detail=$2
+    echo "" >&2
+    echo "   $service did not become ready: $detail ❌" >&2
+    echo "" >&2
+    echo "   Check its logs with: $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH logs $3" >&2
+    echo "   Stop the data services with: ./setup.sh stop" >&2
+}
+
 # Postgres and RabbitMQ only take their credentials from the environment
 # when their volume is first created. Before the app starts, check that the
 # bundled services accept the credentials the app will connect with, so an
@@ -423,42 +513,71 @@ function checkBundledCredentials() {
     local compose="$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH"
     local services
     services=$($compose config --services 2>/dev/null)
-    local user password host name out i
+    local user password host port name out i ready
 
-    local db_url
-    db_url=$(getEnvValue "DATABASE_URL" "$DOCKER_ENV_PATH")
-    IFS=$'\t' read -r user password host name <<< "$(splitServiceUrl "${db_url:-$DEFAULT_DATABASE_URL}")"
+    IFS=$'\x1f' read -r user password host port name <<< "$(splitServiceUrl "$(appServiceUrl DATABASE_URL "$DEFAULT_DATABASE_URL")")"
     if [ "$host" == "pi-dash-db" ] && grep -qx "pi-dash-db" <<< "$services"; then
+        port=${port:-5432}
         # 127.0.0.1 only answers once first-boot initialisation is done.
+        ready=""
         for ((i = 0; i < attempts; i++)); do
-            $compose exec -T pi-dash-db pg_isready -q -h 127.0.0.1 >/dev/null 2>&1 && break
+            out=$($compose exec -T pi-dash-db pg_isready -h 127.0.0.1 -p "$port" 2>&1) && { ready=1; break; }
             sleep "$interval"
         done
+        if [ -z "$ready" ]; then
+            serviceNotReady "PostgreSQL" "no answer on port $port (${out:-no output})" "pi-dash-db"
+            return 1
+        fi
+        # Log in over TCP with the password, as the app does: the image
+        # trusts its local socket, which would skip the password.
+        ready=""
         for ((i = 0; i < attempts; i++)); do
-            out=$($compose exec -T pi-dash-db psql -U "$user" -d "$name" -tAc "select 1" 2>&1) && { out=""; break; }
-            [[ $out == *"does not exist"* ]] && break
+            out=$(PGPASSWORD="$password" $compose exec -T -e PGPASSWORD pi-dash-db psql -h 127.0.0.1 -p "$port" -U "$user" -d "$name" -tAc "select 1" 2>&1) && { ready=1; break; }
+            [[ $out == *"does not exist"* || $out == *"password authentication failed"* ]] && break
             sleep "$interval"
         done
-        if [ -n "$out" ]; then
+        if [[ $out == *"password authentication failed"* ]]; then
+            credentialMismatch "PostgreSQL" "the database volume does not accept the password for role \"$user\"" "DATABASE_URL"
+            return 1
+        fi
+        if [[ $out == *"does not exist"* ]]; then
             credentialMismatch "PostgreSQL" "the database volume has no role \"$user\" with database \"$name\" (${out##*FATAL:  })" "DATABASE_URL"
+            return 1
+        fi
+        if [ -z "$ready" ]; then
+            serviceNotReady "PostgreSQL" "${out##*error: }" "pi-dash-db"
             return 1
         fi
     fi
 
-    local amqp_url
-    amqp_url=$(getEnvValue "AMQP_URL" "$DOCKER_ENV_PATH")
-    IFS=$'\t' read -r user password host name <<< "$(splitServiceUrl "${amqp_url:-$DEFAULT_AMQP_URL}")"
+    IFS=$'\x1f' read -r user password host port name <<< "$(splitServiceUrl "$(appServiceUrl AMQP_URL "$DEFAULT_AMQP_URL")")"
     if [ "$host" == "pi-dash-mq" ] && grep -qx "pi-dash-mq" <<< "$services"; then
+        # Kombu's defaults for parts the URL leaves out.
+        if [ -z "$user" ]; then
+            user="guest"
+            password=${password:-guest}
+        fi
+        name=${name:-/}
+        ready=""
         for ((i = 0; i < attempts; i++)); do
-            $compose exec -T pi-dash-mq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && break
+            $compose exec -T pi-dash-mq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && { ready=1; break; }
             sleep "$interval"
         done
+        if [ -z "$ready" ]; then
+            serviceNotReady "RabbitMQ" "the broker is not running" "pi-dash-mq"
+            return 1
+        fi
         if ! $compose exec -T pi-dash-mq rabbitmqctl -q authenticate_user "$user" "$password" >/dev/null 2>&1; then
             credentialMismatch "RabbitMQ" "the broker volume does not accept user \"$user\"" "AMQP_URL"
             return 1
         fi
-        if ! $compose exec -T pi-dash-mq rabbitmqctl -q list_vhosts name 2>/dev/null | grep -qxF "$name"; then
+        if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_vhosts name 2>/dev/null | grep -qxF -- "$name"; then
             credentialMismatch "RabbitMQ" "the broker volume has no vhost \"$name\"" "AMQP_URL"
+            return 1
+        fi
+        # A valid user on an existing vhost can still lack access to it.
+        if ! $compose exec -T pi-dash-mq rabbitmqctl -s list_permissions -p "$name" 2>/dev/null | cut -f1 | grep -qxF -- "$user"; then
+            credentialMismatch "RabbitMQ" "user \"$user\" has no permissions on vhost \"$name\"" "AMQP_URL"
             return 1
         fi
     fi
@@ -471,7 +590,11 @@ function startServices() {
     local data_services
     data_services=$($COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH config --services 2>/dev/null | grep -xE "pi-dash-db|pi-dash-mq" | tr '\n' ' ')
     if [ -n "$data_services" ]; then
-        /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull $data_services"
+        if ! /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull $data_services"; then
+            echo "" >&2
+            echo "   Failed to start the data services ($data_services) ❌" >&2
+            exit 1
+        fi
         checkBundledCredentials || exit 1
     fi
 

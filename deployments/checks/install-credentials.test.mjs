@@ -27,15 +27,45 @@ const STUB = `#!/bin/bash
 echo "$*" >> "$STUB_LOG"
 while [ $# -gt 0 ]; do
   case "$1" in
-    -f|--env-file) shift 2 ;;
-    -f*|--env-file=*) shift ;;
+    -f|--env-file) [ "$1" == "--env-file" ] && envfile=$2; shift 2 ;;
+    --env-file=*) envfile=\${1#--env-file=}; shift ;;
+    -f*) shift ;;
     *) break ;;
   esac
 done
-if [ "$1" == "config" ]; then printf '%s\\n' \${STUB_SERVICES:-pi-dash-db pi-dash-mq api}; exit 0; fi
-if [ "$1" == "up" ]; then exit 0; fi
+# Compose's resolution of \\\${VAR:-default}: an exported variable wins,
+# then a non-empty value in the env file, then the default.
+resolve() {
+  local key=$1 def=$2 exported="STUB_EXPORTED_$1" v
+  v=\${!exported}
+  [ -z "$v" ] && v=$(grep "^$key=" "$envfile" 2>/dev/null | cut -d'=' -f2-)
+  [ -z "$v" ] && v=$def
+  printf '%s' "$v" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' -e 's/&/\\\\u0026/g'
+}
+if [ "$1" == "config" ]; then
+  case "$2" in
+    --services) printf '%s\\n' \${STUB_SERVICES:-pi-dash-db pi-dash-mq api}; exit 0 ;;
+    --format)
+      [ -n "$STUB_NO_JSON" ] && { echo "unknown flag: --format" >&2; exit 1; }
+      printf '{\\n  "name": "pi-dash",\\n  "services": {\\n    "api": {\\n      "environment": {\\n'
+      printf '        "AMQP_URL": "%s",\\n' "$(resolve AMQP_URL amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash)"
+      printf '        "DATABASE_URL": "%s"\\n' "$(resolve DATABASE_URL postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash)"
+      printf '      }\\n    }\\n  }\\n}\\n'
+      exit 0 ;;
+  esac
+fi
+if [ "$1" == "up" ]; then [ -n "$STUB_UP_FAIL" ] && exit 1; exit 0; fi
 [ "$1" == "exec" ] || { echo "unexpected: $*" >&2; exit 99; }
-shift; [ "$1" == "-T" ] && shift
+shift
+# exec options; -e NAME forwards NAME from this environment, as Compose does.
+declare -A cenv
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -T) shift ;;
+    -e) if [[ $2 == *=* ]]; then cenv[\${2%%=*}]=\${2#*=}; else cenv[$2]=\${!2}; fi; shift 2 ;;
+    *) break ;;
+  esac
+done
 svc=$1; shift
 case "$svc:$1" in
   pi-dash-db:pg_isready)
@@ -43,19 +73,28 @@ case "$svc:$1" in
     [ "$n" -ge "\${STUB_PG_BOOT:-0}" ] && exit 0
     echo "no response"; exit 2 ;;
   pi-dash-db:psql)
-    shift; user=""; db=""
-    while [ $# -gt 0 ]; do case "$1" in -U) user=$2; shift 2 ;; -d) db=$2; shift 2 ;; *) shift ;; esac; done
+    shift; user=""; db=""; host=""; port=5432
+    while [ $# -gt 0 ]; do case "$1" in -U) user=$2; shift 2 ;; -d) db=$2; shift 2 ;; -h) host=$2; shift 2 ;; -p) port=$2; shift 2 ;; *) shift ;; esac; done
+    if [ "$port" != "5432" ]; then echo "psql: error: connection to server at \\"$host\\", port $port failed: Connection refused" >&2; exit 2; fi
     if [ "$user" != "$STUB_PG_ROLE" ]; then echo "psql: error: FATAL:  role \\"$user\\" does not exist" >&2; exit 2; fi
+    # The official image trusts the local socket; TCP needs the password.
+    if [ -n "$host" ] && [ "\${cenv[PGPASSWORD]}" != "\${STUB_PG_PASS-pi-dash}" ]; then
+      echo "psql: error: connection to server at \\"$host\\", port $port failed: FATAL:  password authentication failed for user \\"$user\\"" >&2; exit 2
+    fi
     if [ "$db" != "$STUB_PG_DB" ]; then echo "psql: error: FATAL:  database \\"$db\\" does not exist" >&2; exit 2; fi
     echo 1; exit 0 ;;
   pi-dash-mq:rabbitmq-diagnostics) exit 0 ;;
   pi-dash-mq:rabbitmqctl)
-    shift; [ "$1" == "-q" ] && shift
+    shift; [ "$1" == "-q" ] || [ "$1" == "-s" ] && shift
     case "$1" in
       authenticate_user)
         [ "$2" == "$STUB_MQ_USER" ] && [ "$3" == "$STUB_MQ_PASS" ] && { echo "Success"; exit 0; }
         echo "Error: failed to authenticate user \\"$2\\"" >&2; exit 65 ;;
       list_vhosts) printf '%s\\n' "$STUB_MQ_VHOST"; exit 0 ;;
+      list_permissions)
+        [ "$2" == "-p" ] || { echo "list_permissions without -p" >&2; exit 64; }
+        [ "$3" == "$STUB_MQ_VHOST" ] || { echo "Error: vhost \\"$3\\" does not exist" >&2; exit 70; }
+        printf '%s\\t.*\\t.*\\t.*\\n' "\${STUB_MQ_PERM_USER-$STUB_MQ_USER}"; exit 0 ;;
     esac ;;
 esac
 echo "unexpected exec: $svc $*" >&2; exit 98
@@ -63,6 +102,7 @@ echo "unexpected exec: $svc $*" >&2; exit 98
 
 const VOLUMES_OK = {
   STUB_PG_ROLE: "pi-dash",
+  STUB_PG_PASS: "pi-dash",
   STUB_PG_DB: "pi-dash",
   STUB_MQ_USER: "pi-dash",
   STUB_MQ_PASS: "pi-dash",
@@ -71,6 +111,7 @@ const VOLUMES_OK = {
 // Volumes first created from the old variables.env template.
 const VOLUMES_OLD = {
   STUB_PG_ROLE: "pi dash",
+  STUB_PG_PASS: "pi dash",
   STUB_PG_DB: "pi dash",
   STUB_MQ_USER: "pi dash",
   STUB_MQ_PASS: "pi dash",
@@ -78,7 +119,7 @@ const VOLUMES_OLD = {
 };
 
 /** Source install.sh in a scratch dir and run checkBundledCredentials. */
-function runCheck({ env = "", volumes = VOLUMES_OK, extra = {} } = {}) {
+function runCheck({ env = "", volumes = VOLUMES_OK, extra = {}, fn = "checkBundledCredentials" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pidash-install-"));
   const stub = join(dir, "compose-stub");
   writeFileSync(stub, STUB);
@@ -93,7 +134,7 @@ function runCheck({ env = "", volumes = VOLUMES_OK, extra = {} } = {}) {
     `COMPOSE_CMD=${JSON.stringify(stub)}`,
     `DOCKER_FILE_PATH=${JSON.stringify(join(dir, "docker-compose.yaml"))}`,
     `DOCKER_ENV_PATH=${JSON.stringify(envFile)}`,
-    "checkBundledCredentials",
+    fn,
   ].join("\n");
   const result = spawnSync("bash", ["-c", script], {
     encoding: "utf8",
@@ -155,7 +196,8 @@ describe("install.sh credential preflight", () => {
   });
 
   it("leaves external databases and brokers alone", () => {
-    const env = "DATABASE_URL=postgresql://u:p@db.example.com/app\nAMQP_URL=amqp://u:p@mq.example.com:5672/app\n";
+    const env =
+      "DATABASE_URL=postgresql://app:secret@external-db/app\nAMQP_URL=amqp://app:secret@external-mq:5672/app\n";
     const { status, out, calls } = runCheck({ env, volumes: VOLUMES_OLD });
     assert.equal(status, 0, out);
     assert.doesNotMatch(calls, /exec/);
@@ -166,9 +208,93 @@ describe("install.sh credential preflight", () => {
     assert.equal(status, 0, out);
     assert.doesNotMatch(calls, /exec/);
   });
+  it("checks the URLs Compose resolves, so an exported DATABASE_URL wins over the env file", () => {
+    // Exported variables take precedence over the env file in Compose
+    // interpolation; the app then talks to the external database only.
+    const { status, out, calls } = runCheck({
+      volumes: { ...VOLUMES_OLD, STUB_MQ_USER: "pi-dash", STUB_MQ_PASS: "pi-dash", STUB_MQ_VHOST: "pi-dash" },
+      extra: { STUB_EXPORTED_DATABASE_URL: "postgresql://app:secret@external-db/app" },
+    });
+    assert.equal(status, 0, out);
+    assert.doesNotMatch(calls, /exec .*pi-dash-db/);
+  });
+
+  it("decodes JSON escapes in the resolved config (Compose writes & as \\u0026)", () => {
+    const env = "DATABASE_URL=postgresql://pi-dash:pi-dash@pi-dash-db:5432/pi-dash?sslmode=disable&connect_timeout=5\n";
+    const { status, out } = runCheck({ env });
+    assert.equal(status, 0, out);
+  });
+
+  it("falls back to the env file when Compose cannot print JSON", () => {
+    const { status, out } = runCheck({ volumes: VOLUMES_OLD, extra: { STUB_NO_JSON: "1" } });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /PostgreSQL/);
+  });
+
+  it("rejects a Postgres volume whose role exists but whose password differs", () => {
+    // The image trusts its local socket, so only a TCP login with the
+    // password exercises the app's authentication path.
+    const { status, out } = runCheck({ volumes: { ...VOLUMES_OK, STUB_PG_PASS: "custom" } });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /PostgreSQL/);
+    assert.match(out, /password/);
+    assert.match(out, /DATABASE_URL/);
+  });
+
+  it("logs in to Postgres on the URL's port", () => {
+    const env = "DATABASE_URL=postgresql://pi-dash:pi-dash@pi-dash-db:6543/pi-dash\n";
+    const { status, out, calls } = runCheck({ env });
+    assert.notEqual(status, 0, out);
+    assert.match(calls, /psql -h 127\.0\.0\.1 -p 6543 /);
+    assert.doesNotMatch(out, /credentials the volume/);
+  });
+
+  it("keeps a literal + in a URL password, as Kombu and dj-database-url do", () => {
+    const env = [
+      "DATABASE_URL=postgresql://pi-dash:a+b@pi-dash-db/pi-dash",
+      "AMQP_URL=amqp://pi-dash:a+b@pi-dash-mq:5672/pi-dash",
+      "",
+    ].join("\n");
+    const { status, out } = runCheck({ env, volumes: { ...VOLUMES_OK, STUB_PG_PASS: "a+b", STUB_MQ_PASS: "a+b" } });
+    assert.equal(status, 0, out);
+  });
+
+  it("keeps backslashes in a URL password instead of reading them as escapes", () => {
+    const env = "AMQP_URL=amqp://pi-dash:a%5Cnb\\t@pi-dash-mq:5672/pi-dash\n";
+    const { status, out } = runCheck({ env, volumes: { ...VOLUMES_OK, STUB_MQ_PASS: "a\\nb\\t" } });
+    assert.equal(status, 0, out);
+  });
+
+  it("uses RabbitMQ's default vhost / when the AMQP URL has none", () => {
+    const env = "AMQP_URL=amqp://pi-dash:pi-dash@pi-dash-mq:5672\n";
+    const { status, out } = runCheck({ env, volumes: { ...VOLUMES_OK, STUB_MQ_VHOST: "/" } });
+    assert.equal(status, 0, out);
+  });
+
+  it("rejects a RabbitMQ user with no permissions on the configured vhost", () => {
+    const { status, out } = runCheck({ volumes: { ...VOLUMES_OK, STUB_MQ_PERM_USER: "someone-else" } });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /RabbitMQ/);
+    assert.match(out, /permission/);
+    assert.match(out, /AMQP_URL/);
+  });
+
+  it("reports a database that never became ready, not a credential mismatch", () => {
+    const { status, out } = runCheck({ extra: { STUB_PG_BOOT: "100" } });
+    assert.notEqual(status, 0, out);
+    assert.match(out, /PostgreSQL/);
+    assert.match(out, /not ready|did not become ready/);
+    assert.doesNotMatch(out, /credentials the volume/);
+  });
 });
 
 describe("install.sh wiring", () => {
+  it("stops when the data services fail to start, before probing credentials", () => {
+    const { status, out, calls } = runCheck({ fn: "startServices", extra: { STUB_UP_FAIL: "1" } });
+    assert.notEqual(status, 0, out);
+    assert.doesNotMatch(calls, /exec/);
+    assert.equal(calls.match(/ up /g)?.length, 1, calls);
+  });
   it("runs the preflight after starting the data services and before the full stack", () => {
     const text = readFileSync(INSTALL_SH, "utf8");
     const body = /function startServices\(\) \{([\s\S]*?)\n\}/.exec(text);
