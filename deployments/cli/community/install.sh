@@ -113,7 +113,8 @@ function getEnvValue() {
         grep -q "^$key=" "$file"
         if [ $? -eq 0 ]; then
             local value
-            value=$(grep "^$key=" "$file" | cut -d'=' -f2)
+            # Everything after the first "=": URLs and secrets may contain "=".
+            value=$(grep "^$key=" "$file" | cut -d'=' -f2-)
             echo "$value"
         else
             echo ""
@@ -136,13 +137,38 @@ function updateEnvFile() {
         if [ $? -ne 0 ]; then
             echo "$key=$value" >> "$file"
             return
-        else 
-            if [ "$OS_NAME" == "Darwin" ]; then
-                value=$(echo "$value" | sed 's/|/\\|/g')
-                sed -i '' "s|^$key=.*|$key=$value|g" "$file"
-            else
-                value=$(echo "$value" | sed 's/\//\\\//g')
-                sed -i "s/^$key=.*/$key=$value/g" "$file"
+        else
+            # Rewrite the line in bash, not with a sed replacement, where
+            # "&", "\\" and the delimiter are special: the value is kept
+            # byte for byte. The original is only replaced, by a rename,
+            # once a complete copy is written beside it with the same mode.
+            local tmp line
+            if ! tmp=$(mktemp "$(dirname "$file")/.pi_dash.env.XXXXXX") || [ -z "$tmp" ]; then
+                echo "Could not update $key in $file: no temporary file" >&2
+                return 1
+            fi
+            if ! cp -p "$file" "$tmp" 2>/dev/null; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file: copying its mode failed" >&2
+                return 1
+            fi
+            # Stop at the first failed write (exit leaves only the subshell):
+            # the loop's own status is only its last command's.
+            if ! (while IFS= read -r line || [ -n "$line" ]; do
+                if [[ $line == "$key="* ]]; then
+                    printf '%s=%s\n' "$key" "$value" || exit 1
+                else
+                    printf '%s\n' "$line" || exit 1
+                fi
+            done < "$file") > "$tmp" 2>/dev/null; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file: writing a temporary copy failed" >&2
+                return 1
+            fi
+            if ! mv -f "$tmp" "$file"; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file" >&2
+                return 1
             fi
         fi
     else
@@ -187,20 +213,26 @@ function ensureGeneratedSecret() {
 }
 
 function updateCustomVariables(){
+    local file=${1:-$DOCKER_ENV_PATH}
     echo "Updating custom variables..." >&2
-    updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
-    updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$DOCKER_ENV_PATH"
-    updateEnvFile "PULL_POLICY" "$PULL_POLICY" "$DOCKER_ENV_PATH"
-    updateEnvFile "CUSTOM_BUILD" "$CUSTOM_BUILD" "$DOCKER_ENV_PATH"
+    updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$file" &&
+    updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$file" &&
+    updateEnvFile "PULL_POLICY" "$PULL_POLICY" "$file" &&
+    updateEnvFile "CUSTOM_BUILD" "$CUSTOM_BUILD" "$file" || return 1
     echo "Custom variables updated successfully" >&2
 }
 
 function syncEnvFile(){
+    # Merge into $1 (default: the active pi_dash.env).
+    local target=${1:-$DOCKER_ENV_PATH}
     echo "Syncing environment variables..." >&2
     if [ -f "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" ]; then
-        updateCustomVariables
-        
-        # READ keys of pi_dash.env and update the values from pi_dash.env.bak
+        updateCustomVariables "$target" || return 1
+
+        # READ keys of the target and update the values from pi_dash.env.bak.
+        # Read a snapshot: updateEnvFile rewrites the target in place.
+        local current failed=""
+        current=$(cat "$target") || return 1
         while IFS= read -r line
         do
             # ignore is the line is empty or starts with #
@@ -210,11 +242,37 @@ function syncEnvFile(){
             key=$(echo "$line" | cut -d'=' -f1)
             value=$(getEnvValue "$key" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
             if [ -n "$value" ]; then
-                updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
+                updateEnvFile "$key" "$value" "$target" || failed+=" $key"
             fi
-        done < "$DOCKER_ENV_PATH"
+        done <<< "$current"
+        if [ -n "$failed" ]; then
+            echo "Could not carry over:$failed from $PI_DASH_INSTALL_DIR/pi_dash.env.bak into $target ❌" >&2
+            return 1
+        fi
     fi
     echo "Environment variables synced successfully" >&2
+}
+
+# Upgrade: back up the active pi_dash.env, merge its values into the staged
+# template $1, and only then make the merged template the active file. A
+# failed merge leaves pi_dash.env (and so the next run's backup) unchanged.
+function installUpgradeEnvFile(){
+    local staged=$1
+    if [ -f "$DOCKER_ENV_PATH" ]; then
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env" &&
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" || {
+            echo "Could not back up $DOCKER_ENV_PATH; it was left unchanged ❌" >&2
+            return 1
+        }
+    fi
+    if ! syncEnvFile "$staged"; then
+        echo "$DOCKER_ENV_PATH was left unchanged; the partly merged template is $staged ❌" >&2
+        return 1
+    fi
+    if ! mv -f "$staged" "$DOCKER_ENV_PATH"; then
+        echo "Could not replace $DOCKER_ENV_PATH; it was left unchanged ❌" >&2
+        return 1
+    fi
 }
 
 function buildYourOwnImage(){
@@ -327,15 +385,7 @@ function download() {
         fi
     fi
 
-    if [ -f "$DOCKER_ENV_PATH" ];
-    then
-        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak"
-    fi
-
-    mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
-
-    syncEnvFile
+    installUpgradeEnvFile "$PI_DASH_INSTALL_DIR/variables-upgrade.env" || exit 1
 
     # Generate fresh per-install values for any blank secrets. On upgrades
     # syncEnvFile will already have pulled forward the user's existing values,
@@ -375,7 +425,335 @@ function download() {
     echo "In case of 'Upgrade', please check the 'pi_dash.env 'file for any new variables and update them accordingly"
     echo ""
 }
+# Credential probe, run in a one-off `api` container by checkBundledCredentials
+# (Python, so its source is kept at column 0).
+IFS= read -r -d '' CREDENTIAL_PROBE <<'PROBE' || true
+# Runs inside a one-off `api` container: same image, environment and
+# network as the app, so URLs are parsed by the app's own libraries
+# (dj-database-url, Kombu) and logins take the app's network path.
+# Prints one "credential-check<TAB>STATUS<TAB>SERVICE<TAB>DETAIL" line per
+# bundled service; STATUS is OK, SKIP, MISMATCH or NOTREADY.
+import os
+import re
+import signal
+import time
+
+SERVICES = os.environ.get("CREDENTIAL_CHECK_SERVICES", "").split()
+SECONDS = max(1, int(os.environ.get("CREDENTIAL_CHECK_SECONDS") or "120"))
+INTERVAL = float(os.environ.get("CREDENTIAL_CHECK_INTERVAL") or "2")
+TIMEOUT = 5
+
+
+def say(status, service, detail=""):
+    detail = " ".join(str(detail).split())
+    print(f"credential-check\t{status}\t{service}\t{detail}", flush=True)
+
+
+class Deadline(BaseException):
+    """Raised by the alarm when one attempt hangs past every client timeout.
+    A BaseException, so an attempt's `except Exception` cannot swallow it."""
+
+
+def give_up(signum, frame):
+    raise Deadline()
+
+
+def retry(service, attempt):
+    """Run attempt() until it returns a result or the deadline passes."""
+    end = time.monotonic() + SECONDS
+    signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(SECONDS + 3 * TIMEOUT)
+    last = ""
+    try:
+        while True:
+            result = attempt()
+            if result[0] != "RETRY":
+                say(result[0], service, result[1])
+                return
+            last = result[1]
+            if time.monotonic() + INTERVAL >= end:
+                say("NOTREADY", service, last)
+                return
+            time.sleep(INTERVAL)
+    except Deadline:
+        # Ends this service's check only; the next one still runs.
+        say("NOTREADY", service, f"no answer within {SECONDS}s")
+    finally:
+        signal.alarm(0)
+
+
+# The server's own login rejections, as libpq reports them ("FATAL:  ...").
+# Client-side failures (a missing TLS file, a refused connection) are not
+# about the volume's credentials and must not match.
+POSTGRES_REFUSAL = re.compile(
+    r"FATAL:\s+("
+    r"password authentication failed for user "
+    r'|role "[^"]*" does not exist'
+    r'|database "[^"]*" does not exist'
+    r'|role "[^"]*" is not permitted to log in'
+    r"|no pg_hba\.conf entry for "
+    r'|permission denied for database "'
+    r")"
+)
+
+
+def postgres_refusal(text):
+    return POSTGRES_REFUSAL.search(text) is not None
+
+
+def django_connection_params(cfg):
+    """libpq parameters as Django 4.2's PostgreSQL backend builds them:
+    OPTIONS override the database name; USER, PASSWORD, HOST and PORT
+    override OPTIONS. Django-only options are dropped."""
+    options = {k: v for k, v in (cfg.get("OPTIONS") or {}).items() if isinstance(v, (str, int))}
+    name = cfg.get("NAME")
+    if name:
+        params = {"dbname": name, **options}
+    elif name is None:
+        options.pop("service", None)
+        params = {"dbname": "postgres", **options}
+    else:
+        params = dict(options)
+    for key in ("assume_role", "isolation_level", "server_side_binding", "prepare_threshold", "pool", "cursor_factory"):
+        params.pop(key, None)
+    params["client_encoding"] = "UTF8"
+    for setting, key in (("USER", "user"), ("PASSWORD", "password"), ("HOST", "host"), ("PORT", "port")):
+        if cfg.get(setting):
+            params[key] = str(cfg[setting])
+    return params
+
+
+def check_postgres():
+    import dj_database_url
+    import psycopg
+
+    # As pi_dash/settings/common.py: DATABASE_URL, else the POSTGRES_* values.
+    if os.environ.get("DATABASE_URL"):
+        cfg = dj_database_url.parse(os.environ["DATABASE_URL"])
+    else:
+        cfg = {
+            "NAME": os.environ.get("POSTGRES_DB"),
+            "USER": os.environ.get("POSTGRES_USER"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
+            "HOST": os.environ.get("POSTGRES_HOST"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        }
+    params = django_connection_params(cfg)
+    # With no host in the URL or POSTGRES_HOST, libpq connects to PGHOST,
+    # which the community Compose file sets to pi-dash-db.
+    host = str(params.get("host") or os.environ.get("PGHOST") or "")
+    if not host:
+        say("SKIP", "PostgreSQL", "no host set")
+        return
+    if host != "pi-dash-db":
+        say("SKIP", "PostgreSQL", f"external host {host}")
+        return
+    params["connect_timeout"] = TIMEOUT
+
+    def attempt():
+        try:
+            psycopg.connect(**params).close()
+            return ("OK", "")
+        except psycopg.OperationalError as error:
+            text = str(error)
+            # Over TCP these only come from the final server: the image's
+            # first-boot init server listens on the socket only.
+            if postgres_refusal(text):
+                return ("MISMATCH", text.split("FATAL:")[-1].strip())
+            return ("RETRY", text)
+
+    retry("PostgreSQL", attempt)
+
+
+def rabbit_refusal(text):
+    """The 530 replies to connection.open that mean the vhost is missing or
+    closed to the user (rabbit_reader.erl and rabbit_access_control.erl,
+    3.13.6). The limit replies add ": ..." after the user, so the anchored
+    end keeps them out."""
+    return bool(
+        re.search(r"NOT_ALLOWED - vhost .* not found$", text)
+        or re.search(r"NOT_ALLOWED - access to vhost '.*' refused for user '[^']*'$", text)
+    )
+
+
+def check_rabbitmq():
+    import amqp.exceptions
+    from kombu import Connection
+
+    # As pi_dash/settings/common.py: AMQP_URL, else the RABBITMQ_* values.
+    url = os.environ.get("AMQP_URL") or "amqp://{}:{}@{}:{}/{}".format(
+        os.environ.get("RABBITMQ_USER", "guest"),
+        os.environ.get("RABBITMQ_PASSWORD", "guest"),
+        os.environ.get("RABBITMQ_HOST"),
+        os.environ.get("RABBITMQ_PORT", "5672"),
+        os.environ.get("RABBITMQ_VHOST", "/"),
+    )
+    conn = Connection(
+        url,
+        connect_timeout=TIMEOUT,
+        transport_options={"read_timeout": TIMEOUT, "write_timeout": TIMEOUT},
+    )
+    if conn.hostname != "pi-dash-mq":
+        say("SKIP", "RabbitMQ", f"external host {conn.hostname}")
+        return
+
+    def attempt():
+        try:
+            conn.connect()
+            conn.release()
+            return ("OK", "")
+        except Exception as error:
+            chain, seen = error, set()
+            while chain is not None and id(chain) not in seen:
+                seen.add(id(chain))
+                # 403 ACCESS_REFUSED: bad user or password. 530 NOT_ALLOWED
+                # is a refusal only for a missing vhost or no permissions on
+                # it; RabbitMQ also sends 530 for connection limits and a
+                # limit lookup timeout, which stay on the retry path.
+                code = getattr(chain, "code", None)
+                if isinstance(chain, amqp.exceptions.AccessRefused) or code == 403:
+                    return ("MISMATCH", f"{chain} (user {conn.userid!r}, vhost {conn.virtual_host!r})")
+                if isinstance(chain, amqp.exceptions.NotAllowed) or code == 530:
+                    if rabbit_refusal(str(getattr(chain, "reply_text", "") or chain)):
+                        return ("MISMATCH", f"{chain} (user {conn.userid!r}, vhost {conn.virtual_host!r})")
+                    break
+                chain = chain.__cause__ or chain.__context__
+            return ("RETRY", f"{type(error).__name__}: {error}")
+
+    retry("RabbitMQ", attempt)
+
+
+def guarded(service, variable, check):
+    """A crash in one check must not hide another's result. Its message is
+    not printed: URL parsers quote their input, which holds the password."""
+    try:
+        check()
+    except Exception as error:
+        say(
+            "ERROR",
+            service,
+            f"{type(error).__name__} while reading {variable}; check its format and"
+            " percent-encode special characters in the user and password",
+        )
+
+
+if "db" in SERVICES:
+    guarded("PostgreSQL", "DATABASE_URL", check_postgres)
+if "mq" in SERVICES:
+    guarded("RabbitMQ", "AMQP_URL", check_rabbitmq)
+PROBE
+
+function credentialMismatch() {
+    local service=$1 detail=$2 variable=$3
+    echo "" >&2
+    echo "   $service: $detail ❌" >&2
+    echo "" >&2
+    echo "   $service only reads its user, password and database when its volume" >&2
+    echo "   is first created, so this volume was created with other values." >&2
+    echo "   Installs created from older templates used 'pi dash' for all of them." >&2
+    echo "   Set $variable in $DOCKER_ENV_PATH to the credentials the volume was" >&2
+    echo "   created with, then start again. See \"Database and RabbitMQ" >&2
+    echo "   credentials\" in the self-hosting README." >&2
+    echo "   Stop the data services with: ./setup.sh stop" >&2
+}
+
+# Not a credential problem: warn and let the app retry its own connection.
+function credentialCheckSkipped() {
+    local what=$1 detail=$2
+    echo "" >&2
+    echo "   $what; skipping its credential check ⚠️" >&2
+    [ -n "$detail" ] && echo "   ($detail)" >&2
+    echo "" >&2
+}
+
+# Postgres and RabbitMQ only take their credentials from the environment
+# when their volume is first created. Before the app starts, check that the
+# bundled services accept the credentials the app will connect with, so an
+# old volume fails here with a clear message instead of an auth error in
+# the API logs. The probe runs in a one-off `api` container: the app's
+# image, resolved environment, network and client libraries. External
+# services (another host in the URL) are skipped. Only a refused login
+# stops the start; a slow service or a probe that cannot run only warns.
+function checkBundledCredentials() {
+    local seconds=${CREDENTIAL_CHECK_SECONDS:-120}
+    local compose="$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH"
+    local services check=""
+    services=$($compose config --services 2>/dev/null)
+    grep -qx "pi-dash-db" <<< "$services" && check+=" db"
+    grep -qx "pi-dash-mq" <<< "$services" && check+=" mq"
+    if [ -z "$check" ] || ! grep -qx "api" <<< "$services"; then
+        return 0
+    fi
+
+    local out run_status
+    out=$(printf '%s\n' "$CREDENTIAL_PROBE" | $compose run --rm --no-deps -T \
+        -e CREDENTIAL_CHECK_SERVICES="${check# }" -e CREDENTIAL_CHECK_SECONDS="$seconds" \
+        api python3 - 2>&1)
+    run_status=$?
+
+    # Act on every result the probe reported, even if the container failed
+    # afterwards: a reported refusal still stops the start.
+    local tag status service detail failed=0 reported=0
+    while IFS=$'\t' read -r tag status service detail; do
+        [ "$tag" == "credential-check" ] || continue
+        reported=1
+        case $status in
+            MISMATCH)
+                if [[ $service == "PostgreSQL" && $detail == *"permission denied for database"* ]]; then
+                    # The login works; the role lacks CONNECT on the database.
+                    echo "" >&2
+                    echo "   $service: $detail ❌" >&2
+                    echo "   Run GRANT CONNECT ON DATABASE <name> TO <role> as the database owner," >&2
+                    echo "   or set DATABASE_URL in $DOCKER_ENV_PATH to a role that may connect." >&2
+                elif [[ $service == "RabbitMQ" && $detail == *"NOT_ALLOWED - access to vhost"* ]]; then
+                    # The login works; the user has no permissions on the vhost.
+                    echo "" >&2
+                    echo "   $service: $detail ❌" >&2
+                    echo "   Grant the user access to the vhost, for example:" >&2
+                    echo "   $COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH exec -u rabbitmq pi-dash-mq rabbitmqctl set_permissions -p <vhost> <user> '.*' '.*' '.*'" >&2
+                    echo "   or set AMQP_URL in $DOCKER_ENV_PATH to a vhost the user may use." >&2
+                elif [ "$service" == "PostgreSQL" ]; then
+                    credentialMismatch "$service" "$detail" "DATABASE_URL"
+                else
+                    credentialMismatch "$service" "$detail" "AMQP_URL"
+                fi
+                failed=1
+                ;;
+            NOTREADY)
+                credentialCheckSkipped "$service is not ready yet" "$detail"
+                ;;
+            ERROR)
+                credentialCheckSkipped "$service could not be checked" "$detail"
+                ;;
+            OK)
+                echo "   $service accepts the app's credentials ✅"
+                ;;
+        esac
+    done <<< "$out"
+    if [ $run_status -ne 0 ]; then
+        if [ $reported -eq 0 ]; then
+            credentialCheckSkipped "The credential check could not run" "$(tail -n 1 <<< "$out")"
+        else
+            credentialCheckSkipped "The credential check did not finish" "$(tail -n 1 <<< "$out")"
+        fi
+    fi
+    return $failed
+}
+
 function startServices() {
+    # Data services first: their volumes must accept the app's credentials.
+    # Only the bundled ones this compose file still defines.
+    local data_services
+    data_services=$($COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH config --services 2>/dev/null | grep -xE "pi-dash-db|pi-dash-mq" | tr '\n' ' ')
+    if [ -n "$data_services" ]; then
+        if ! /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull $data_services"; then
+            echo "" >&2
+            echo "   Failed to start the data services ($data_services) ❌" >&2
+            exit 1
+        fi
+        checkBundledCredentials || exit 1
+    fi
+
     /bin/bash -c "$COMPOSE_CMD -f $DOCKER_FILE_PATH --env-file=$DOCKER_ENV_PATH up -d --pull if_not_present --quiet-pull"
 
     local migrator_container_id=$(docker container ls -aq -f "name=$SERVICE_FOLDER-migrator")
@@ -751,5 +1129,8 @@ if [ -f "$DOCKER_ENV_PATH" ]; then
     fi
 fi
 
-print_header
-askForAction "$@"
+# Tests source this file for its functions without running the menu.
+if [ "${SETUP_SH_SOURCE_ONLY:-}" != "1" ]; then
+    print_header
+    askForAction "$@"
+fi

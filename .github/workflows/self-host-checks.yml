@@ -1,0 +1,100 @@
+# Copyright (c) Pi Dash contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+# Self-host smoke checks: compose images that can no longer be
+# pulled, variables.env values that break interpolation, and the web_new
+# nginx 404 the community proxy's /assets/* fallback depends on, plus the
+# installer's credential preflight. Plain node:test over the shipped files,
+# so no install step; one step resolves the pinned object storage image on Docker Hub.
+# A second job runs the preflight's probe with the app's client libraries,
+# against fake servers and against real PostgreSQL and RabbitMQ volumes.
+name: self-host-checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deployments/**"
+      - "docker-compose*.yml"
+      - "apps/web_new/nginx/**"
+      - "apps/web_new/public/**"
+      - "apps/proxy/**"
+      - "apps/web_new/e2e/parity/stack/docker-compose.yml"
+      - ".github/workflows/self-host-checks.yml"
+      # The credential probe's client libraries are pinned there.
+      - "apps/api/requirements/base.txt"
+  push:
+    branches: [main]
+    paths:
+      - "deployments/**"
+      - "docker-compose*.yml"
+      - "apps/web_new/nginx/**"
+      - "apps/web_new/public/**"
+      - "apps/proxy/**"
+      - "apps/web_new/e2e/parity/stack/docker-compose.yml"
+      - ".github/workflows/self-host-checks.yml"
+      # The credential probe's client libraries are pinned there.
+      - "apps/api/requirements/base.txt"
+
+jobs:
+  self-host-checks:
+    name: self-host checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test deployments/checks/*.test.mjs
+      # The tests above only check the reference's shape. This resolves it
+      # on Docker Hub: the tag must still point at the pinned digest, and
+      # the image must exist for both platforms an install pulls.
+      - name: Pinned object storage image resolves on the registry
+        run: |
+          set -euo pipefail
+          ref=$(grep -hoE 'pgsty/silo:[^"[:space:]]+' deployments/cli/community/docker-compose.yml | head -n1)
+          tag_ref=${ref%@*}
+          digest=${ref#*@}
+          resolved=$(docker buildx imagetools inspect "$tag_ref" --format '{{.Manifest.Digest}}')
+          if [ "$resolved" != "$digest" ]; then
+            echo "::error::$tag_ref resolves to $resolved, not the pinned $digest"
+            exit 1
+          fi
+          docker buildx imagetools inspect --raw "$ref" \
+            | jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] as $p | ($p | index("linux/amd64")) and ($p | index("linux/arm64"))'
+      # The tag and digest are right; this runs the image on real data: a
+      # volume written by the image it replaces, and the local bootstrap.
+      - name: Object storage image serves an existing volume
+        run: bash deployments/checks/object-storage-e2e.sh
+      # The generated proxy routes are checked as text above; this adapts
+      # both shipped Caddyfiles with the proxy image's Caddy version.
+      - name: Shipped Caddyfiles are valid for Caddy 2.10.0
+        run: |
+          set -euo pipefail
+          for file in Caddyfile.ce Caddyfile.aio.ce; do
+            docker run --rm -v "$PWD/apps/proxy:/srv/proxy:ro" \
+              -e SITE_ADDRESS=:80 -e FILE_SIZE_LIMIT=5242880 -e BUCKET_NAME=uploads \
+              caddy:2.10.0-alpine caddy validate --config "/srv/proxy/$file" --adapter caddyfile
+          done
+
+  credential-preflight:
+    name: installer credential preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The probe's client libraries, at the versions the app image ships.
+      - name: Install the app's client libraries
+        run: |
+          set -euo pipefail
+          pins=$(grep -hE '^(kombu|psycopg|psycopg-binary|dj-database-url)==' apps/api/requirements/base.txt)
+          echo "$pins"
+          pip install $pins
+      - name: Probe against fake PostgreSQL and RabbitMQ servers
+        run: python -m unittest discover -s deployments/checks -p '*_test.py' -v
+      # Real postgres:15.7 and rabbitmq:3.13.6 volumes: wrong password,
+      # old 'pi dash' volumes, no vhost permissions, and the README's fix.
+      - name: Preflight against real PostgreSQL and RabbitMQ
+        run: bash deployments/checks/credential-preflight-e2e.sh

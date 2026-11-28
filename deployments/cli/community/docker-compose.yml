@@ -217,7 +217,14 @@ services:
 
   # Comment this if you using any external s3 compatible storage
   pi-dash-minio:
-    image: minio/minio:latest
+    # MinIO stopped publishing minio/minio (Docker Hub) and quay.io now
+    # refuses anonymous pulls. pgsty/silo is PGSTY's maintained fork of the
+    # same server (formerly pgsty/minio): same S3 API, root user and on-disk
+    # layout, so existing upload volumes keep working. Its entrypoint maps
+    # `server ...` to `silo server ...`; `mc` links to `mcli`. Pinned by tag
+    # and multi-arch digest at or after the SN-2026-020 fix; see the
+    # community README before re-pinning, never float on latest.
+    image: pgsty/silo:RELEASE.2026-11-12T00-00-00Z@sha256:c20d112390b9a9ce8c11b8af95ad35bcaa62f4759663c09c936cd8d2b511f329
     command: server /export --console-address ":9090"
     deploy:
       replicas: 1
