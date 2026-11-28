@@ -97,6 +97,13 @@ enum TerminalHold {
         msgs: Vec<ClientMsg>,
         clear_current_run: bool,
     },
+    /// The worker is sending the held reports. They stay here until the
+    /// in-flight run is cleared, so a shutdown drain that lands mid-send
+    /// still finds the run's real result (and takes over the send).
+    Releasing {
+        msgs: Vec<ClientMsg>,
+        clear_current_run: bool,
+    },
     /// The shutdown drain reported the run; later reports are dropped so
     /// the cloud gets one terminal report per run.
     Drained,
@@ -274,7 +281,7 @@ impl StateHandle {
     }
 
     /// Start holding the run's terminal reports (and the clearing of the
-    /// in-flight run) until [`Self::release_terminal`]. Once the shutdown
+    /// in-flight run) until [`Self::begin_release`]. Once the shutdown
     /// drain has reported the run, nothing more is held or sent.
     pub fn hold_terminal(&self) {
         let mut hold = self.lock_terminal_hold();
@@ -290,7 +297,7 @@ impl StateHandle {
     /// held, or dropped because the shutdown drain already reported the run.
     pub fn hold_terminal_msg(&self, msg: ClientMsg) -> Option<ClientMsg> {
         match &mut *self.lock_terminal_hold() {
-            TerminalHold::Off => Some(msg),
+            TerminalHold::Off | TerminalHold::Releasing { .. } => Some(msg),
             TerminalHold::Holding { msgs, .. } => {
                 msgs.push(msg);
                 None
@@ -314,32 +321,70 @@ impl StateHandle {
                 *clear_current_run = true;
                 true
             }
-            TerminalHold::Off | TerminalHold::Drained => false,
+            TerminalHold::Off | TerminalHold::Releasing { .. } | TerminalHold::Drained => false,
         }
     }
 
-    /// Stop holding: the held reports to send, in order, and whether the
-    /// in-flight run must now be cleared.
-    pub fn release_terminal(&self) -> (Vec<ClientMsg>, bool) {
+    /// Stop holding and start sending: the held reports to send, in order.
+    /// They stay visible to the shutdown drain until
+    /// [`Self::finish_release`]; check [`Self::releasing`] before each
+    /// send, since once the drain took them it owns the send.
+    pub fn begin_release(&self) -> Vec<ClientMsg> {
         let mut hold = self.lock_terminal_hold();
         match std::mem::take(&mut *hold) {
             TerminalHold::Holding {
                 msgs,
                 clear_current_run,
-            } => (msgs, clear_current_run),
-            TerminalHold::Off => (Vec::new(), false),
-            TerminalHold::Drained => {
-                *hold = TerminalHold::Drained;
-                (Vec::new(), true)
+            } => {
+                let out = msgs.clone();
+                *hold = TerminalHold::Releasing {
+                    msgs,
+                    clear_current_run,
+                };
+                out
+            }
+            TerminalHold::Off => Vec::new(),
+            other => {
+                *hold = other;
+                Vec::new()
             }
         }
     }
 
+    /// Whether the worker still owns sending the released reports (the
+    /// shutdown drain has not taken them).
+    pub fn releasing(&self) -> bool {
+        matches!(*self.lock_terminal_hold(), TerminalHold::Releasing { .. })
+    }
+
+    /// Whether the in-flight run must be cleared once the released reports
+    /// are sent: its clearing was deferred, or the drain reported it.
+    pub fn release_clears_current_run(&self) -> bool {
+        match &*self.lock_terminal_hold() {
+            TerminalHold::Releasing {
+                clear_current_run, ..
+            } => *clear_current_run,
+            TerminalHold::Drained => true,
+            TerminalHold::Off | TerminalHold::Holding { .. } => false,
+        }
+    }
+
+    /// End the release: call after the in-flight run was cleared (when
+    /// [`Self::release_clears_current_run`] asked for it), so the drain
+    /// never sees an in-flight run with its result already gone.
+    pub fn finish_release(&self) {
+        let mut hold = self.lock_terminal_hold();
+        if matches!(*hold, TerminalHold::Releasing { .. }) {
+            *hold = TerminalHold::Off;
+        }
+    }
+
     /// For the shutdown drain: take the reports held so far (empty while the
-    /// run is still executing) and drop any later ones.
+    /// run is still executing), including ones the worker is sending right
+    /// now, and drop any later ones. From here the drain owns the send.
     pub fn take_terminal_for_drain(&self) -> Vec<ClientMsg> {
         match std::mem::replace(&mut *self.lock_terminal_hold(), TerminalHold::Drained) {
-            TerminalHold::Holding { msgs, .. } => msgs,
+            TerminalHold::Holding { msgs, .. } | TerminalHold::Releasing { msgs, .. } => msgs,
             TerminalHold::Off | TerminalHold::Drained => Vec::new(),
         }
     }

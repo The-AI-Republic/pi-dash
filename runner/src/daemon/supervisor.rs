@@ -1256,8 +1256,9 @@ fn same_block(running: &RunnerConfig, on_disk: &RunnerConfig) -> bool {
     }
 }
 
-/// Refuse to stop a runner that is doing work: a run in flight or a local
-/// chat turn holding its working copy.
+/// Refuse to stop a runner that is doing work: a run in flight, a local
+/// chat turn holding its working copy, or a finished run whose cleanup is
+/// unresolved.
 fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
     if let Some(run_id) = *inst.state.rx_in_flight.borrow() {
         anyhow::bail!(
@@ -1268,6 +1269,15 @@ fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
     if inst.chat_active.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!(
             "runner {:?} has a local chat turn in flight; try again when it is idle",
+            inst.name
+        );
+    }
+    // A finished run whose cleanup is unresolved still owns the working
+    // copy and its machine-queue slot; replacing the runner now would
+    // orphan both.
+    if inst.state.cleanup_reserved() {
+        anyhow::bail!(
+            "runner {:?} is still cleaning up its last run's processes; try again when it is idle",
             inst.name
         );
     }
@@ -4817,6 +4827,10 @@ impl AssignWorker {
         // Cleanup runs even when the run fails: a failed run must not
         // leave its processes (or its parity-stack hook) behind.
         let result = scope.await;
+        // An internal failure is known now: stage its report in the hold
+        // before cleanup starts, so a shutdown during a slow cleanup or
+        // hook reports this error, not a DaemonRestart.
+        let result = self.stage_internal_failure(run_id, result).await;
         // Empty the unit, then execute a run-end hook the run opted into
         // (parity-stack teardown), outside the unit. `workspace` is None
         // when workspace resolution never produced one; then there is no
@@ -4827,6 +4841,28 @@ impl AssignWorker {
         }
         self.release_terminal().await;
         result
+    }
+
+    /// Report a run that failed with an internal error as
+    /// `RunFailed{Internal}` through the terminal hold, and clear the
+    /// in-flight run (deferred while held). The error is consumed, so the
+    /// caller does not report the run a second time.
+    async fn stage_internal_failure(&self, run_id: uuid::Uuid, result: Result<()>) -> Result<()> {
+        let Err(e) = result else {
+            return Ok(());
+        };
+        tracing::error!("run {run_id} failed: {e:#}");
+        self.send(ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::Internal,
+            detail: Some(format!("{e:#}")),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        })
+        .await;
+        self.clear_current_run().await;
+        Ok(())
     }
 
     /// Keep the runner reserved for a run whose cleanup is unresolved. Set
@@ -4844,14 +4880,24 @@ impl AssignWorker {
 
     /// Stop holding and send what was held, in order. Nothing is sent when
     /// the shutdown drain already reported the run.
+    ///
+    /// The reports stay in the state until the in-flight run is cleared, so
+    /// a shutdown drain that starts mid-send still finds the real result
+    /// and takes the send over; the worker then stops sending. A report the
+    /// worker had already sent may then be sent once more by the drain:
+    /// the same payload, which the cloud's first-writer-wins finalize
+    /// acknowledges as a no-op.
     async fn release_terminal(&self) {
-        let (msgs, clear_current_run) = self.state.release_terminal();
-        for msg in msgs {
-            self.send(msg).await;
+        for msg in self.state.begin_release() {
+            if !self.state.releasing() {
+                break;
+            }
+            self.deliver(msg).await;
         }
-        if clear_current_run {
+        if self.state.release_clears_current_run() {
             self.state.set_current_run(None).await;
         }
+        self.state.finish_release();
     }
 
     /// Clear the in-flight run, or defer it while terminal reports are
@@ -5962,13 +6008,18 @@ impl AssignWorker {
         }
     }
 
-    async fn send(&self, mut msg: ClientMsg) {
+    async fn send(&self, msg: ClientMsg) {
         if terminal_run_id(&msg).is_some() {
-            match self.state.hold_terminal_msg(msg) {
-                Some(now) => msg = now,
-                None => return,
+            if let Some(now) = self.state.hold_terminal_msg(msg) {
+                self.deliver(now).await;
             }
+        } else {
+            self.deliver(msg).await;
         }
+    }
+
+    /// Send `msg` now, bypassing the terminal hold.
+    async fn deliver(&self, msg: ClientMsg) {
         // Clone the journal-relevant fields BEFORE the send consumes
         // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
         // otherwise be discarded with only a warn log, leaving the
@@ -8111,9 +8162,9 @@ mod tests {
             other => panic!("expected the held RunCompleted, got {other:?}"),
         }
         // Cleanup then finishes: nothing more is sent for the run.
-        let (later, clear) = inst.state.release_terminal();
+        let later = inst.state.begin_release();
         assert!(later.is_empty(), "the run would be reported twice");
-        assert!(clear);
+        assert!(inst.state.release_clears_current_run());
         assert!(
             inst.state
                 .hold_terminal_msg(ClientMsg::RunCancelled {
@@ -8125,6 +8176,186 @@ mod tests {
                 .is_none(),
             "a report after the drain must be dropped"
         );
+    }
+
+    fn hello_map(inst: &RunnerInstance) -> Arc<RwLock<HelloRunnerMap>> {
+        Arc::new(RwLock::new(
+            std::iter::once(inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    /// Review item 1 on #3499 at cc5a1a7: the worker has started sending
+    /// the held result but has not cleared the in-flight run. A shutdown
+    /// drain landing then must still find the real result (and own the
+    /// send from there), not report a DaemonRestart failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_during_the_release_reports_the_real_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        inst.state.hold_terminal();
+        assert!(
+            inst.state
+                .hold_terminal_msg(ClientMsg::RunCompleted {
+                    run_id,
+                    done_payload: serde_json::json!({"ok": true}),
+                    ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .is_none()
+        );
+        assert!(inst.state.defer_clear_current_run());
+        // The worker takes the held result to send it...
+        let sending = inst.state.begin_release();
+        assert_eq!(sending.len(), 1);
+        // ...and the shutdown drain lands before the run is cleared.
+        let sent = drain_in_flight_runs(
+            hello_map(&inst),
+            &paths,
+            None,
+            DaemonShutdownTrigger::SigTerm,
+            None,
+        )
+        .await;
+        assert_eq!(sent, 1);
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for the drained report")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunCompleted { run_id: got, .. } => assert_eq!(got, run_id),
+            other => panic!("expected the real RunCompleted, got {other:?}"),
+        }
+        // The drain now owns the send; the worker stops sending.
+        assert!(!inst.state.releasing());
+        assert!(inst.state.release_clears_current_run());
+    }
+
+    /// The worker side of the release: the held result is sent, the run is
+    /// cleared before the hold ends, and nothing is held afterwards.
+    #[tokio::test]
+    async fn release_sends_the_held_result_then_clears_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let run_id = uuid::Uuid::new_v4();
+        worker
+            .state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCancelled {
+                run_id,
+                cancelled_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        assert!(rx.try_recv().is_err(), "the result was not held");
+        assert!(worker.state.rx_in_flight.borrow().is_some());
+        worker.release_terminal().await;
+        assert!(matches!(
+            rx.try_recv().unwrap().body,
+            ClientMsg::RunCancelled { .. }
+        ));
+        assert!(worker.state.rx_in_flight.borrow().is_none());
+        assert!(!worker.state.releasing());
+        assert!(worker.state.take_terminal_for_drain().is_empty());
+    }
+
+    /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup
+    /// is unresolved is not idle, so a credential or config change must not
+    /// hot-restart it.
+    #[test]
+    fn a_runner_with_unresolved_cleanup_is_not_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        assert!(ensure_idle(&inst).is_ok());
+        inst.state.set_cleanup_reserved(true);
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a runner still cleaning up was treated as idle"
+        );
+        inst.state.set_cleanup_reserved(false);
+        assert!(ensure_idle(&inst).is_ok());
+    }
+
+    /// Review item 4 on #3499 at cc5a1a7: an internal error (here the
+    /// history write) is known before run-end cleanup starts, so its
+    /// `RunFailed{Internal}` goes through the terminal hold, where a
+    /// shutdown drain during cleanup finds it, and the run is reported once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_internal_failure_is_staged_before_run_end_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        // The run's history file cannot be created.
+        let runs = worker.runner_paths.runs_dir();
+        let _ = std::fs::remove_dir_all(&runs);
+        std::fs::write(&runs, b"not a directory").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let result = worker
+            .handle_assign(run_id, "p".into(), None, None, AssignContext::default())
+            .await;
+        assert!(
+            result.is_ok(),
+            "the failure would be reported a second time"
+        );
+        let mut failed = Vec::new();
+        while let Ok(env) = rx.try_recv() {
+            if let ClientMsg::RunFailed { reason, .. } = env.body {
+                failed.push(reason);
+            }
+        }
+        assert!(
+            matches!(failed.as_slice(), [FailureReason::Internal]),
+            "expected one RunFailed{{Internal}}, got {failed:?}"
+        );
+        assert!(worker.state.rx_in_flight.borrow().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

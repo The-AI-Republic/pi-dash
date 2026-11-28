@@ -9,6 +9,8 @@
 //!
 //! * Linux: `/proc/<pid>/stat` (state, pgid, `starttime` in clock ticks
 //!   since boot, compared raw — never converted, so never rounded).
+//!   A group scan is complete or an error: a listed process that cannot
+//!   be read, or a `/proc` mounted with `hidepid=2`, could hide a member.
 //! * macOS: `sysctl(KERN_PROC_PID)` / `sysctl(KERN_PROC_PGRP)`. Both
 //!   return `kinfo_proc`, so one source gives every start time
 //!   (`p_starttime`, microseconds) and a comparison is always exact. The
@@ -121,20 +123,97 @@ fn macos_exited_or_exiting(p_stat: u32, p_flag: i32) -> bool {
     p_stat == MACOS_SZOMB || p_flag & MACOS_P_WEXIT != 0
 }
 
+/// Whether a failed read of `/proc/<pid>/stat` means the process is gone
+/// (it exited during the scan). Any other failure (`EACCES`, `EPERM` under
+/// `hidepid=1`, an LSM denial) hides a process that may still be a member.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_entry_gone(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(3 /* ESRCH */)
+}
+
+/// Collect the members of `pgid` from the processes `pids`, read one at a
+/// time with `read` (`Ok(None)`: the process is gone). The scan is complete
+/// or it fails: an entry that exists but cannot be read makes the whole
+/// scan an error, never a smaller group, since the hidden process may be a
+/// live member (review of #3499).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn collect_group(
+    pgid: i32,
+    pids: impl IntoIterator<Item = i32>,
+    read: impl Fn(i32) -> std::io::Result<Option<ProcInfo>>,
+) -> std::io::Result<Vec<ProcInfo>> {
+    let mut members = Vec::new();
+    for pid in pids {
+        if let Some(p) = read(pid)?
+            && p.pgid == pgid
+        {
+            members.push(p);
+        }
+    }
+    Ok(members)
+}
+
+/// Whether the `/proc` mount in `mountinfo` (the text of
+/// `/proc/self/mountinfo`) hides other users' processes from listing
+/// (`hidepid=2`/`invisible` or `hidepid=4`/`ptraceable`). Then a process
+/// of the run that changed its user is not even listed, so a scan can
+/// never show the group complete. `hidepid=1`/`noaccess` keeps entries
+/// listed (their reads fail, which [`collect_group`] catches).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_hides_pids(mountinfo: &str) -> bool {
+    let mut hides = false;
+    for line in mountinfo.lines() {
+        let Some((pre, post)) = line.split_once(" - ") else {
+            continue;
+        };
+        if pre.split_whitespace().nth(4) != Some("/proc") {
+            continue;
+        }
+        let mut post = post.split_whitespace();
+        if post.next() != Some("proc") {
+            continue;
+        }
+        let opts = post.nth(1).unwrap_or("");
+        // The last matching line is the mount on top.
+        hides = opts.split(',').any(|o| {
+            matches!(
+                o.strip_prefix("hidepid="),
+                Some("2" | "invisible" | "4" | "ptraceable")
+            )
+        });
+    }
+    hides
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{ProcInfo, parse_linux_stat};
+    use super::{ProcInfo, collect_group, linux_entry_gone, parse_linux_stat, proc_hides_pids};
 
     pub fn info(pid: i32) -> Option<ProcInfo> {
-        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-        let (state, pgid, start, name) = parse_linux_stat(&stat)?;
-        Some(ProcInfo {
+        read_info(pid).ok().flatten()
+    }
+
+    /// `Ok(None)` when the process is gone; `Err` when it exists but its
+    /// record cannot be read or parsed.
+    fn read_info(pid: i32) -> std::io::Result<Option<ProcInfo>> {
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if linux_entry_gone(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let (state, pgid, start, name) = parse_linux_stat(&stat).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unparseable /proc/{pid}/stat"),
+            )
+        })?;
+        Ok(Some(ProcInfo {
             pid,
             pgid,
             start,
             zombie: exited(state) && !has_live_thread(pid),
             name,
-        })
+        }))
     }
 
     fn exited(state: char) -> bool {
@@ -158,16 +237,22 @@ mod imp {
         })
     }
 
-    /// Fails only when `/proc` itself cannot be listed. An entry that
-    /// cannot be read is skipped: it exited during the scan, or it is not
-    /// ours to inspect.
+    /// Fails when `/proc` cannot be listed, when it hides other users'
+    /// processes, or when a listed process cannot be read: each could hide
+    /// a live member, so the group is unknown rather than smaller. A
+    /// process that exited during the scan is skipped.
     pub fn group_members(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
-        let rd = std::fs::read_dir("/proc")?;
-        Ok(rd
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+        if proc_hides_pids(&mountinfo) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "/proc is mounted with hidepid: a group scan cannot be complete",
+            ));
+        }
+        let pids: Vec<i32> = std::fs::read_dir("/proc")?
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-            .filter_map(info)
-            .filter(|p| p.pgid == pgid)
-            .collect())
+            .collect();
+        collect_group(pgid, pids, read_info)
     }
 }
 
@@ -532,6 +617,84 @@ mod tests {
             |_| Ok(vec![1]),
         );
         assert!(got.is_err());
+    }
+
+    fn member(pid: i32, pgid: i32) -> ProcInfo {
+        ProcInfo {
+            pid,
+            pgid,
+            start: 100,
+            zombie: false,
+            name: "m".into(),
+        }
+    }
+
+    /// Review item 3 on #3499: a listed process that cannot be read (for
+    /// example `EPERM` under `hidepid=1` after it changed user) may be a
+    /// live member of the run's group, so the scan is an error, never a
+    /// group that looks empty except for the anchor.
+    #[test]
+    fn an_unreadable_process_makes_the_group_scan_an_error() {
+        let read = |pid: i32| match pid {
+            1 => Ok(Some(member(1, 1))),
+            2 => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            _ => Ok(None),
+        };
+        assert!(collect_group(1, [1, 2], read).is_err());
+        let eperm = |_pid: i32| Err(std::io::Error::from_raw_os_error(1));
+        assert!(collect_group(1, [7], eperm).is_err());
+    }
+
+    #[test]
+    fn a_process_that_exited_during_the_scan_is_skipped() {
+        let read = |pid: i32| match pid {
+            1 => Ok(Some(member(1, 1))),
+            2 => Ok(Some(member(2, 9))),
+            _ => Ok(None),
+        };
+        let got = collect_group(1, [1, 2, 3], read).unwrap();
+        assert_eq!(got, vec![member(1, 1)]);
+        assert!(linux_entry_gone(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(linux_entry_gone(&std::io::Error::from_raw_os_error(3)));
+        assert!(!linux_entry_gone(&std::io::Error::from_raw_os_error(1)));
+        assert!(!linux_entry_gone(&std::io::Error::from_raw_os_error(13)));
+    }
+
+    #[test]
+    fn a_proc_mount_that_hides_pids_is_detected() {
+        let line = |opts: &str| {
+            format!(
+                "22 1 0:5 / /sys rw - sysfs sysfs rw\n\
+                 25 1 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc {opts}\n"
+            )
+        };
+        assert!(!proc_hides_pids(&line("rw")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=0")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=1")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=noaccess")));
+        assert!(proc_hides_pids(&line("rw,hidepid=2")));
+        assert!(proc_hides_pids(&line("rw,hidepid=invisible,gid=10")));
+        assert!(proc_hides_pids(&line("rw,hidepid=ptraceable")));
+        // A proc mounted elsewhere does not count; the top /proc mount does.
+        assert!(!proc_hides_pids(
+            "30 1 0:40 / /mnt/proc rw - proc proc rw,hidepid=2\n"
+        ));
+        let over = format!(
+            "{}31 25 0:41 / /proc rw - proc proc rw\n",
+            line("rw,hidepid=2")
+        );
+        assert!(!proc_hides_pids(&over));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_hosts_own_group_scan_is_complete() {
+        let me = std::process::id() as i32;
+        let pgid = info(me).expect("own process").pgid;
+        let got = group_members(pgid).expect("scan of a normal /proc");
+        assert!(got.iter().any(|p| p.pid == me));
     }
 
     #[test]
