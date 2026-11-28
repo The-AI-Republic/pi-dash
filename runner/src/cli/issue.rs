@@ -50,8 +50,9 @@ pub enum IssueCommand {
     /// another run is active on the issue: do not push to `branch` — comment
     /// on the issue instead. A run checking its own issue
     /// (`PIDASH_RUN_ID` == `active_run.id`) gets `busy: false,
-    /// owned_by_caller: true`. Read-only: it takes no lock. Always exits 0
-    /// on a successful read; check `busy`.
+    /// owned_by_caller: true`. Read-only: it takes no lock. Exits 0 on a
+    /// successful read (check `busy`); fails when the server does not report
+    /// `active_run`, since ownership then cannot be verified.
     Busy {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
@@ -607,8 +608,23 @@ async fn cmd_busy(client: &ApiClient, identifier: &str) -> Result<(), CliError> 
 
 /// One by-identifier GET, then [`busy_report`] against the caller's own
 /// run id (`PIDASH_RUN_ID`).
+///
+/// A server that reports run ownership always sends the `active_run` key on
+/// a single-issue read (`null` when idle). When the key is missing the server
+/// predates it, and an active run would be invisible: fail rather than call
+/// the branch free.
 pub async fn issue_busy(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
     let issue = resolve_issue(client, identifier).await?;
+    if issue.raw.get("active_run").is_none() {
+        return Err(CliError::new(
+            EXIT_SERVER,
+            format!(
+                "cannot verify who owns the branch of {identifier}: the server's issue read has no \
+                 active_run field (the server predates it), so an active run would not show. Do not \
+                 push on this result; comment on the issue instead"
+            ),
+        ));
+    }
     Ok(busy_report(
         &issue.raw,
         identifier,
@@ -618,8 +634,8 @@ pub async fn issue_busy(client: &ApiClient, identifier: &str) -> Result<Value, C
 
 /// The `pidash issue busy` document, built from the issue-detail payload.
 ///
-/// `active_run` is the server's block verbatim (`null` when the payload has
-/// none — no run occupies the slot, or the server predates the block).
+/// `active_run` is the server's block verbatim (`null` when no run occupies
+/// the slot).
 /// `branch` is the run's working branch when the server reports one
 /// (`active_run.branch`), else the issue's `git_work_branch`, else `null`.
 /// Any active run other than the caller's own makes the branch busy, from

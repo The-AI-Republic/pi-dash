@@ -2877,11 +2877,10 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
 
 const BUSY_RUN: &str = "c5752d81-5007-42f7-b633-863dc50dbc05";
 
+/// An issue-detail body. `None` renders `"active_run":null` (an idle issue
+/// on a server that reports the block).
 fn busy_issue_body(active_run: Option<&str>, git_work_branch: &str) -> String {
-    let run = match active_run {
-        Some(block) => format!(r#","active_run":{block}"#),
-        None => String::new(),
-    };
+    let run = format!(r#","active_run":{}"#, active_run.unwrap_or("null"));
     format!(
         r#"{{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler","git_work_branch":"{git_work_branch}"{run}}}"#
     )
@@ -2980,6 +2979,22 @@ async fn issue_busy_is_free_without_an_active_run() {
     assert_eq!(out["owned_by_caller"], serde_json::json!(false));
     assert_eq!(out["active_run"], serde_json::Value::Null);
     assert_eq!(out["branch"], "pi-dash/eng-7");
+}
+
+#[tokio::test]
+async fn issue_busy_refuses_to_call_the_branch_free_without_an_active_run_key() {
+    // A server that predates the block (or a payload narrowed by
+    // `?fields=`) omits `active_run` even while a run is active: the CLI
+    // cannot tell that from an idle issue, so it must not say "free".
+    let body = busy_issue_body(None, "pi-dash/eng-7").replace(r#","active_run":null"#, "");
+    assert!(!body.contains("active_run"));
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let err = pidash::cli::issue::issue_busy(&client(&fake), "ENG-7")
+        .await
+        .expect_err("ownership cannot be verified");
+    assert_eq!(err.exit_code, EXIT_SERVER);
+    assert!(err.message.contains("cannot verify"), "{}", err.message);
+    assert!(err.message.contains("active_run"), "{}", err.message);
 }
 
 // ---- `state list` project forms (PDASHOSS01-403) ----
