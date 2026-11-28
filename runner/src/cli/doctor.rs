@@ -488,6 +488,10 @@ async fn run_agent_checks(
     }
 }
 
+/// How long a `<binary> --version` probe may run before doctor gives up on
+/// it (same bound as the other short `claude` probes).
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Shared `<binary> --version` check used for every supported agent binary
 /// (`codex`, `claude`, `cursor-agent`, and `acpx`), each of which prints a
 /// short version line on stdout and exits 0 on success.
@@ -495,9 +499,26 @@ async fn run_agent_checks(
 /// Runs through the same platform spawn helper the daemon uses so this check
 /// reflects what the daemon will actually see at spawn time.
 async fn check_version(binary: &str) -> Result<String> {
+    check_version_within(binary, VERSION_PROBE_TIMEOUT).await
+}
+
+/// [`check_version`] with an explicit bound. The child is killed when it
+/// overruns `limit` or when the caller drops this future (the daemon's
+/// doctor budget does), so a hung binary never outlives the probe.
+async fn check_version_within(binary: &str, limit: std::time::Duration) -> Result<String> {
     let mut cmd = login_shell_command(binary, &["--version"], None);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd.output().await?;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(limit, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{binary} --version did not finish within {}s",
+                limit.as_secs()
+            )
+        })??;
     if !out.status.success() {
         anyhow::bail!(
             "{binary} --version exited {}: {}",
@@ -837,22 +858,76 @@ fn read_settings_env_auth(path: &Path) -> ConfigKey {
     })
 }
 
-/// Whether the settings file at `path` enables a cloud-provider switch in
-/// its `env` block (Claude's boolean semantics: `"0"`/`"false"` are off).
-fn read_settings_env_provider(path: &Path) -> ConfigKey {
-    read_config_with(path, |v| {
-        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
-            return false;
+/// Whether the effective Claude settings enable a cloud-provider switch.
+///
+/// `paths` are ordered lowest to highest precedence (user settings, then
+/// managed settings). Claude Code merges the settings `env` blocks key by
+/// key with the higher file winning, so each switch takes its value from
+/// the highest-precedence file that sets it, explicit `"0"`/`false`
+/// included. Returns the file whose enabled value is in force; when an
+/// unreadable file outranks the deciding one, the switch cannot be ruled
+/// out (an enabled lower value stays `Found`, otherwise `Unreadable`).
+fn resolve_settings_provider(paths: &[PathBuf]) -> ConfigKey {
+    // Highest precedence first.
+    let envs: Vec<(&PathBuf, SettingsEnv)> = paths
+        .iter()
+        .rev()
+        .map(|p| (p, read_settings_env(p)))
+        .collect();
+    let mut unreadable: Option<&PathBuf> = None;
+    for var in CLAUDE_THIRD_PARTY_ENV_VARS {
+        for (path, env) in &envs {
+            match env {
+                SettingsEnv::Unreadable => {
+                    unreadable.get_or_insert(path);
+                }
+                SettingsEnv::Env(map) if map.contains_key(*var) => {
+                    if setting_truthy(&map[*var]) {
+                        return ConfigKey::Found((*path).clone());
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    unreadable.map_or(ConfigKey::Absent, |p| ConfigKey::Unreadable(p.clone()))
+}
+
+/// The `env` block of one Claude settings file.
+enum SettingsEnv {
+    Env(serde_json::Map<String, serde_json::Value>),
+    /// Missing file, or no `env` block.
+    None,
+    /// The file exists but could not be read or parsed.
+    Unreadable,
+}
+
+fn read_settings_env(path: &Path) -> SettingsEnv {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return if path.exists() {
+            SettingsEnv::Unreadable
+        } else {
+            SettingsEnv::None
         };
-        CLAUDE_THIRD_PARTY_ENV_VARS
-            .iter()
-            .any(|var| match env.get(*var) {
-                Some(serde_json::Value::String(s)) => claude_env_truthy(s),
-                Some(serde_json::Value::Bool(b)) => *b,
-                Some(serde_json::Value::Number(n)) => claude_env_truthy(&n.to_string()),
-                _ => false,
-            })
-    })
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(serde_json::Value::Object(mut v)) => match v.remove("env") {
+            Some(serde_json::Value::Object(env)) => SettingsEnv::Env(env),
+            _ => SettingsEnv::None,
+        },
+        _ => SettingsEnv::Unreadable,
+    }
+}
+
+/// Claude's boolean semantics for a settings `env` value.
+fn setting_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => claude_env_truthy(s),
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => claude_env_truthy(&n.to_string()),
+        _ => false,
+    }
 }
 
 fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
@@ -1079,7 +1154,7 @@ fn build_claude_probe(
         credentials,
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
         settings_env_var: scan_configs(&settings, read_settings_env_auth),
-        settings_provider: scan_configs(&settings, read_settings_env_provider),
+        settings_provider: resolve_settings_provider(&settings),
         stored_api_key: scan_config_key(global.as_slice(), "primaryApiKey"),
         is_macos,
     }
@@ -2428,5 +2503,145 @@ mod tests {
             }
             other => panic!("expected budget error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn managed_settings_override_user_provider_switch() {
+        // Managed settings take precedence over user settings, key by key,
+        // so an explicit "0" in managed settings switches Bedrock off even
+        // when the user's settings turn it on.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let user = home.path().join(".claude").join("settings.json");
+        let managed_dir = tempfile::tempdir().unwrap();
+        let managed = managed_dir.path().join("managed-settings.json");
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let logged_out = || {
+            Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            })
+        };
+        std::fs::write(&user, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#).unwrap();
+        std::fs::write(&managed, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"0"}}"#).unwrap();
+        let p = build_claude_probe(logged_out(), &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_provider, ConfigKey::Absent);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+
+        // Boolean false in managed settings is an explicit "off" too.
+        std::fs::write(&managed, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":false}}"#).unwrap();
+        let p = build_claude_probe(logged_out(), &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_provider, ConfigKey::Absent);
+
+        // The reverse: user off, managed on, routes to Bedrock.
+        std::fs::write(&user, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"0"}}"#).unwrap();
+        std::fs::write(&managed, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#).unwrap();
+        let p = build_claude_probe(logged_out(), &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_provider, ConfigKey::Found(managed.clone()));
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+
+        // Managed settings that do not mention the switch leave the user's
+        // value in force.
+        std::fs::write(&user, r#"{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}"#).unwrap();
+        std::fs::write(&managed, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"0"}}"#).unwrap();
+        let p = build_claude_probe(logged_out(), &env, std::slice::from_ref(&managed), false);
+        assert_eq!(p.settings_provider, ConfigKey::Found(user.clone()));
+
+        // An unreadable managed file could override the user's switch, so
+        // the switch stays "could not verify", never "not logged in".
+        std::fs::write(&managed, "{not json").unwrap();
+        let p = build_claude_probe(logged_out(), &env, std::slice::from_ref(&managed), false);
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+    }
+
+    /// A fake agent binary that records its pid and hangs on `--version`.
+    #[cfg(unix)]
+    fn hanging_binary(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let pid = dir.join("pid");
+        let bin = dir.join("agent");
+        let script = format!(
+            "#!/bin/sh\necho $$ > '{pid}'\nexec sleep 300\n",
+            pid = pid.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, pid)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_pid(file: &Path) -> i32 {
+        for _ in 0..200 {
+            if let Ok(s) = std::fs::read_to_string(file)
+                && let Ok(pid) = s.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("fake binary never started");
+    }
+
+    #[cfg(unix)]
+    async fn is_gone(pid: i32) -> bool {
+        // Reaped or a zombie: either way the probe no longer runs.
+        for _ in 0..100 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout);
+            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_is_killed_when_doctor_is_cancelled() {
+        // The daemon's doctor budget drops `execute`; a hung `--version`
+        // must not outlive it.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, pid_file) = hanging_binary(dir.path());
+        let bin = bin.display().to_string();
+        let probe = tokio::spawn(async move { check_version(&bin).await });
+        let pid = wait_for_pid(&pid_file).await;
+        probe.abort();
+        let _ = probe.await;
+        let gone = is_gone(pid).await;
+        if !gone {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert!(gone, "version probe {pid} survived cancellation");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_times_out_and_kills_a_hung_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, pid_file) = hanging_binary(dir.path());
+        let started = std::time::Instant::now();
+        let err = check_version_within(
+            &bin.display().to_string(),
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert!(err.to_string().contains("did not finish"), "{err}");
+        let pid = wait_for_pid(&pid_file).await;
+        assert!(is_gone(pid).await, "hung version probe {pid} still running");
     }
 }
