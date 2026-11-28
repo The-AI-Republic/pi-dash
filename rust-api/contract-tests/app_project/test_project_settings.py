@@ -1,9 +1,10 @@
 """Contract tests: projects.settings reads and PATCH (NEWPIDASH-278).
 
 Full-serializer reads render the validated settings with defaults
-filled in (DIFF-53: every known key with its default on Rust —
-``issue_run_policy`` and, since the lean agent workflow, ``agent_stages``
-— the raw stored ``{}`` on Django); the
+filled in (DIFF-53: ``issue_run_policy`` defaults to
+``creator_and_assignees`` on Rust, the raw stored ``{}`` on Django; DIFF-51:
+Rust fills every other known key, such as ``agent_stages``, with its
+default); the
 compact ``.values()`` list projection has no settings key, like the
 Django projection. PATCH accepts a nested ``settings`` object and
 merges it atomically. Django's app serializers use
@@ -127,9 +128,10 @@ def test_issue_run_policy_admin_can_change(world):
         url, json={"settings": {"issue_run_policy": "project_members"}}
     )
     assert resp.status_code == expect("DIFF-51", django=200, rust=200)
-    # DIFF-53: Rust fills the keys not written (agent_stages) with defaults.
+    # DIFF-51: Rust reads fill the keys not written (agent_stages) with
+    # their defaults.
     assert resp.json()["settings"] == expect(
-        "DIFF-53",
+        "DIFF-51",
         django={"issue_run_policy": "project_members"},
         rust={"issue_run_policy": "project_members", "agent_stages": AGENT_STAGES_DEFAULT},
     )
@@ -203,7 +205,7 @@ def test_issue_run_policy_roundtrip_default(world):
     )
     assert resp.status_code == 200, resp.text[:500]
     assert resp.json()["settings"] == expect(
-        "DIFF-53",
+        "DIFF-51",
         django={"issue_run_policy": "creator_and_assignees"},
         rust=RUST_DEFAULT_SETTINGS,
     )
