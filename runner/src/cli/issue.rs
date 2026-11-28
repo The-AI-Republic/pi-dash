@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
 use crate::api_client::{
@@ -45,7 +45,11 @@ pub enum IssueCommand {
     },
     /// Create a new work item under a project. If `--project` is omitted,
     /// the CLI uses PIDASH_PROJECT_ID, local config default_project, or
-    /// the workspace default project from Pi Dash cloud.
+    /// the workspace default project from Pi Dash cloud. Prints the created
+    /// work item as JSON: the server payload (`id`, `project`, `sequence_id`,
+    /// `name`, `state`, …, and `url` when the deployment has a web base URL)
+    /// plus `identifier` (`PROJ-123`). `--output id` prints only the
+    /// identifier, for scripts.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
@@ -275,6 +279,19 @@ pub struct CreateArgs {
     /// `<name>`); without `--runner` this clears any dedicated runner.
     #[arg(long)]
     pub pod: Option<String>,
+
+    /// What to print: `json` (default) — the created work item, including
+    /// `identifier`, `sequence_id` and `url`; `id` — only the identifier
+    /// (`PROJ-123`) and a newline, for scripts.
+    #[arg(long, value_enum, default_value_t = CreateOutput::Json)]
+    pub output: CreateOutput,
+}
+
+/// Output shape of `pidash issue create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CreateOutput {
+    Json,
+    Id,
 }
 
 /// The description source shared by `create` and `patch`: inline or from a
@@ -355,6 +372,9 @@ pub struct PatchArgs {
     pub identifier: String,
 
     /// Target state — either the exact state name (case-insensitive) or a state UUID.
+    /// Agent runs start on a state *change*: naming the state the issue is
+    /// already in is not expected to queue a run, and the output then carries
+    /// an advisory `state_unchanged` object pointing at `pidash issue run-ai`.
     #[arg(long)]
     pub state: Option<String>,
 
@@ -401,7 +421,6 @@ pub struct PatchArgs {
     /// other label flags.
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
-
 
     /// Record the git branch this issue's work lives on, so later agent runs
     /// check it out instead of cutting a new one. Set it only after the
@@ -616,12 +635,98 @@ async fn cmd_create(
         "workspaces/{}/projects/{}/work-items/",
         client.env.workspace_slug, project_ref
     );
+    // The POST alone gates creation (an unknown project is its 404), so
+    // create needs no permission beyond the one the server checks for it.
     let resp = client.post(&path, &Value::Object(body)).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
+    let created = add_identifier(client, resp).await;
+    match args.output {
+        CreateOutput::Json => println!(
+            "{}",
+            serde_json::to_string(&created).expect("serialize JSON value")
+        ),
+        CreateOutput::Id => {
+            let identifier = created
+                .get("identifier")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+                    CliError::new(
+                        EXIT_SERVER,
+                        format!(
+                            "work item {id} was created, but its identifier could not be \
+                             determined from the response; do not retry the create"
+                        ),
+                    )
+                })?;
+            println!("{identifier}");
+        }
+    }
     Ok(())
+}
+
+/// Add the `PROJ-123` `identifier` to a created work item's payload. The key
+/// is taken, in order, from a server-sent `identifier`, from the item's own
+/// `url` (`.../browse/PROJ-123`), or, when the deployment sends no `url`,
+/// from a read of the item's project after the POST. Taking it from the
+/// created item keeps it in step with the `url` even if the project's
+/// identifier changes around the write. If none of these is available the
+/// payload is returned without an `identifier` and a note goes to stderr:
+/// the item exists, so this is not a failure of the create.
+async fn add_identifier(client: &ApiClient, created: Value) -> Value {
+    if created.get("identifier").is_some() {
+        return created;
+    }
+    let Some(seq) = created.get("sequence_id").and_then(Value::as_u64) else {
+        return created;
+    };
+    if let Some(prefix) = created
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(|url| project_identifier_from_url(url, seq))
+    {
+        let prefix = prefix.to_string();
+        return with_identifier(created, &prefix);
+    }
+    let project_ref = created
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(project_ref) = project_ref {
+        match project::get_project(client, &project_ref).await {
+            Ok(project) => return with_identifier(created, &project.identifier),
+            Err(e) => eprintln!(
+                "note: the work item was created, but its identifier could not be \
+                 built: reading project {project_ref} failed: {}",
+                e.message
+            ),
+        }
+    }
+    created
+}
+
+/// The `PROJ` in a created item's browse `url` (`.../browse/PROJ-123`),
+/// provided the key there ends in the item's own `sequence_id`.
+fn project_identifier_from_url(url: &str, sequence_id: u64) -> Option<&str> {
+    let key = url.trim_end_matches('/').rsplit_once("/browse/")?.1;
+    let (prefix, seq) = key.rsplit_once('-')?;
+    (!prefix.is_empty() && !prefix.contains('/') && seq == sequence_id.to_string())
+        .then_some(prefix)
+}
+
+/// Add `identifier` = `<project_identifier>-<sequence_id>` to a created work
+/// item's payload. A payload that already has an `identifier`, or has no
+/// `sequence_id`, is returned unchanged.
+fn with_identifier(mut created: Value, project_identifier: &str) -> Value {
+    if let Some(obj) = created.as_object_mut()
+        && !obj.contains_key("identifier")
+        && let Some(seq) = obj.get("sequence_id").and_then(Value::as_u64)
+    {
+        obj.insert(
+            "identifier".into(),
+            Value::String(format!("{project_identifier}-{seq}")),
+        );
+    }
+    created
 }
 
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
@@ -1342,7 +1447,6 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
-
     let runner = if args.clear_runner {
         RunnerPatch::Clear
     } else if let Some(ref runner) = args.runner {
@@ -1370,6 +1474,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         WorkTypePatch::Unchanged
     };
 
+    let state_uuid_req = state_uuid.clone();
     let body = build_patch_body(
         args.title.as_deref(),
         description.as_deref(),
@@ -1387,11 +1492,70 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.patch(&path, &Value::Object(body)).await?;
+    let resp = annotate_state_patch(
+        resp,
+        &issue.raw,
+        state_uuid_req.as_deref(),
+        &args.identifier,
+    );
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// The state UUID on a work-item payload: a plain UUID string, or the `id`
+/// of an expanded `state` object.
+fn payload_state_id(raw: &Value) -> Option<&str> {
+    let state = raw.get("state")?;
+    state
+        .as_str()
+        .or_else(|| state.get("id").and_then(Value::as_str))
+}
+
+/// Flag a `--state` patch that named the state the issue was already in.
+///
+/// The server starts agent work on a state *transition*; a patch that leaves
+/// the state where it was changes nothing, so no run is queued. Without a
+/// note the caller sees the same 200 as a real move and waits for a run that
+/// never comes — typically when re-patching an In Progress issue whose
+/// earlier run stopped itself to wait on a blocker (PDASHOSS01-406). Adds a
+/// `state_unchanged` object (`dispatch_expected: false`, reason, the state,
+/// and a hint naming `run-ai`) and leaves the server payload otherwise intact.
+/// Says nothing when no state was requested or the prior state is unknown.
+///
+/// Advisory only: the comparison is against the state read by the pre-patch
+/// GET, not the server's own prev/new check at save time. If another client
+/// moved the issue in between, this patch is a real transition and may queue
+/// a run, so the note says "expected", never that nothing was dispatched.
+fn annotate_state_patch(
+    mut resp: Value,
+    prior: &Value,
+    requested_state: Option<&str>,
+    identifier: &str,
+) -> Value {
+    let (Some(requested), Some(before)) = (requested_state, payload_state_id(prior)) else {
+        return resp;
+    };
+    if !requested.eq_ignore_ascii_case(before) {
+        return resp;
+    }
+    if let Value::Object(map) = &mut resp {
+        map.insert(
+            "state_unchanged".to_string(),
+            serde_json::json!({
+                // Advisory (see above): derived from the pre-patch read.
+                "dispatch_expected": false,
+                "reason": "state_unchanged",
+                "state": before,
+                "hint": format!(
+                    "The work item was already in this state when read just before the patch, so this patch is not expected to fire a state transition or queue an agent run (unless another client changed the state in between). If no run is active and you are allowed to start runs, `pidash issue run-ai {identifier}` starts one."
+                ),
+            }),
+        );
+    }
+    resp
 }
 
 /// Work out the final label set a `pidash issue patch` should send, or `None`
@@ -1855,6 +2019,55 @@ pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Val
 
 #[cfg(test)]
 mod tests {
+    // ---- PDASHOSS01-406: a same-state patch dispatches nothing -----------
+
+    #[test]
+    fn same_state_patch_is_annotated_with_run_ai_hint() {
+        // The issue's earlier run stopped itself waiting on a blocker and left
+        // it In Progress; the caller re-patches it to In Progress. The server
+        // fires no transition (the state did not change), so the output must
+        // say so and point at run-ai.
+        let in_progress = "11111111-2222-3333-4444-555555555555";
+        let prior = json!({"id": "i1", "state": in_progress});
+        let resp = json!({"id": "i1", "state": in_progress, "name": "Task"});
+        let out = annotate_state_patch(resp, &prior, Some(&in_progress.to_uppercase()), "ENG-7");
+        let note = &out["state_unchanged"];
+        assert_eq!(note["dispatch_expected"], json!(false));
+        assert_eq!(note["reason"], json!("state_unchanged"));
+        assert_eq!(note["state"], json!(in_progress));
+        let hint = note["hint"].as_str().unwrap();
+        assert!(hint.contains("pidash issue run-ai ENG-7"), "{hint}");
+        // The server payload itself is kept intact.
+        assert_eq!(out["name"], json!("Task"));
+    }
+
+    #[test]
+    fn same_state_patch_reads_expanded_state_objects() {
+        let s = "11111111-2222-3333-4444-555555555555";
+        let prior = json!({"state": {"id": s, "name": "In Progress"}});
+        let out = annotate_state_patch(json!({"state": s}), &prior, Some(s), "ENG-7");
+        assert!(out.get("state_unchanged").is_some());
+    }
+
+    #[test]
+    fn real_state_change_or_no_state_flag_is_not_annotated() {
+        let todo = "aaaaaaaa-2222-3333-4444-555555555555";
+        let in_progress = "11111111-2222-3333-4444-555555555555";
+        let prior = json!({"state": todo});
+        let changed = annotate_state_patch(
+            json!({"state": in_progress}),
+            &prior,
+            Some(in_progress),
+            "ENG-7",
+        );
+        assert!(changed.get("state_unchanged").is_none());
+        let no_state = annotate_state_patch(json!({"state": todo}), &prior, None, "ENG-7");
+        assert!(no_state.get("state_unchanged").is_none());
+        // Unknown prior state: say nothing rather than guess.
+        let unknown = annotate_state_patch(json!({"state": todo}), &json!({}), Some(todo), "ENG-7");
+        assert!(unknown.get("state_unchanged").is_none());
+    }
+
     use super::*;
     use clap::Parser;
     use serde_json::json;
@@ -1905,7 +2118,10 @@ mod tests {
     fn pagination_note_stays_silent_when_the_field_is_absent() {
         // Servers predating `next_page_results` in the envelope: a complete
         // list and a truncated one are indistinguishable, so say nothing.
-        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
+        assert_eq!(
+            pagination_note(&json!({"count": 1000, "results": []})),
+            None
+        );
     }
 
     #[test]
@@ -2109,6 +2325,79 @@ mod tests {
         ])
         .expect_err("--description and --description-file are mutually exclusive");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn create_output_defaults_to_json_and_accepts_id() {
+        let parsed = CreateArgsHarness::try_parse_from(["create", "--title", "T"]).unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Json);
+        let parsed =
+            CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "id"])
+                .unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Id);
+        let err = CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "yaml"])
+            .expect_err("unknown output");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn project_identifier_from_url_reads_the_browse_key() {
+        let url = "https://app.example/acme/browse/ENG-123";
+        assert_eq!(project_identifier_from_url(url, 123), Some("ENG"));
+        assert_eq!(
+            project_identifier_from_url(&format!("{url}/"), 123),
+            Some("ENG")
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ÉQUIPE-7", 7),
+            Some("ÉQUIPE")
+        );
+    }
+
+    #[test]
+    fn project_identifier_from_url_rejects_other_shapes() {
+        // Key for a different sequence, no browse segment, no prefix.
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG-12", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/ENG-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG/-123", 123),
+            None
+        );
+    }
+
+    #[test]
+    fn with_identifier_builds_proj_seq_and_keeps_the_payload() {
+        let created = with_identifier(
+            serde_json::json!({"id": "u", "sequence_id": 7, "url": "https://x/a/browse/ENG-7"}),
+            "ENG",
+        );
+        assert_eq!(
+            created,
+            serde_json::json!({
+                "id": "u",
+                "sequence_id": 7,
+                "url": "https://x/a/browse/ENG-7",
+                "identifier": "ENG-7",
+            })
+        );
+    }
+
+    #[test]
+    fn with_identifier_leaves_server_identifier_and_missing_sequence_alone() {
+        let server = serde_json::json!({"sequence_id": 7, "identifier": "OPS-7"});
+        assert_eq!(with_identifier(server.clone(), "ENG"), server);
+        let no_seq = serde_json::json!({"id": "u"});
+        assert_eq!(with_identifier(no_seq.clone(), "ENG"), no_seq);
     }
 
     #[test]
