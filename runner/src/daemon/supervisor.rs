@@ -1672,7 +1672,8 @@ pub(crate) fn with_previous_exit(detail: &str, previous_exit: Option<&str>) -> S
 /// run with the cryptic ``reaped by heartbeat: ... in_flight_run=
 /// (none)`` message after the daemon restarts and the next session
 /// Hello legitimately reports null. This sends a clean terminal
-/// signal instead.
+/// signal instead. A run that already finished and is only waiting on
+/// its run-end cleanup gets its held result instead of the failure.
 ///
 /// Returns the count of runs we successfully drained. Send errors are
 /// logged at warn but do not abort the drain — one runner's
@@ -1703,50 +1704,67 @@ async fn drain_in_flight_runs(
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
-    let snapshot: Vec<(uuid::Uuid, Option<uuid::Uuid>, RunnerOut)> = {
+    let now = Utc::now();
+    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
+    // One report per in-flight run: the run's own result when it already
+    // finished and only its run-end cleanup is pending (held in the
+    // runner's state, PDASHOSS01-417), otherwise a DaemonRestart failure.
+    // Taking the held reports also stops the worker from sending a second
+    // one if it finishes cleanup before the process exits.
+    let snapshot: Vec<(uuid::Uuid, uuid::Uuid, ClientMsg, RunnerOut)> = {
         let guard = runners.read().await;
         guard
             .iter()
-            .map(|(rid, (out, state, _))| (*rid, *state.rx_in_flight.borrow(), out.clone()))
+            .filter_map(|(rid, (out, state, _))| {
+                let run_id = (*state.rx_in_flight.borrow())?;
+                let msg = state
+                    .take_terminal_for_drain()
+                    .into_iter()
+                    .find(|m| terminal_run_id(m) == Some(run_id))
+                    .unwrap_or_else(|| ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::DaemonRestart,
+                        detail: Some(detail.clone()),
+                        ended_at: now,
+                        tokens: None,
+                        model: None,
+                    });
+                Some((*rid, run_id, msg, out.clone()))
+            })
             .collect()
     };
-    let now = Utc::now();
-    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
     // Split by ownership: managed queue attempts persist their exact
-    // DaemonRestart payload to the SQLite terminal outbox before sending;
-    // legacy in-flight runs use the drain journal (unchanged).
+    // payload to the SQLite terminal outbox before sending; legacy
+    // in-flight runs journal a RunFailed (a held RunCompleted or
+    // RunCancelled is sent best-effort, as the worker itself would).
     let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
     let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
-    for (runner_id, in_flight, _) in &snapshot {
-        let Some(run_id) = in_flight else {
-            continue;
-        };
+    for (runner_id, run_id, msg, _) in &snapshot {
         let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
         if is_managed {
-            let msg = ClientMsg::RunFailed {
-                run_id: *run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: Some(detail.clone()),
-                ended_at: now,
-                tokens: None,
-                model: None,
-            };
-            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            let payload = serde_json::to_vec(msg).unwrap_or_default();
             if let Some(c) = coord.as_ref() {
                 let key = format!("drain-{}", run_id);
                 let _ = c.persist_terminal(*run_id, &payload, &key);
             }
             managed.push((*runner_id, *run_id));
-        } else {
+        } else if let ClientMsg::RunFailed {
+            reason,
+            detail: failed_detail,
+            ended_at,
+            ..
+        } = msg
+        {
+            let restart = matches!(reason, FailureReason::DaemonRestart);
             pending.push(drain_journal::PendingRunFailure {
                 runner_id: *runner_id,
                 run_id: *run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: detail.clone(),
-                ended_at: now,
+                reason: *reason,
+                detail: failed_detail.clone().unwrap_or_default(),
+                ended_at: *ended_at,
                 recorded_at: now,
-                trigger: Some(trigger.as_str().to_string()),
-                previous_exit: previous_exit.clone(),
+                trigger: restart.then(|| trigger.as_str().to_string()),
+                previous_exit: if restart { previous_exit.clone() } else { None },
             });
         }
     }
@@ -1772,43 +1790,32 @@ async fn drain_in_flight_runs(
             Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
         }
     }
-    let drains = snapshot
-        .into_iter()
-        .filter_map(|(runner_id, in_flight, out)| {
-            let run_id = in_flight?;
-            let msg = ClientMsg::RunFailed {
-                run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: Some(detail.clone()),
-                ended_at: now,
-                tokens: None,
-                model: None,
-            };
-            Some(async move {
-                // Per-attempt timeout so one stuck cloud client can't keep
-                // a parallel sibling from completing in time.
-                match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
-                    RunFailedSend::Delivered => {
-                        tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
-                        Some(run_id)
-                    }
-                    RunFailedSend::Failed(e) => {
-                        tracing::warn!(
-                            %runner_id, %run_id,
-                            "drain send failed (journaled for replay on next start): {e:#}"
-                        );
-                        None
-                    }
-                    RunFailedSend::TimedOut => {
-                        tracing::warn!(
-                            %runner_id, %run_id,
-                            "drain send timed out at 2s (journaled for replay on next start)"
-                        );
-                        None
-                    }
+    let drains = snapshot.into_iter().map(|(runner_id, run_id, msg, out)| {
+        async move {
+            // Per-attempt timeout so one stuck cloud client can't keep
+            // a parallel sibling from completing in time.
+            match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
+                RunFailedSend::Delivered => {
+                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                    Some(run_id)
                 }
-            })
-        });
+                RunFailedSend::Failed(e) => {
+                    tracing::warn!(
+                        %runner_id, %run_id,
+                        "drain send failed (journaled for replay on next start): {e:#}"
+                    );
+                    None
+                }
+                RunFailedSend::TimedOut => {
+                    tracing::warn!(
+                        %runner_id, %run_id,
+                        "drain send timed out at 2s (journaled for replay on next start)"
+                    );
+                    None
+                }
+            }
+        }
+    });
     let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(drains)
         .await
         .into_iter()
@@ -1841,6 +1848,17 @@ async fn drain_in_flight_runs(
         }
     }
     delivered.len()
+}
+
+/// The run a terminal report (`RunCompleted`/`RunFailed`/`RunCancelled`)
+/// is about; `None` for any other message.
+fn terminal_run_id(msg: &ClientMsg) -> Option<uuid::Uuid> {
+    match msg {
+        ClientMsg::RunCompleted { run_id, .. }
+        | ClientMsg::RunFailed { run_id, .. }
+        | ClientMsg::RunCancelled { run_id, .. } => Some(*run_id),
+        _ => None,
+    }
 }
 
 /// Outcome of one bounded `RunFailed` send attempt. Shared by the
@@ -4630,13 +4648,6 @@ fn clean_gateway_failure_detail(raw: &str) -> String {
     gateway_refusal_detail(status, text)
 }
 
-/// Lock the held-terminal slot; a poisoned lock still holds valid data.
-fn lock_held(
-    held: &std::sync::Mutex<Option<HeldTerminal>>,
-) -> std::sync::MutexGuard<'_, Option<HeldTerminal>> {
-    held.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// Owns one `Assign`'s lifecycle. Spawned as a task from `RunnerLoop`, so the
 /// message loop stays live and can deliver Cancel / Decide frames to us via
 /// `self.cancel` and `self.approvals`.
@@ -4658,24 +4669,16 @@ struct AssignWorker {
     run_end: RunEnd,
 }
 
-/// Run-end ordering state of an [`AssignWorker`] (PDASHOSS01-417): the
-/// terminal report is held until run-end cleanup is done, and a run whose
-/// cleanup is unresolved keeps the runner reserved.
+/// Run-end state of an [`AssignWorker`] (PDASHOSS01-417). The terminal
+/// report itself is held in the runner's [`StateHandle`]
+/// (`hold_terminal`), where the shutdown drain can reach it.
 #[derive(Default)]
 struct RunEnd {
-    /// While `Some`, terminal reports (and clearing the in-flight run) are
-    /// collected here instead of taking effect; see [`AssignWorker::send`].
-    held: std::sync::Mutex<Option<HeldTerminal>>,
     /// The run's unit when cleanup left processes it could not account
     /// for. While set, the worker does not finish, so the runner loop keeps
-    /// the run in flight and rejects new assignments and chat.
+    /// the run in flight and rejects new assignments and chat; the state's
+    /// cleanup reservation turns away local (desktop) chat.
     unresolved: Option<RunGroup>,
-}
-
-#[derive(Default)]
-struct HeldTerminal {
-    msgs: Vec<ClientMsg>,
-    clear_current_run: bool,
 }
 
 struct RunMetadata {
@@ -4818,27 +4821,34 @@ impl AssignWorker {
         // when workspace resolution never produced one; then there is no
         // hook to run either.
         let outcome = run_cleanup(&mut guard).await;
-        self.release_terminal().await;
         if outcome == CleanupOutcome::Unresolved {
-            self.run_end.unresolved = Some(guard);
+            self.reserve_unresolved(guard);
         }
+        self.release_terminal().await;
         result
     }
 
-    /// Start holding terminal reports (see [`RunEnd::held`]).
-    fn hold_terminal(&self) {
-        *lock_held(&self.run_end.held) = Some(HeldTerminal::default());
+    /// Keep the runner reserved for a run whose cleanup is unresolved. Set
+    /// before the run's report goes out, so local chat never sees the
+    /// working copy free while the run's processes may still use it.
+    fn reserve_unresolved(&mut self, guard: RunGroup) {
+        self.state.set_cleanup_reserved(true);
+        self.run_end.unresolved = Some(guard);
     }
 
-    /// Stop holding and send what was held, in order.
+    /// Start holding terminal reports (see [`StateHandle::hold_terminal`]).
+    fn hold_terminal(&self) {
+        self.state.hold_terminal();
+    }
+
+    /// Stop holding and send what was held, in order. Nothing is sent when
+    /// the shutdown drain already reported the run.
     async fn release_terminal(&self) {
-        let Some(held) = lock_held(&self.run_end.held).take() else {
-            return;
-        };
-        for msg in held.msgs {
+        let (msgs, clear_current_run) = self.state.release_terminal();
+        for msg in msgs {
             self.send(msg).await;
         }
-        if held.clear_current_run {
+        if clear_current_run {
             self.state.set_current_run(None).await;
         }
     }
@@ -4847,18 +4857,19 @@ impl AssignWorker {
     /// held: the shutdown drain reports runs that are still in flight, so a
     /// run whose report is held must stay visible to it.
     async fn clear_current_run(&self) {
-        if let Some(held) = lock_held(&self.run_end.held).as_mut() {
-            held.clear_current_run = true;
-            return;
+        if !self.state.defer_clear_current_run() {
+            self.state.set_current_run(None).await;
         }
-        self.state.set_current_run(None).await;
     }
 
     /// Keep the runner reserved while the finished run's cleanup is
     /// unresolved: re-check every [`UNRESOLVED_CLEANUP_RECHECK`] (each
     /// check re-proves ownership before any signal) until nothing is left.
-    /// Daemon shutdown ends the wait; the unit's drop then makes one more
-    /// ownership-proven attempt.
+    /// Each re-check that finds the group still ours signals it again
+    /// (TERM, grace, KILL), so a run's survivors are re-signalled every
+    /// round. Daemon shutdown ends the wait, whenever it lands; the unit's
+    /// drop then makes one more ownership-proven attempt. The cleanup
+    /// reservation stays set then: the daemon is going away.
     async fn hold_while_unresolved(&mut self) {
         let Some(mut guard) = self.run_end.unresolved.take() else {
             return;
@@ -4868,13 +4879,23 @@ impl AssignWorker {
             "run-end cleanup is unresolved; runner stays reserved until the run's processes are gone"
         );
         let shutdown = self.state.shutdown_notified();
+        // `notify_waiters` stores no permit, so one waiter is registered up
+        // front and kept across rounds, and the recorded reason covers a
+        // shutdown signalled before it was registered.
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         loop {
+            if self.state.shutdown_reason().is_some() {
+                return;
+            }
             tokio::select! {
-                _ = shutdown.notified() => return,
+                _ = &mut notified => return,
                 _ = tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK) => {}
             }
             if guard.cleanup().await == CleanupOutcome::Clean {
                 guard.mark_cleaned();
+                self.state.set_cleanup_reserved(false);
                 tracing::info!(
                     runner = %self.runner_config.name,
                     "run-end cleanup resolved; runner released"
@@ -5940,16 +5961,12 @@ impl AssignWorker {
         }
     }
 
-    async fn send(&self, msg: ClientMsg) {
-        if matches!(
-            msg,
-            ClientMsg::RunCompleted { .. }
-                | ClientMsg::RunFailed { .. }
-                | ClientMsg::RunCancelled { .. }
-        ) && let Some(held) = lock_held(&self.run_end.held).as_mut()
-        {
-            held.msgs.push(msg);
-            return;
+    async fn send(&self, mut msg: ClientMsg) {
+        if terminal_run_id(&msg).is_some() {
+            match self.state.hold_terminal_msg(msg) {
+                Some(now) => msg = now,
+                None => return,
+            }
         }
         // Clone the journal-relevant fields BEFORE the send consumes
         // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
@@ -7241,18 +7258,61 @@ mod tests {
         };
         let (tx, _rx) = mpsc::channel(16);
         let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
-        worker.run_end.unresolved = Some(RunGroup::claimed_for_test(&recorded));
+        let state = worker.state.clone();
+        worker.reserve_unresolved(RunGroup::claimed_for_test(&recorded));
         let held = tokio::spawn(async move { worker.hold_while_unresolved().await });
         tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK * 4).await;
         let reserved = !held.is_finished();
+        // Review item 1 on #3499: local chat sees the reservation too.
+        let chat_blocked = state.cleanup_reserved();
         let survived = stranger.try_wait().unwrap().is_none();
         let _ = stranger.kill();
         let _ = stranger.wait();
         assert!(reserved, "runner was released while cleanup was unresolved");
+        assert!(
+            chat_blocked,
+            "local chat could claim the working copy during cleanup"
+        );
         assert!(survived, "an unproven process group was signalled");
         tokio::time::timeout(UNRESOLVED_CLEANUP_RECHECK * 3, held)
             .await
             .expect("runner stayed reserved after the group was gone")
+            .unwrap();
+        assert!(!state.cleanup_reserved(), "reservation outlived cleanup");
+    }
+
+    /// The hold ends on daemon shutdown even when the shutdown lands while
+    /// a re-check is running, not only during the sleep between checks.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_hold_ends_on_a_shutdown_signalled_during_a_recheck() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let info = crate::util::procinfo::info(stranger.id() as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let (tx, _rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        let state = worker.state.clone();
+        worker.reserve_unresolved(RunGroup::claimed_for_test(&recorded));
+        // Signalled before the hold starts waiting: no waiter is registered,
+        // just as when it lands during a re-check.
+        state.shutdown_with_reason(DaemonShutdownTrigger::SigTerm);
+        let held = tokio::spawn(async move { worker.hold_while_unresolved().await });
+        let ended = tokio::time::timeout(UNRESOLVED_CLEANUP_RECHECK * 4, held).await;
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        ended
+            .expect("a shutdown during a re-check was lost")
             .unwrap();
     }
 
@@ -7987,6 +8047,82 @@ mod tests {
         assert!(
             stray.is_err(),
             "idle runner unexpectedly produced a frame: {stray:?}"
+        );
+    }
+
+    /// Review item 2 on #3499: a run that finished while its cleanup is
+    /// still pending has its real result held. A shutdown in that window
+    /// must report that result, not turn the run into a DaemonRestart
+    /// failure, and the worker must not report the run a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_reports_the_held_result_of_a_run_still_in_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        inst.state.hold_terminal();
+        let held = inst.state.hold_terminal_msg(ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({"ok": true}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        });
+        assert!(held.is_none(), "the result is held while cleanup runs");
+        assert!(inst.state.defer_clear_current_run());
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::SigTerm, None).await;
+        assert_eq!(sent, 1);
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for the drained report")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunCompleted { run_id: got, .. } => assert_eq!(got, run_id),
+            other => panic!("expected the held RunCompleted, got {other:?}"),
+        }
+        // Cleanup then finishes: nothing more is sent for the run.
+        let (later, clear) = inst.state.release_terminal();
+        assert!(later.is_empty(), "the run would be reported twice");
+        assert!(clear);
+        assert!(
+            inst.state
+                .hold_terminal_msg(ClientMsg::RunCancelled {
+                    run_id,
+                    cancelled_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .is_none(),
+            "a report after the drain must be dropped"
         );
     }
 

@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::approval::ApprovalRouter;
-use crate::cloud::protocol::RunnerStatus;
+use crate::cloud::protocol::{ClientMsg, RunnerStatus};
 use crate::config::schema::{AgentWatchdogConfig, Config};
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
@@ -79,6 +79,27 @@ pub struct StateHandle {
     reconnect: Arc<tokio::sync::Notify>,
     shutdown: Arc<tokio::sync::Notify>,
     shutdown_reason: Arc<std::sync::Mutex<Option<DaemonShutdownTrigger>>>,
+    /// Terminal reports of the runner's run held until run-end cleanup ends
+    /// (PDASHOSS01-417). Shared so the shutdown drain sends the run's real
+    /// result rather than a restart failure.
+    terminal_hold: Arc<std::sync::Mutex<TerminalHold>>,
+    /// Set while a finished run's cleanup is unresolved: its processes may
+    /// still use the working copy, so local chat must not claim it.
+    cleanup_reserved: Arc<AtomicBool>,
+}
+
+/// See [`StateHandle::hold_terminal`].
+#[derive(Debug, Default)]
+enum TerminalHold {
+    #[default]
+    Off,
+    Holding {
+        msgs: Vec<ClientMsg>,
+        clear_current_run: bool,
+    },
+    /// The shutdown drain reported the run; later reports are dropped so
+    /// the cloud gets one terminal report per run.
+    Drained,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,7 +264,95 @@ impl StateHandle {
             reconnect: Arc::new(tokio::sync::Notify::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_reason: Arc::new(std::sync::Mutex::new(None)),
+            terminal_hold: Arc::new(std::sync::Mutex::new(TerminalHold::Off)),
+            cleanup_reserved: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn lock_terminal_hold(&self) -> std::sync::MutexGuard<'_, TerminalHold> {
+        self.terminal_hold.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Start holding the run's terminal reports (and the clearing of the
+    /// in-flight run) until [`Self::release_terminal`]. Once the shutdown
+    /// drain has reported the run, nothing more is held or sent.
+    pub fn hold_terminal(&self) {
+        let mut hold = self.lock_terminal_hold();
+        if !matches!(*hold, TerminalHold::Drained) {
+            *hold = TerminalHold::Holding {
+                msgs: Vec::new(),
+                clear_current_run: false,
+            };
+        }
+    }
+
+    /// Route a terminal report: `Some` to send it now, `None` when it was
+    /// held, or dropped because the shutdown drain already reported the run.
+    pub fn hold_terminal_msg(&self, msg: ClientMsg) -> Option<ClientMsg> {
+        match &mut *self.lock_terminal_hold() {
+            TerminalHold::Off => Some(msg),
+            TerminalHold::Holding { msgs, .. } => {
+                msgs.push(msg);
+                None
+            }
+            TerminalHold::Drained => {
+                tracing::info!(
+                    "run already reported by the shutdown drain; terminal report dropped"
+                );
+                None
+            }
+        }
+    }
+
+    /// Defer clearing the in-flight run while reports are held, so the
+    /// shutdown drain still sees the run. `false`: clear it now.
+    pub fn defer_clear_current_run(&self) -> bool {
+        match &mut *self.lock_terminal_hold() {
+            TerminalHold::Holding {
+                clear_current_run, ..
+            } => {
+                *clear_current_run = true;
+                true
+            }
+            TerminalHold::Off | TerminalHold::Drained => false,
+        }
+    }
+
+    /// Stop holding: the held reports to send, in order, and whether the
+    /// in-flight run must now be cleared.
+    pub fn release_terminal(&self) -> (Vec<ClientMsg>, bool) {
+        let mut hold = self.lock_terminal_hold();
+        match std::mem::take(&mut *hold) {
+            TerminalHold::Holding {
+                msgs,
+                clear_current_run,
+            } => (msgs, clear_current_run),
+            TerminalHold::Off => (Vec::new(), false),
+            TerminalHold::Drained => {
+                *hold = TerminalHold::Drained;
+                (Vec::new(), true)
+            }
+        }
+    }
+
+    /// For the shutdown drain: take the reports held so far (empty while the
+    /// run is still executing) and drop any later ones.
+    pub fn take_terminal_for_drain(&self) -> Vec<ClientMsg> {
+        match std::mem::replace(&mut *self.lock_terminal_hold(), TerminalHold::Drained) {
+            TerminalHold::Holding { msgs, .. } => msgs,
+            TerminalHold::Off | TerminalHold::Drained => Vec::new(),
+        }
+    }
+
+    /// Mark whether a finished run's cleanup is unresolved.
+    pub fn set_cleanup_reserved(&self, reserved: bool) {
+        self.cleanup_reserved.store(reserved, Ordering::SeqCst);
+    }
+
+    /// Whether a finished run's cleanup is unresolved, so its processes
+    /// may still use the working copy.
+    pub fn cleanup_reserved(&self) -> bool {
+        self.cleanup_reserved.load(Ordering::SeqCst)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

@@ -368,8 +368,25 @@ impl Drop for LocalTurnGuard {
     }
 }
 
+/// Why an issue run still holds the runner's working copy: it is in flight,
+/// or it finished but its run-end cleanup is unresolved, so its processes
+/// may still be using the working copy (PDASHOSS01-417).
+fn working_copy_busy(inst: &RunnerInstance) -> Option<String> {
+    if inst.state.rx_in_flight.borrow().is_some() {
+        return Some("a managed issue run is using this runner's working copy".to_string());
+    }
+    if inst.state.cleanup_reserved() {
+        return Some(
+            "the last issue run's processes are still being cleaned up on this runner's working copy"
+                .to_string(),
+        );
+    }
+    None
+}
+
 /// Try to claim the runner's working copy for a local chat turn. Refuses when
-/// a managed issue run holds it (`state.rx_in_flight`) or another local chat
+/// a managed issue run holds it (`state.rx_in_flight`), its run-end cleanup is
+/// unresolved (`state.cleanup_reserved`), or another local chat
 /// turn is already active. The post-claim re-check of `rx_in_flight` closes
 /// the window where a managed `Assign` lands between our two reads; the
 /// assign lane's mirror check of `chat_active` (supervisor.rs) closes the
@@ -378,8 +395,8 @@ impl Drop for LocalTurnGuard {
 pub(crate) fn try_begin_local_turn(
     inst: &RunnerInstance,
 ) -> std::result::Result<LocalTurnGuard, String> {
-    if inst.state.rx_in_flight.borrow().is_some() {
-        return Err("a managed issue run is using this runner's working copy".to_string());
+    if let Some(busy) = working_copy_busy(inst) {
+        return Err(busy);
     }
     if inst
         .chat_active
@@ -388,9 +405,9 @@ pub(crate) fn try_begin_local_turn(
     {
         return Err("another local chat turn is already active on this runner".to_string());
     }
-    if inst.state.rx_in_flight.borrow().is_some() {
+    if let Some(busy) = working_copy_busy(inst) {
         inst.chat_active.store(false, Ordering::SeqCst);
-        return Err("a managed issue run is using this runner's working copy".to_string());
+        return Err(busy);
     }
     Ok(LocalTurnGuard {
         flag: inst.chat_active.clone(),
@@ -2395,6 +2412,19 @@ mod tests {
         // Once the run clears, a local turn can claim the working copy.
         inst.state.set_current_run(None).await;
         let _g = try_begin_local_turn(&inst).expect("claim after run clears");
+    }
+
+    /// Review item 1 on #3499: a finished run whose cleanup is unresolved
+    /// may still have processes using the working copy, so a desktop chat
+    /// turn must not claim it until cleanup resolves.
+    #[tokio::test]
+    async fn local_turn_guard_refuses_while_run_cleanup_is_unresolved() {
+        let inst = offline_instance();
+        inst.state.set_cleanup_reserved(true);
+        assert!(try_begin_local_turn(&inst).is_err());
+        assert!(!inst.chat_active.load(Ordering::SeqCst));
+        inst.state.set_cleanup_reserved(false);
+        let _g = try_begin_local_turn(&inst).expect("claim after cleanup resolves");
     }
 
     #[test]

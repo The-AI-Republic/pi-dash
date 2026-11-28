@@ -10,8 +10,10 @@
 //! * **cgroup** (Linux): the agent is moved into a child cgroup of the
 //!   daemon's own cgroup (`pidash-run-<run_id>`). Membership survives
 //!   `setsid` and reparenting, which is exactly the leak we are fixing.
-//!   Cleanup reads `cgroup.procs`, SIGTERMs every member, waits the grace
-//!   period, then SIGKILLs what remains. The start-up sweep finds
+//!   Cleanup reads `cgroup.procs` of the run cgroup and every cgroup nested
+//!   in it, SIGTERMs every member, waits the grace period, then SIGKILLs
+//!   what remains; the run is clean only once `cgroup.events` reports the
+//!   whole subtree unpopulated. The start-up sweep finds
 //!   `pidash-run-*` children the previous daemon left behind.
 //! * **process group** (elsewhere Unix): the agent gets its own process
 //!   group (`process_group(0)`) and cleanup signals the group — but only
@@ -23,8 +25,8 @@
 //!   ends, so proof outlives the leader; when no anchor can be spawned,
 //!   members are learned by a periodic observer instead. A child that calls `setsid` escapes the group — a documented
 //!   limit of this backend. Platforms without process inspection (not
-//!   Linux or macOS) can never prove ownership, so nothing is signalled
-//!   there. Cleanup cannot sweep after a crash (a dead PGID can be
+//!   Linux or macOS) could never prove a group empty, so they get no
+//!   containment (as if `off`), not a runner held forever. Cleanup cannot sweep after a crash (a dead PGID can be
 //!   reused by the OS), so swept recovery only exists on the cgroup
 //!   backend.
 //! * **none**: `PIDASH_CONTAINMENT=off` (diagnosis escape hatch) or
@@ -81,7 +83,7 @@ fn backend() -> BackendKind {
     static BACKEND: OnceLock<BackendKind> = OnceLock::new();
     *BACKEND.get_or_init(|| {
         let chosen = std::env::var("PIDASH_CONTAINMENT").unwrap_or_else(|_| "auto".to_string());
-        match chosen.to_ascii_lowercase().as_str() {
+        let kind = match chosen.to_ascii_lowercase().as_str() {
             "off" => BackendKind::None,
             "process-group" | "process_group" | "pgid" => BackendKind::ProcessGroup,
             "cgroup" => BackendKind::Cgroup,
@@ -93,7 +95,14 @@ fn backend() -> BackendKind {
                 );
                 detect_auto()
             }
+        };
+        let usable = usable_backend(kind, crate::util::procinfo::SUPPORTED);
+        if usable != kind {
+            tracing::warn!(
+                "process-group containment needs process inspection, which this platform lacks; run processes are not contained"
+            );
         }
+        usable
     })
 }
 
@@ -116,6 +125,17 @@ fn detect_auto() -> BackendKind {
             BackendKind::None
         }
     }
+}
+
+/// `kind`, or no containment when it cannot work here.
+/// The process-group backend can only release a run once a group is
+/// proven empty, which needs process inspection ([`crate::util::procinfo`]);
+/// without it every run would hold its runner forever.
+fn usable_backend(kind: BackendKind, inspectable: bool) -> BackendKind {
+    if kind == BackendKind::ProcessGroup && !inspectable {
+        return BackendKind::None;
+    }
+    kind
 }
 
 /// What run-end cleanup established about the run's processes.
@@ -257,6 +277,7 @@ impl RunGroup {
                 let Some(dir) = &self.cgroup_dir else {
                     return (Vec::new(), CleanupOutcome::Clean);
                 };
+                let grace = self.grace;
                 // Member listing is a handful of tiny file reads; done
                 // synchronously so the TERM→KILL driver stays simple.
                 let stopped = tokio::task::spawn_blocking({
@@ -276,23 +297,26 @@ impl RunGroup {
                                     send_signal(pid, Signal::Kill);
                                 }
                             },
-                            CLEANUP_GRACE,
+                            grace,
                         )
                     }
                 })
                 .await
                 .unwrap_or_default();
-                let left = cgroup_members(dir);
-                if left.is_empty() {
+                // Clean only when the kernel reports the whole subtree
+                // unpopulated: a member list can miss processes it could
+                // not read.
+                if cgroup_populated(dir) == Some(false) {
                     remove_cgroup_dir(dir).await;
                     (stopped, CleanupOutcome::Clean)
                 } else {
+                    let left = cgroup_members(dir);
                     let names: Vec<&str> = left.iter().map(|(_, n)| n.as_str()).collect();
                     tracing::warn!(
                         run_id = %self.run_id,
                         processes = left.len(),
                         names = %names.join(", "),
-                        "run cgroup still has processes after SIGKILL"
+                        "run cgroup is still populated (or unreadable) after SIGKILL"
                     );
                     (stopped, CleanupOutcome::Unresolved)
                 }
@@ -553,20 +577,53 @@ fn stop_owned_group(
     (stopped, outcome)
 }
 
-/// (pid, comm) for every process in a cgroup, from `cgroup.procs`.
+/// (pid, comm) for every process in a cgroup and its nested cgroups, from
+/// each `cgroup.procs`. Everything in the subtree belongs to the run.
 fn cgroup_members(dir: &Path) -> Vec<(u32, String)> {
-    let Ok(text) = std::fs::read_to_string(dir.join("cgroup.procs")) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .map(|pid| {
-            let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                .map(|s| s.trim_end().to_string())
-                .unwrap_or_default();
-            (pid, name)
+    let mut members = Vec::new();
+    collect_cgroup_members(dir, &mut members);
+    members
+}
+
+fn collect_cgroup_members(dir: &Path, members: &mut Vec<(u32, String)>) {
+    if let Ok(text) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+        members.extend(
+            text.lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .map(|pid| {
+                    let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .map(|s| s.trim_end().to_string())
+                        .unwrap_or_default();
+                    (pid, name)
+                }),
+        );
+    }
+    for sub in nested_cgroups(dir) {
+        collect_cgroup_members(&sub, members);
+    }
+}
+
+/// Child cgroup directories of `dir`.
+fn nested_cgroups(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
+}
+
+/// Whether the cgroup's subtree still holds any process, from the
+/// `populated` key of `cgroup.events`. `None` when it cannot be read.
+fn cgroup_populated(dir: &Path) -> Option<bool> {
+    let events = std::fs::read_to_string(dir.join("cgroup.events")).ok()?;
+    events.lines().find_map(|line| match line.split_once(' ')? {
+        ("populated", "0") => Some(false),
+        ("populated", "1") => Some(true),
+        _ => None,
+    })
 }
 
 /// One log line per run with the count and names of stopped processes.
@@ -593,20 +650,7 @@ fn cleanup_report(run_id: Uuid, backend: &str, stopped: &[(u32, String)]) {
 /// run to the process group and warns — never a run failure.
 pub fn create_run_group(run_id: Uuid) -> RunGroup {
     let chosen = backend();
-    let mut group = RunGroup {
-        run_id,
-        backend: chosen,
-        cgroup_dir: None,
-        #[cfg(unix)]
-        owner: None,
-        #[cfg(unix)]
-        unclaimed_pgid: None,
-        #[cfg(unix)]
-        observer: None,
-        grace: CLEANUP_GRACE,
-        workspace: None,
-        cleaned: false,
-    };
+    let mut group = bare_group(run_id, chosen);
     if chosen == BackendKind::Cgroup {
         let created = self_cgroup_dir()
             .ok_or_else(|| {
@@ -622,7 +666,8 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
                 // Fall back to the process group for this run too, so
                 // something still gets cleaned up at run end.
                 tracing::warn!(run_id = %run_id, error = %e, "cgroup creation failed; process-group fallback for this run");
-                group.backend = BackendKind::ProcessGroup;
+                group.backend =
+                    usable_backend(BackendKind::ProcessGroup, crate::util::procinfo::SUPPORTED);
                 #[cfg(not(unix))]
                 {
                     group.backend = BackendKind::None;
@@ -631,6 +676,24 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
         }
     }
     group
+}
+
+/// A run unit on `backend` that holds nothing yet: no cgroup is created.
+fn bare_group(run_id: Uuid, backend: BackendKind) -> RunGroup {
+    RunGroup {
+        run_id,
+        backend,
+        cgroup_dir: None,
+        #[cfg(unix)]
+        owner: None,
+        #[cfg(unix)]
+        unclaimed_pgid: None,
+        #[cfg(unix)]
+        observer: None,
+        grace: CLEANUP_GRACE,
+        workspace: None,
+        cleaned: false,
+    }
 }
 
 /// The daemon's own cgroup directory on cgroup v2, from `/proc/self/cgroup`.
@@ -654,6 +717,10 @@ fn self_cgroup_dir() -> Option<PathBuf> {
 /// Remove a run cgroup once empty (retry briefly: the kernel reaps
 /// members lazily).
 async fn remove_cgroup_dir(dir: &Path) {
+    // Nested cgroups first: a cgroup with children cannot be removed.
+    for sub in nested_cgroups(dir) {
+        Box::pin(remove_cgroup_dir(&sub)).await;
+    }
     for _ in 0..10 {
         if std::fs::remove_dir(dir).is_ok() {
             return;
@@ -832,13 +899,8 @@ impl RunGroup {
     /// A process-group run claiming `leader` as recorded, with a short
     /// grace: tests use it to stand in for a group that a stranger reused.
     pub(crate) fn claimed_for_test(leader: &crate::util::procinfo::ProcInfo) -> Self {
-        let mut group = create_run_group(Uuid::new_v4());
-        group.backend = BackendKind::ProcessGroup;
-        group.cgroup_dir = None;
+        let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
         group.grace = Duration::from_millis(300);
-        if let Some(dir) = group.cgroup_dir.take() {
-            let _ = std::fs::remove_dir(dir);
-        }
         if let Some(owner) = GroupOwner::claim(leader) {
             group.set_owner(owner);
         }
@@ -974,12 +1036,95 @@ mod tests {
         assert!(cgroup_members(Path::new("/nonexistent-pidash-test-dir")).is_empty());
     }
 
+    /// A cgroup-backend run over `dir` (a stand-in cgroup directory).
+    fn cgroup_run(dir: &Path) -> RunGroup {
+        let mut group = bare_group(Uuid::new_v4(), BackendKind::Cgroup);
+        group.cgroup_dir = Some(dir.to_path_buf());
+        group.grace = Duration::from_millis(300);
+        group.cleaned = true;
+        group
+    }
+
+    /// Review item 4 on #3499: `cgroup.procs` lists only the run cgroup's
+    /// own members. Processes in a nested cgroup keep the subtree
+    /// populated, so cleanup must not report the run clean.
+    #[tokio::test]
+    async fn a_populated_cgroup_subtree_leaves_cleanup_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cgroup.procs"), "").unwrap();
+        std::fs::write(dir.path().join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        let group = cgroup_run(dir.path());
+        assert_eq!(group.cleanup().await, CleanupOutcome::Unresolved);
+    }
+
+    #[tokio::test]
+    async fn an_unpopulated_cgroup_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cgroup.procs"), "").unwrap();
+        std::fs::write(dir.path().join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        let group = cgroup_run(dir.path());
+        assert_eq!(group.cleanup().await, CleanupOutcome::Clean);
+    }
+
+    /// A cgroup whose population cannot be read is not known to be empty.
+    #[tokio::test]
+    async fn a_cgroup_whose_events_cannot_be_read_is_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cgroup.procs"), "").unwrap();
+        let group = cgroup_run(dir.path());
+        assert_eq!(group.cleanup().await, CleanupOutcome::Unresolved);
+    }
+
+    /// Members of a nested cgroup belong to the run too and are stopped.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cgroup_cleanup_stops_members_of_nested_cgroups() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.path().join("cgroup.procs"), "").unwrap();
+        std::fs::write(nested.join("cgroup.procs"), format!("{}\n", child.id())).unwrap();
+        std::fs::write(dir.path().join("cgroup.events"), "populated 1\n").unwrap();
+        let group = cgroup_run(dir.path());
+        let outcome = group.cleanup().await;
+        let status = child.try_wait().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            status.is_some(),
+            "a nested cgroup's member was left running"
+        );
+        assert_eq!(outcome, CleanupOutcome::Unresolved);
+    }
+
+    /// Review item 5 on #3499: where processes cannot be inspected, the
+    /// process-group backend could never prove a group empty and would hold
+    /// the runner forever, so such platforms get no containment instead.
+    #[test]
+    fn process_group_backend_needs_process_inspection() {
+        assert_eq!(
+            usable_backend(BackendKind::ProcessGroup, false),
+            BackendKind::None
+        );
+        assert_eq!(
+            usable_backend(BackendKind::ProcessGroup, true),
+            BackendKind::ProcessGroup
+        );
+        assert_eq!(
+            usable_backend(BackendKind::Cgroup, false),
+            BackendKind::Cgroup
+        );
+        assert_eq!(usable_backend(BackendKind::None, true), BackendKind::None);
+    }
+
     /// A run group on the process-group backend with a short grace.
     #[cfg(unix)]
     fn process_group_run() -> RunGroup {
-        let mut group = create_run_group(Uuid::new_v4());
-        group.backend = BackendKind::ProcessGroup;
-        group.cgroup_dir = None;
+        let mut group = bare_group(Uuid::new_v4(), BackendKind::ProcessGroup);
         group.grace = Duration::from_millis(300);
         group
     }

@@ -26,11 +26,17 @@ pub struct ProcInfo {
     /// exact equality with another value read on the same host.
     pub start: u64,
     /// Exited but not reaped yet, or (macOS) already exiting. Still holds
-    /// its pid and group membership, but can never run again.
+    /// its pid and group membership, but can never run again. On Linux a
+    /// process whose leader thread exited is a zombie only once none of
+    /// its threads can run.
     pub zombie: bool,
     /// Short command name, for logs only.
     pub name: String,
 }
+
+/// Whether this platform can inspect processes at all. Where it cannot,
+/// every [`group_members`] call fails, so no group is ever proven.
+pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 /// Inspect one process. `None` when it does not exist or cannot be read.
 pub fn info(pid: i32) -> Option<ProcInfo> {
@@ -126,8 +132,29 @@ mod imp {
             pid,
             pgid,
             start,
-            zombie: matches!(state, 'Z' | 'X'),
+            zombie: exited(state) && !has_live_thread(pid),
             name,
+        })
+    }
+
+    fn exited(state: char) -> bool {
+        matches!(state, 'Z' | 'X')
+    }
+
+    /// Whether any thread of `pid` can still run. The stat of a process
+    /// whose leader thread exited reads `Z` while its other threads keep
+    /// running, so a `Z` leader is only dead once every thread is. A task
+    /// list or thread that cannot be read counts as live: wrongly calling a process
+    /// dead could report its group empty.
+    fn has_live_thread(pid: i32) -> bool {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return true;
+        };
+        tasks.flatten().any(|t| {
+            std::fs::read(t.path().join("stat"))
+                .ok()
+                .and_then(|s| parse_linux_stat(&s))
+                .is_none_or(|(state, ..)| !exited(state))
         })
     }
 
@@ -388,6 +415,54 @@ mod tests {
         let seen = seen.expect("a non-UTF-8 name must not hide the process");
         assert!(listed, "group listing lost the process");
         assert!(seen.start > 0);
+    }
+
+    /// Review item 3 on #3499: a Linux thread-group leader that has exited
+    /// shows `Z` in `/proc/<pid>/stat` while its other threads still run.
+    /// Such a process is alive and must not be reported as a zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_leader_with_running_threads_is_not_a_zombie() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let script = "import threading, time, ctypes\n\
+                      threading.Thread(target=lambda: time.sleep(300)).start()\n\
+                      print('ready', flush=True)\n\
+                      ctypes.CDLL(None).pthread_exit(None)\n";
+        let Ok(mut child) = std::process::Command::new("python3")
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+        else {
+            eprintln!("python3 not available; skipping");
+            return;
+        };
+        let pid = child.id() as i32;
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        // Wait until the leader thread itself has exited.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| parse_linux_stat(&s))
+            .is_none_or(|(state, ..)| state != 'Z')
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let seen = info(pid);
+        let listed = group_members(pid).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let seen = seen.expect("process readable");
+        assert!(!seen.zombie, "a process with a running thread is alive");
+        assert!(
+            listed.iter().any(|p| p.pid == pid && !p.zombie),
+            "{listed:?}"
+        );
     }
 
     /// The hand-written `kinfo_proc` layout must put `p_starttime` where
