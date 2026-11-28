@@ -362,6 +362,20 @@ impl Coordinator {
         Ok(n > 0)
     }
 
+    /// [`Self::persist_terminal`] unless the run already has a terminal
+    /// outbox record, which is kept as is. `Ok(false)`: nothing written.
+    pub fn persist_terminal_if_absent(
+        &self,
+        run_id: Uuid,
+        payload: &[u8],
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let n = self
+            .store
+            .set_terminal_pending_if_absent(run_id, payload, message_id)?;
+        Ok(n > 0)
+    }
+
     /// Terminal-pending outbox records awaiting exact-payload retry.
     pub fn terminal_pending(&self) -> Vec<QueueEntry> {
         self.store.list_terminal_pending().unwrap_or_default()
