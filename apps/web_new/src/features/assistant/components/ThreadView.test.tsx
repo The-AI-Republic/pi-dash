@@ -225,6 +225,31 @@ describe("ThreadView transcript", () => {
     expect(screen.getByText("bold").tagName).toBe("STRONG");
   });
 
+  it("renders assistant replies flat and full-width while user turns stay bubbled", async () => {
+    renderThread({
+      messages: [
+        row({ id: "u", role: "user", content: "question", seq: 1 }),
+        row({ id: "a", role: "assistant", content: "plain answer", seq: 2 }),
+      ],
+    });
+    const list = await screen.findByTestId("assistant-transcript");
+    // Only the user's own turn is bubbled: accent fill, rounded, capped width.
+    expect(list.querySelector('[data-role="user"]')).toHaveClass("bg-(--accent)", "max-w-[80%]");
+    // The assistant's reply is plain full-column content: no background,
+    // no rounded corners, no padding, no width cap.
+    const assistant = list.querySelector('[data-role="assistant"]');
+    expect(assistant).toHaveClass("w-full");
+    for (const bubble of [
+      "bg-(--subtle)",
+      "max-w-[80%]",
+      "rounded-(--radius-popover)",
+      "px-(--space-3)",
+      "py-(--space-2)",
+    ]) {
+      expect(assistant).not.toHaveClass(bubble);
+    }
+  });
+
   it("shows an ellipsis for a streaming reply without text", async () => {
     renderThread({ messages: [row({ content: "", status: "streaming" })] });
     expect(await screen.findByText("…")).toBeInTheDocument();
@@ -263,6 +288,14 @@ describe("ThreadView transcript", () => {
     });
     expect(await screen.findByText("Search issues")).toBeInTheDocument();
     expect(screen.getByText("3 results")).toBeInTheDocument();
+    // Tool activity is status, not content: flat like the assistant reply,
+    // spanning the full column rather than a capped bubble width.
+    const activities = screen.getAllByTestId("assistant-tool-activity");
+    expect(activities).toHaveLength(2);
+    for (const activity of activities) {
+      expect(activity).toHaveClass("w-full");
+      expect(activity).not.toHaveClass("max-w-[80%]");
+    }
   });
 
   it("renders tool-result deep links with their labels", async () => {

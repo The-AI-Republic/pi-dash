@@ -275,7 +275,7 @@ function MessageBubble({ message }: { message: AssistantMessage }): React.ReactE
       <div
         data-role={message.role}
         data-testid="assistant-tool-activity"
-        className="text-meta max-w-[80%] text-(--text-muted)"
+        className="text-meta w-full text-(--text-muted)"
       >
         <span data-testid="assistant-tool-text">{message.content}</span>
         {links.map((link) => (
@@ -290,11 +290,11 @@ function MessageBubble({ message }: { message: AssistantMessage }): React.ReactE
       </div>
     );
   }
+  // Assistant replies read as plain full-width content, never a bubble:
+  // only the user's own turns are bubbled, so the column stays readable
+  // for long markdown (headings, lists, tables, code) in either theme.
   return (
-    <div
-      data-role="assistant"
-      className="text-body max-w-[80%] rounded-(--radius-popover) bg-(--subtle) px-(--space-3) py-(--space-2) text-(--text)"
-    >
+    <div data-role="assistant" className="text-body w-full text-(--text)">
       {html === null ? (
         <span className="text-(--text-muted)">{EMPTY_REPLY_PLACEHOLDER}</span>
       ) : (
