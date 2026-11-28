@@ -292,6 +292,18 @@ impl Store {
         Ok(n)
     }
 
+    /// Delete `run_id`'s row unless it holds a terminal outbox record.
+    pub fn delete_unless_terminal(&self, run_id: Uuid) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM queue_entries WHERE run_id = ?1 AND phase <> 'terminal_pending'",
+                rusqlite::params![run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// All durable phases for restart reconciliation: returns (waiting, other).
     /// `waiting` preserves FIFO order; callers must never replay `other`.
     pub fn list_all_phases(&self) -> Result<Vec<(Uuid, String)>, String> {
