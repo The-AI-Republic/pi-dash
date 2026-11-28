@@ -311,6 +311,12 @@ impl StateHandle {
         }
     }
 
+    /// Whether terminal reports are being held right now (not yet released,
+    /// and not taken by the shutdown drain).
+    pub fn holding_terminal(&self) -> bool {
+        matches!(*self.lock_terminal_hold(), TerminalHold::Holding { .. })
+    }
+
     /// Defer clearing the in-flight run while reports are held, so the
     /// shutdown drain still sees the run. `false`: clear it now.
     pub fn defer_clear_current_run(&self) -> bool {

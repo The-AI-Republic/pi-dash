@@ -6009,12 +6009,48 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
-        if terminal_run_id(&msg).is_some() {
+        if let Some(run_id) = terminal_run_id(&msg) {
+            let payload = self.persistable_terminal(run_id, &msg);
             if let Some(now) = self.state.hold_terminal_msg(msg) {
                 self.deliver(now).await;
+            } else if let Some(payload) = payload
+                && self.state.holding_terminal()
+            {
+                self.persist_held_terminal(run_id, &payload);
             }
         } else {
             self.deliver(msg).await;
+        }
+    }
+
+    /// The exact payload of a terminal report for a run the machine queue
+    /// owns, or `None` when no outbox can hold it (no coordinator, or a
+    /// run the queue does not know).
+    fn persistable_terminal(&self, run_id: uuid::Uuid, msg: &ClientMsg) -> Option<Vec<u8>> {
+        let coord = self.coordinator.as_ref()?;
+        if !coord.holds_run(run_id) {
+            return None;
+        }
+        serde_json::to_vec(msg).ok()
+    }
+
+    /// Persist a held terminal report to the queue's terminal outbox (review
+    /// of #3499 at 78368f6): while run-end cleanup or its hook runs, the
+    /// result lives only in memory, and a daemon that is killed (no
+    /// graceful drain) would lose it, so the cloud would later reap a
+    /// finished run as failed. The next daemon start replays the outbox
+    /// verbatim. Delivery and the slot release still wait for cleanup; a
+    /// normal release ends with `complete`, which deletes the record.
+    fn persist_held_terminal(&self, run_id: uuid::Uuid, payload: &[u8]) {
+        let Some(coord) = self.coordinator.as_ref() else {
+            return;
+        };
+        match coord.persist_terminal(run_id, payload, &format!("held-{run_id}")) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(%run_id, "held terminal report: no queue record to persist it in")
+            }
+            Err(e) => tracing::warn!(%run_id, "failed to persist held terminal report: {e}"),
         }
     }
 
@@ -8296,6 +8332,65 @@ mod tests {
         assert!(worker.state.rx_in_flight.borrow().is_none());
         assert!(!worker.state.releasing());
         assert!(worker.state.take_terminal_for_drain().is_empty());
+    }
+
+    /// Review item 2 on #3499 at 78368f6: a held result is persisted to the
+    /// machine queue's terminal outbox as soon as it is staged, so a daemon
+    /// killed during run-end cleanup (no graceful drain) replays the exact
+    /// result on its next start. Delivery and the slot release still wait
+    /// for cleanup.
+    #[tokio::test]
+    async fn a_held_result_is_persisted_before_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        let result = ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({"ok": true}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        worker.send(result.clone()).await;
+        assert!(rx.try_recv().is_err(), "the result was not held");
+        // The daemon dies here, mid-cleanup: a fresh coordinator on the same
+        // store finds the exact result to replay.
+        drop(worker);
+        drop(coord);
+        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let pending = after_crash.terminal_pending();
+        assert_eq!(pending.len(), 1, "the held result was not persisted");
+        let replayed: ClientMsg =
+            serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&result).unwrap()
+        );
     }
 
     /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup

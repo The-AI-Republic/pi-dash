@@ -94,10 +94,10 @@ fn backend() -> BackendKind {
                 detect_auto()
             }
         };
-        let usable = usable_backend(kind, crate::util::procinfo::SUPPORTED);
+        let usable = usable_backend(kind, crate::util::procinfo::inspection_usable());
         if usable != kind {
             tracing::warn!(
-                "process-group containment needs process inspection, which this platform lacks; run processes are not contained"
+                "process-group containment needs process inspection, which is unavailable here (unsupported platform, or /proc mounted with hidepid); run processes are not contained"
             );
         }
         usable
@@ -354,7 +354,11 @@ fn unclaimed_group_outcome(run_id: Uuid, pgid: Option<i32>) -> CleanupOutcome {
     };
     let live: Vec<_> = members.into_iter().filter(|p| !p.zombie).collect();
     if live.is_empty() {
-        return CleanupOutcome::Clean;
+        // Only a scan no process creation raced may call the group empty.
+        return match crate::util::procinfo::group_members_settled(pgid) {
+            Ok(members) if members.iter().all(|p| p.zombie) => CleanupOutcome::Clean,
+            _ => CleanupOutcome::Unresolved,
+        };
     }
     tracing::warn!(
         run_id = %run_id, pgid,
@@ -664,7 +668,7 @@ pub fn create_run_group(run_id: Uuid) -> RunGroup {
                 tracing::warn!(run_id = %run_id, error = %e, "cgroup creation failed; process-group fallback for this run");
                 group = match usable_backend(
                     BackendKind::ProcessGroup,
-                    crate::util::procinfo::SUPPORTED,
+                    crate::util::procinfo::inspection_usable(),
                 ) {
                     BackendKind::ProcessGroup => process_group_unit(run_id),
                     other => bare_group(run_id, other),

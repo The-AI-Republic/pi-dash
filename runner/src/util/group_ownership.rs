@@ -258,9 +258,31 @@ impl GroupOwner {
         proof
     }
 
-    /// Take a fresh kernel snapshot and [`accept`](Self::accept) it.
+    /// Take a fresh kernel snapshot and [`accept`](Self::accept) it. An
+    /// empty verdict is confirmed by a scan no process creation raced.
     pub fn observe(&mut self) -> Proof {
-        self.observe_with(procinfo::group_members, procinfo::info)
+        self.observe_settling_with(
+            procinfo::group_members,
+            procinfo::group_members_settled,
+            procinfo::info,
+        )
+    }
+
+    /// [`observe_with`](Self::observe_with) `scan`, and when that finds the
+    /// group empty, again with `settled` (review of #3499 at 78368f6): a
+    /// scan lists the processes before it reads them, so a member that
+    /// forked and exited in between hides its child, and the group would
+    /// look empty while the child runs. Only a settled scan can say empty.
+    pub fn observe_settling_with(
+        &mut self,
+        scan: impl FnOnce(i32) -> std::io::Result<Vec<ProcInfo>>,
+        settled: impl FnOnce(i32) -> std::io::Result<Vec<ProcInfo>>,
+        reread: impl Fn(i32) -> Option<ProcInfo>,
+    ) -> Proof {
+        match self.observe_with(scan, &reread) {
+            Proof::Empty => self.observe_with(settled, reread),
+            other => other,
+        }
     }
 
     /// [`observe`](Self::observe) with the kernel reads injected: `scan`
@@ -501,6 +523,41 @@ mod tests {
             |_| Some(p(10, 10, 500)),
         );
         assert_eq!(proof, Proof::Unknown);
+    }
+
+    #[test]
+    fn an_empty_scan_is_confirmed_by_a_settled_scan() {
+        // Review item 3 on #3499 at 78368f6: the Linux scan lists /proc
+        // before it reads any entry. The last live member forked a child
+        // and exited in between, so the first scan saw only the anchor.
+        // "Empty" is only accepted from a scan no process creation raced.
+        let anchor = ProcId {
+            pid: 20,
+            start: 700,
+        };
+        let mut owner = GroupOwner::claim(&p(10, 10, 500))
+            .unwrap()
+            .with_anchor_id(anchor);
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Ok(vec![p(20, 10, 700), p(13, 10, 800)]),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Ours(vec![p(13, 10, 800)]));
+        // A settled scan that cannot complete leaves the group unknown.
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Unknown);
+        // A settled scan that agrees confirms the group empty.
+        let proof = owner.observe_settling_with(
+            |_| Ok(vec![p(20, 10, 700)]),
+            |_| Ok(vec![p(20, 10, 700)]),
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+        );
+        assert_eq!(proof, Proof::Empty);
     }
 
     #[test]
