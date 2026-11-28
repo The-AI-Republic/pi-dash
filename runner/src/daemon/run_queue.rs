@@ -460,6 +460,20 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reopen a store the test dropped. A subprocess another test forks
+    /// can hold the old lock's file description until it execs, so the
+    /// lock may stay taken for a moment after the drop.
+    fn reopen(dir: &std::path::Path) -> Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match Coordinator::new(dir.to_path_buf(), 3) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
     fn entry(runner: Uuid, seq: u64) -> QueueEntry {
         QueueEntry {
             cloud_origin: "test".to_string(),
@@ -552,7 +566,7 @@ mod tests {
         assert_eq!(coord.counts().waiting, 1);
         drop(coord);
         // Reopen: canceled entry must not resurrect; tombstone persists.
-        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        let coord2 = reopen(&dir);
         assert_eq!(coord2.counts().waiting, 1);
         assert_eq!(coord2.position(e2.run_id), Some(1));
         assert_eq!(coord2.position(e1.run_id), None);
@@ -677,7 +691,7 @@ mod tests {
         assert_eq!(pending[0].phase, "terminal_pending");
         // Restart: receipt still loadable from the store.
         drop(coord);
-        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        let coord2 = reopen(&dir);
         assert_eq!(coord2.terminal_pending().len(), 1);
         // Successful redelivery clears.
         coord2.complete_terminal(e1.run_id).unwrap();
