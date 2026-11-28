@@ -9,6 +9,11 @@ NEWPIDASH-236 project_archived 409.
 The ticker guards (scan + fire) are pinned by the Rust unit tests in
 jobs/src/tasks_ticker; this suite pins the read/write behaviour
 through the API.
+
+All of this is new-system behaviour (DIFF-47): Django's archive stamps
+``archived_at`` only, leaves ``scheduler_bindings.enabled`` alone and has
+no archived check on run-now, so each case pins both arms with
+``_harness.diffs.expect``.
 """
 
 import sys
@@ -17,11 +22,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _harness import db, http  # noqa: E402
+from _harness.diffs import expect  # noqa: E402
 
 KEY = "projects"
 
 DTSTART = "2026-10-01T00:00:00+00:00"
 NEXT_RUN_AT = "2026-10-20T00:00:00+00:00"
+FAR_NEXT_RUN_AT = "2099-01-01T00:00:00+00:00"
 PROMPT = "Scan the project for stalled issues."
 
 
@@ -106,6 +113,10 @@ def test_archive_disables_two_bindings_and_leaves_other_project(seed, conn):
     disabled = _binding(conn, workspace_id=ws_id, project_id=project["id"], scheduler_id=sched_other["id"], actor_id=owner_id, enabled=False)
     other_binding = _binding(conn, workspace_id=ws_id, project_id=other["id"], scheduler_id=sched_other["id"], actor_id=owner_id)
 
+    # `scheduler_bindings.enabled` of the archived project's live bindings
+    # after archive (and after unarchive, which never re-enables): Django
+    # leaves them on, Rust turns them off (DIFF-47).
+    enabled_after_archive = expect("DIFF-47", django=True, rust=False)
     key = seed["keys"][KEY]
     http.post(key, f"{_base(seed)}/{project['id']}/archive/", expect=204)
 
@@ -113,7 +124,7 @@ def test_archive_disables_two_bindings_and_leaves_other_project(seed, conn):
     assert row["archived_at"] is not None
     for binding in (binding_a, binding_b):
         enabled, deleted_at = _enabled(conn, binding["id"])
-        assert enabled is False, f"binding {binding['id']} still enabled"
+        assert enabled is enabled_after_archive, f"binding {binding['id']} enabled={enabled}"
         assert deleted_at is None, "binding must stay installed"
     enabled, deleted_at = _enabled(conn, disabled["id"])
     assert enabled is False and deleted_at is None
@@ -130,7 +141,7 @@ def test_archive_disables_two_bindings_and_leaves_other_project(seed, conn):
     assert row["archived_at"] is None
     for binding in (binding_a, binding_b):
         enabled, _ = _enabled(conn, binding["id"])
-        assert enabled is False, "unarchive must not re-enable"
+        assert enabled is enabled_after_archive, "unarchive must not re-enable"
 
 
 def test_run_now_on_archived_project_is_project_archived(seed, conn):
@@ -145,15 +156,36 @@ def test_run_now_on_archived_project_is_project_archived(seed, conn):
     # Sanity: run-now works while the project is active.
     http.post(key, _run_now_url(seed, project, sched), expect=200)
     http.post(key, f"{_base(seed)}/{project['id']}/archive/", expect=204)
-    # Archive disables the binding, but run-now must answer
+    # Rust: archive disables the binding, but run-now must answer
     # project_archived (NEWPIDASH-236 envelope), not binding_disabled.
+    # Django has no archived check and the binding is still enabled, so
+    # run-now marks it due again (DIFF-47).
+    archived_status = expect("DIFF-47", django=200, rust=409)
+    # Push the binding's next run far out, so a 200 has to prove it
+    # marked the archived binding due again (the sanity call above
+    # already made it due once).
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scheduler_bindings SET next_run_at = %s WHERE project_id = %s",
+            (FAR_NEXT_RUN_AT, project["id"]),
+        )
+    conn.commit()
     with http.client(key) as c:
         r = c.post(_run_now_url(seed, project, sched))
-    assert r.status_code == 409, r.text[:400]
+    assert r.status_code == archived_status, r.text[:400]
     body = r.json()
-    assert body["code"] == "project_archived"
-    assert body["project"] == project["identifier"]
-    assert "archived_at" in body
+    if archived_status == 200:
+        assert body["enabled"] is True
+        row = db.fetch_one(
+            conn,
+            "SELECT next_run_at <= now() AS due FROM scheduler_bindings WHERE project_id = %s",
+            (project["id"],),
+        )
+        assert row["due"] is True, "Django run-now must mark the archived binding due"
+    else:
+        assert body["code"] == "project_archived"
+        assert body["project"] == project["identifier"]
+        assert "archived_at" in body
     # Re-enabling by hand does not rescue it either.
     with conn.cursor() as cur:
         cur.execute(
@@ -163,6 +195,7 @@ def test_run_now_on_archived_project_is_project_archived(seed, conn):
     conn.commit()
     with http.client(key) as c:
         r = c.post(_run_now_url(seed, project, sched))
-    assert r.status_code == 409, r.text[:400]
-    assert r.json()["code"] == "project_archived"
+    assert r.status_code == archived_status, r.text[:400]
+    if archived_status == 409:
+        assert r.json()["code"] == "project_archived"
 
