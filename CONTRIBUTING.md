@@ -40,7 +40,7 @@ Once Pi Dash is running, here's what you need to know for development:
 
 ### Project structure
 
-The project is a monorepo with the backend API (Django, in `apps/api`) and frontend in a single repo.
+The project is a monorepo. The active system is the Rust API in `rust-api/` (binary `pidash-api`: `serve` + `worker`) with the new React frontend in `apps/web_new/` (built on `packages/kit/` and `packages/api-client/`), the realtime server in `apps/live/`, and the runner/CLI in `runner/`. The Django backend (`apps/api/`) and the legacy frontends (`apps/web/`, `apps/admin/`, `apps/space/`) are frozen and kept only as a fallback — never build an "old half": new features and fixes go into the active system only.
 
 ### Development workflow
 

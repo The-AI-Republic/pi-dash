@@ -1,105 +1,94 @@
 # 09 — Agent Orchestration
 
-This page covers the cloud-side logic that turns a user's work item into a concrete run on a runner. The work happens across three Django modules:
+This page covers the cloud-side logic that turns a user's work item into a concrete run on a runner. The work happens in the Rust services:
 
 ```
-pi_dash/orchestration/   ← phases, scheduling, workpad, done signals
-pi_dash/prompting/       ← prompt fragments, composition, rendering, context
-pi_dash/scheduler/       ← built-in scheduling hooks + signals
+rust-api/crates/services/src/orchestration/  ← phases, scheduling, workpad, done signals
+rust-api/crates/services/src/prompting/      ← prompt fragments, composition, rendering, context
+rust-api/crates/services/src/scheduler/      ← built-in scheduling rules
 ```
 
-Plus the runner-side glue in `pi_dash/runner/services/` (matcher, run lifecycle, outbox, scheduler hook).
+Plus the dispatch glue in `rust-api/crates/services/src/runner_*` (matcher, run lifecycle, outbox, sessions, enrollment).
 
 ## Concept map
 
-- **Work item** — the user-facing thing (issue/task/sub-issue) tracked in `app/`.
-- **Run** — one execution attempt against a work item, persisted in `runner/models.py`. A work item can have many runs (retries, follow-ups).
-- **Phase** — runs progress through ordered phases (`orchestration/agent_phases.py`). Each phase has its own prompt template and expected outputs.
-- **Workpad** — the durable scratchpad attached to a run that the agent reads/writes structured artifacts into (`orchestration/workpad.py`).
-- **Done signal** — explicit completion contract the agent emits to mark a phase done (`orchestration/done_signal.py`).
-- **Pod** — a grouping primitive on the runner side (`runner/models.py`, `services/pod_naming.py`). Think of it as the namespace a run lives in on a particular runner.
+- **Work item** — the user-facing thing (issue/task/sub-issue) served by the `app_*` domains.
+- **Run** — one execution attempt against a work item, persisted as an `agent_run` row. A work item can have many runs (retries, follow-ups).
+- **Phase** — runs progress through ordered phases (see the `PHASES` table in the services crate). Each phase has its own prompt template and expected outputs.
+- **Workpad** — the durable scratchpad attached to a run that the agent reads/writes structured artifacts into.
+- **Done signal** — explicit completion contract the agent emits to mark a phase done.
+- **Pod** — a grouping primitive on the runner side. Think of it as the namespace a run lives in on a particular runner.
 
 ## `orchestration/`
 
 ```
-agent_phases.py   ← phase definitions + transitions
-scheduling.py     ← decides when a run is eligible to dispatch
-service.py        ← high-level "create a run from a work item" entrypoint
-signals.py        ← Django signals fired during the run lifecycle
-done_signal.py    ← parsing / validating the agent's "I'm done" frame
-workpad.py        ← workpad CRUD + lifecycle
+creation.rs    ← high-level "create a run from a work item" entrypoint
+dispatch.rs    ← decides when a run is eligible to dispatch
+clock.rs       ← ticking clock + failure-policy backstops
+blockers.rs / relations.rs / entries.rs  ← run graph support
 ```
 
-`service.py` is the canonical entrypoint. Most product code that wants to "kick off an agent on this work item" goes through it; it composes prompt → phase → run → persists.
+`creation.rs` is the canonical entrypoint. Most product code that wants to "kick off an agent on this work item" goes through it; it composes prompt → phase → run → persists.
 
 ## `prompting/`
 
 ```
-composer.py       ← assembles a final prompt from fragments + context
-context.py        ← gathers context (work item, project state, prior runs)
-renderer.py       ← template render
-fragments/        ← reusable prompt fragments
-models.py         ← persisted prompt templates / fragment overrides
-seed.py           ← seed default prompts
-views.py / urls.py / serializers.py  ← admin API for editing prompts
+composer.rs    ← assembles a final prompt from fragments + context
+context.rs     ← gathers context (work item, project state, prior runs)
+renderer.rs    ← template render
+fragments/     ← reusable prompt fragments
+registry.rs / seed.rs  ← persisted prompt templates + seed defaults
 ```
 
-Prompts are not hard-coded — they live in DB rows seeded by `seed.py`. Instance admins can override fragments from the admin UI, which is why `prompting/` ships a full REST surface.
+Prompts are not hard-coded — they live in DB rows seeded by `seed.rs`. Instance admins can override fragments from the admin UI, which is why `prompting/` ships a full REST surface.
 
 ## `scheduler/`
 
-`scheduler/builtins/` holds the default scheduling rules; `signals.py` wires them into the run lifecycle. This is the layer that asks "is now a good time to dispatch?" — it can defer runs based on quotas, project state, manual gating, etc.
+`scheduler/builtins.rs` holds the default scheduling rules. This is the layer that asks "is now a good time to dispatch?" — it can defer runs based on quotas, project state, manual gating, etc.
 
-The runner-side scheduler hook (`pi_dash/runner/services/scheduler_hook.py`) is the bridge between this layer and the runner's HTTP long-poll: when a run becomes eligible, the matcher hands it to the next runner that asks.
+The matcher is the bridge between this layer and the runner's HTTP long-poll: when a run becomes eligible, the matcher hands it to the next runner that asks.
 
-## Runner-side dispatch services (`pi_dash/runner/services/`)
+## Runner-side dispatch services (`services/src/runner_*`)
 
 ```
-matcher.py            ← match an eligible run to a runner (project, capabilities, availability)
-run_lifecycle.py      ← state-machine transitions (assigned → running → completed/failed)
-session_service.py    ← welcome frame (incl. version advisories — see 07)
-outbox.py             ← outbound message queue for cloud → runner notifications
-pubsub.py             ← Redis pub/sub bridge for live status updates to web UI
-chat.py               ← in-run chat messages
-permissions.py        ← who can mutate which run / runner
-pod_naming.py         ← derive pod names from project / runner / config
-tokens.py             ← refresh/access token pair lifecycle
-validation.py         ← payload validation helpers
-runner_delete.py      ← runner removal — coordinates cloud + runner-side cleanup
+runner_runs/       ← match an eligible run to a runner; state-machine transitions (assigned → running → completed/failed)
+runner_sessions/   ← welcome frame (incl. version advisories — see 07); outbox + pubsub for live status updates
+runner_enroll/     ← device-code enrollment; refresh/access token pair lifecycle
+run_creation/      ← run creation guards (e.g. agent availability)
 ```
 
 ## End-to-end (cloud's view)
 
 ```
-User opens work item  →  triggers orchestration.service.create_run(work_item, phase)
-                       ├─ prompting.composer.compose(work_item, phase, context)  → prompt text
-                       ├─ persist Run row (status=pending) + workpad init
-                       └─ scheduler.signals fire → eligibility set
+User opens work item  →  triggers run creation (work_item, phase)
+                       ├─ prompting composer composes (work_item, phase, context)  → prompt text
+                       ├─ persist agent_run row (status=pending) + workpad init
+                       └─ scheduler rules fire → eligibility set
 
-Run becomes eligible   →  matcher.assign(run, available_runners)  → Run.assigned_to = runner
+Run becomes eligible   →  matcher assigns (run, available_runners)  → run assigned to runner
 
 Runner long-polls      →  GET /api/v1/runner/runs/   (per-runner, see 07)
-                       ←  yields the assigned Run + its prompt + workpad ref
+                       ←  yields the assigned run + its prompt + workpad ref
 
 Runner executes        →  POSTs events / approvals / outputs back
-                       →  run_lifecycle transitions state
+                       →  lifecycle transitions state
                        →  pubsub broadcasts to web UI for live progress
 
-Agent emits done_signal → orchestration parses + validates → phase complete
+Agent emits done signal → orchestration parses + validates → phase complete
                        →  advance to next phase OR finalize run
 ```
 
 ## Run failure taxonomy and retry policy
 
-Every failed run stores one canonical value in `AgentRun.failure_reason`,
-classified at write time by `pi_dash/runner/failure.py::classify` from the
+Every failed run stores one canonical value in `agent_run.failure_reason`,
+classified at write time by the failure classifier (`crates/types/src/runner_runs/failure.rs`) from the
 runner protocol's `FailureReason` plus the raw error text (old runners that
 only send the coarse protocol reasons still classify — the text rules fill
 the gap). The stored strings are a wire contract for dashboards and API
 filters: never rename one, only add.
 
 The ticker consults `policy_for(reason)` when a run fails without yielding
-(`orchestration/scheduling.py::_apply_failure_policy`):
+(`orchestration/clock.rs`):
 
 | Policy                        | Ticker behaviour                                                                                                                                                                                                                                  |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -150,13 +139,13 @@ the free-retry one. Refusals are out of this taxonomy — `REFUSED` +
 
 ## Extending the system
 
-- **New phase** — add to `orchestration/agent_phases.py` and a matching prompt template in `prompting/fragments/` + `seed.py`.
-- **Custom scheduling rule** — add a rule under `scheduler/builtins/` and wire it via `scheduler/signals.py`.
-- **New agent** — implement the agent trait in `runner/src/agent/` (Rust) and a matching dispatch path in `runner/src/codex/`-equivalent module. The cloud side is agent-agnostic: it only cares about the prompt and the done-signal contract.
+- **New phase** — add to the phase table in the services crate and a matching prompt template in `prompting/fragments/` + `seed.rs`.
+- **Custom scheduling rule** — add a rule to `scheduler/builtins.rs`.
+- **New agent** — implement the agent trait in `runner/src/agent/` (Rust). The cloud side is agent-agnostic: it only cares about the prompt and the done-signal contract.
 
 ## Where to read next
 
 - [06 — Backend architecture](./06-backend-architecture.md) — the modules referenced here in context
 - [07 — Runner architecture](./07-runner-architecture.md) — the runner's view of dispatch
 - [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — the wire schema runs flow over
-- `pi_dash/orchestration/service.py` — the canonical entrypoint
+- `rust-api/crates/services/src/orchestration/creation.rs` — the canonical entrypoint

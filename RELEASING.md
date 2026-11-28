@@ -8,7 +8,7 @@ release pipeline. Tag the right prefix from `main` and CI takes it from there.
 | Component                                          | Tag prefix           | Triggers                                               | Builds                                                                                                                                                                    |
 | -------------------------------------------------- | -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Runner CLI** (the `pidash` command)              | `pidash-v<semver>`   | `.github/workflows/release.yml` (cargo-dist)           | Cross-platform binaries (macOS arm64, Linux arm64/x86_64), Homebrew formula, GitHub Release with installer scripts                                                        |
-| **Pi Dash platform** (the 6 service Docker images) | `platform-v<semver>` | `.github/workflows/build-branch.yml` (Branch Build CE) | Multi-arch Docker images pushed to `airepublic/pi-dash-{frontend,backend,space,admin,live,proxy}`, GitHub Release with `setup.sh` + `docker-compose.yml` for self-hosters |
+| **Pi Dash platform** (Rust API + `web_new` + `live`) | `platform-v<semver>` | `.github/workflows/build-branch.yml` (Branch Build CE) | Multi-arch Docker images + GitHub Release with `setup.sh` + `docker-compose.yml` for self-hosters (image set being cut over from the frozen legacy `pi-dash-{frontend,backend,space,admin,live,proxy}` in NEWPIDASH-382/383) |
 
 Versions are independent. The runner is currently `0.1.x`; the platform
 follows `package.json` (`1.x.x`). Don't try to align them — each component
@@ -83,7 +83,7 @@ provides.
    git push origin main platform-v1.4.0
    ```
 4. CI does the rest:
-   - Builds 6 Docker images in parallel (multi-arch via QEMU)
+   - Builds the platform images in parallel (multi-arch via QEMU) — today the frozen legacy 6-image set; the active-stack set lands with NEWPIDASH-382/383
    - Pushes them to Docker Hub with three tags each: `:v1.4.0`, `:stable`, `:latest`
    - Builds the AIO image (if the `airepublic/pi-dash-aio-community` repo
      exists; CI will fail this single job otherwise without affecting the
@@ -125,10 +125,11 @@ For platform releases (cargo-dist runner releases already work):
      `airepublic/*` repos
    - Set at: <https://github.com/The-AI-Republic/pi-dash/settings/secrets/actions>
 
-2. **The 6 Docker Hub repos must exist** under the `airepublic` namespace:
-   `pi-dash-frontend`, `pi-dash-backend`, `pi-dash-space`, `pi-dash-admin`,
-   `pi-dash-live`, `pi-dash-proxy`. Use `scripts/register-dockerhub-repos.sh`
-   if you need to recreate any.
+2. **The platform Docker Hub repos must exist** under the `airepublic` namespace.
+   Today that is the frozen legacy set — `pi-dash-frontend`,
+   `pi-dash-backend`, `pi-dash-space`, `pi-dash-admin`, `pi-dash-live`,
+   `pi-dash-proxy` (NEWPIDASH-382/383 own the active-stack repos). Use
+   `scripts/register-dockerhub-repos.sh` if you need to recreate any.
 
 ## Smoke-testing the platform pipeline before tagging
 
@@ -146,7 +147,7 @@ gh workflow run "Branch Build CE" \
 gh run watch
 ```
 
-This builds and pushes 6 dev-tagged images to `airepublic/*:main`. If it
+This builds and pushes dev-tagged platform images to `airepublic/*:main`. If it
 works, real tag-triggered releases will too.
 
 ## Rolling back a release
@@ -157,7 +158,7 @@ Docker Hub:
 # Re-tag the previous version's manifest as :latest
 docker buildx imagetools create -t airepublic/pi-dash-frontend:latest \
   airepublic/pi-dash-frontend:v1.3.0
-# Repeat for each of the 6 images.
+# Repeat for each platform image (legacy names shown; the active-stack set lands with NEWPIDASH-382/383).
 ```
 
 GitHub Release: edit the release page, mark as draft, or delete entirely.

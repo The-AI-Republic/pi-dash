@@ -1,12 +1,12 @@
 # 11 — Authentication
 
-Three distinct identity flows live in Pi Dash. They all terminate at the Django `authentication/` module, but they have very different user experiences and security models.
+Three distinct identity flows live in Pi Dash. They all terminate at the Rust auth backend (`crates/auth/` + the `auth_*` domains in `crates/api/` / `crates/services/`), but they have very different user experiences and security models.
 
-| Flow                                               | Who uses it                                            | Where it lives                                            |
-| -------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
-| **Instance admin** ("god mode")                    | The person who first stood up the self-hosted instance | `apps/admin` UI + `pi_dash.authentication`                |
-| **User login** (password, magic link, OIDC)        | Day-to-day product users                               | `apps/web` + `apps/space` + `pi_dash.authentication`      |
-| **Runner enrollment** (device-code + legacy token) | The Rust `pidash` daemon                               | `runner/src/cli/auth` + `pi_dash.runner.views.enrollment` |
+| Flow                                               | Who uses it                                            | Where it lives                                                          |
+| -------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------- |
+| **Instance admin** ("god mode")                    | The person who first stood up the self-hosted instance | `apps/web_new` `/god-mode/` + Rust auth backend                         |
+| **User login** (password, magic link, OIDC)        | Day-to-day product users                               | `apps/web_new` + Rust auth backend                                      |
+| **Runner enrollment** (device-code + legacy token) | The Rust `pidash` daemon                               | `runner/src/cli/auth` + `services/src/runner_enroll`                    |
 
 ## 1. Instance admin (one-time bootstrap)
 
@@ -16,22 +16,13 @@ The very first thing you do on a fresh self-hosted instance:
 http://<your-instance>/god-mode/   ← register the instance admin
 ```
 
-This is served by `apps/admin/` (port `3001` in dev). Once registered, the admin's credentials are also valid user credentials on the main app — you log into `apps/web` with the same identity.
+This is served by `apps/web_new/` (`/god-mode/`, port `3010` in dev). Once registered, the admin's credentials are also valid user credentials on the main app — you log in with the same identity.
 
 There is no "create admin" CLI command — it's deliberately a one-shot web flow tied to "the first request to god-mode wins".
 
-## 2. User login (web + space)
+## 2. User login (web_new)
 
-Lives in `pi_dash/authentication/` (mounted at `/auth/`):
-
-```
-authentication/
-├── views/         ← sign-in, sign-up, password reset, OIDC callbacks
-├── serializers/
-├── permissions/
-├── middleware/
-└── urls/
-```
+Lives in the Rust auth backend (`crates/auth/` for the session reader, token validation and permission kernel; `crates/api/` + `crates/services/` `auth_*` domains for the routes), mounted at `/auth/`. Public/guest views reuse the same backend but can serve content without a session.
 
 Mechanisms supported (configurable per instance):
 
@@ -39,7 +30,7 @@ Mechanisms supported (configurable per instance):
 - **Magic-link / email OTP**
 - **OIDC / SSO** — when configured. Cloud Pi Dash uses the **home-page OIDC** as the plan source-of-truth: the JWT `plan` claim is cached on `Account` and gates Cloud-specific features. There are **no plan webhooks** — plan updates flow through subsequent OIDC logins. Upgrade UI in the app deep-links back to the home-page user center.
 
-The `space` app (public/guest views) reuses the same auth module but can serve content without a session.
+Public/guest views (the frozen `apps/space/` fallback and its ported `space` domain) reuse the same auth backend but can serve content without a session.
 
 ## 3. Runner enrollment
 
@@ -85,7 +76,7 @@ After login, the dev machine holds one shared **MachineToken**. The CLI and ever
 | **Runner id**                | Stable     | Identifies the specific runner under that dev machine. Sent in runner URLs or `X-Runner-Id`, not secret.    |
 | **Enrollment/refresh token** | Legacy     | Kept only for already-minted `pidash connect` compatibility paths. New `pidash runner add` does not use it. |
 
-Cloud-side, MachineToken lifecycle is stored in `runner.MachineToken`; legacy refresh/access helpers remain in `pi_dash/runner/services/tokens.py` for compatibility.
+Cloud-side, the MachineToken lifecycle is stored in the `machine_token` table managed by the Rust backend; legacy refresh/access helpers remain for already-minted compatibility paths.
 
 `pidash auth logout` revokes the dev-machine token cloud-side. `pidash runner remove` removes one runner row/local instance without rotating the shared machine token.
 
@@ -99,4 +90,4 @@ Cloud-side, MachineToken lifecycle is stored in `runner.MachineToken`; legacy re
 
 - [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — how the machine token and runner id are presented per request
 - [07 — Runner architecture](./07-runner-architecture.md) — `runner/src/cli/auth/` and `runner/src/config/`
-- [06 — Backend architecture](./06-backend-architecture.md) — `pi_dash/authentication/` module structure
+- [06 — Backend architecture](./06-backend-architecture.md) — Rust auth backend structure

@@ -17,47 +17,42 @@ pnpm fix:lint                    # oxlint --fix
 
 # Target a single package or app:
 pnpm turbo run <task> --filter=<pkg>
-pnpm --filter web dev
-pnpm --filter @pi-dash/ui storybook    # Storybook on :6006
+pnpm --filter web_new dev
+pnpm --filter live dev
 ```
 
 > i18n: the OSS build is English-only — wrap UI copy in `t("Source English text")`; no key catalogue to sync. Adding a language is documented in `packages/i18n/README.md`. (Multi-language locales and their tooling are part of Pi Dash Cloud.)
 
-## Django backend (`apps/api/`)
+## Rust API (`rust-api/`)
 
 ```bash
-cd apps/api
+cd rust-api
 
-# Server commands (DJANGO_SETTINGS_MODULE defaults to ...production):
-python manage.py runserver
-python manage.py migrate
-python manage.py createsuperuser
-# For local work, point at local settings:
-DJANGO_SETTINGS_MODULE=apple_pi_dash.settings.local python manage.py runserver
+# Serve + worker (DATABASE_URL must be a TCP URL; serve fails fast on a stale schema):
+export DATABASE_URL="postgresql://pi_dash:pi_dash@127.0.0.1:5432/pi_dash"
+cargo run -p pidash-api-bin -- serve --bind 127.0.0.1:8000
+cargo run -p pidash-api-bin -- worker --concurrency 4
 
-# Tests:
-./run_tests.sh                   # wrapper around tests/run_tests.sh
-python run_tests.py -u           # unit tests only (markers: unit | contract | smoke)
-python run_tests.py -u -o -p     # unit + coverage + parallel (-n auto)
-pytest -m smoke                  # direct pytest with markers
-
-# Lint / format (Ruff, NOT wired into root pnpm fix):
-ruff format .
-ruff check . --fix
+# Narrowest checks for the crate you touched:
+cargo fmt --all --check
+cargo clippy -p <affected-crate> --all-targets -- -D warnings
+cargo test -p <affected-crate>   # add a module/test filter when you can
+python3 scripts/write_guard.py --check
 ```
 
-`pytest.ini` configures `--reuse-db --nomigrations`. Tests reuse the DB across runs and skip migrations — fast, but you must run `pytest --create-db` to validate schema-altering work.
+Contract suites covering your change run against the Rust binary (`BASE_URL` + `DATABASE_URL` + `CONTRACT_SECRET_KEY`, see `contract-tests/README.md`); run the same case against live Django to prove it encodes the old system's real behaviour.
+
+The Django backend in `apps/api/` is frozen — no behaviour change, no new tests, no Ruff runs needed for active-system work.
 
 See [14 — Testing](./14-testing.md) for the full test layout.
 
-## Rust runner (`runner/`)
+## Rust runner (`runner/`) + desktop/daemon wire types (`pidash-ipc/`)
 
 ```bash
-cd runner
-cargo build                      # debug build
-cargo test                       # unit + integration tests
-cargo check                      # quick type-check
-cargo clippy -- -D warnings      # lint — treat warnings as errors
+# From the repo root (runner/ + pidash-ipc/ are in the root Cargo workspace):
+cargo build -p pidash             # debug build
+cargo test -p pidash              # unit + integration tests (add a filter when you can)
+cargo clippy -p pidash --all-targets -- -D warnings   # lint — treat warnings as errors
 
 # From a debug build, run via:
 ./target/debug/pidash <subcommand>
@@ -74,26 +69,13 @@ The entire TS workspace shares **one** root config:
 
 Both are Rust-based. OxLint is 50-100x faster than ESLint, with zero Node.js dependencies at runtime. `eslint-disable` comments still work for back-compat.
 
-### Per-app `--max-warnings` ceilings
+### `web_new` quality gates
 
-Each app pins its own ceiling in its `package.json`:
-
-| App           | Ceiling |
-| ------------- | ------- |
-| `web`         | 11957   |
-| `space`       | 676     |
-| `admin`       | 759     |
-| `live`        | 119     |
-| `@pi-dash/ui` | 66      |
-
-Crossing the ceiling fails `pnpm check:lint`. **After a cleanup, lower the ceiling** — leaving headroom defeats the gate.
+`web_new` lints with `--deny-warnings` and enforces `check:boundaries`, `check:headers`, `check:deps` and `check:similarity` — see [05 — Frontend architecture](./05-frontend-architecture.md). The frozen legacy apps keep their old `--max-warnings` ceilings; never raise one.
 
 ### What gets linted
 
-```
-apps/{web,admin,space,live}/**
-packages/**
-```
+Root `pnpm check:lint` fans out via Turbo — every workspace app and package lints itself, including the frozen legacy apps (with their pinned ceilings). Active-system work is gated on the `web_new` checks above plus `live`'s `--max-warnings` ceiling.
 
 Ignored:
 
@@ -123,9 +105,9 @@ If a commit fails because of a hook, the commit didn't happen — fix the issue,
 Useful Turbo commands:
 
 ```bash
-pnpm turbo run build --filter=web
-pnpm turbo run build --filter=...web         # build web + everything web depends on
-pnpm turbo run build --filter=web^...        # build everything that depends on web
+pnpm turbo run build --filter=web_new
+pnpm turbo run build --filter=...web_new     # build web_new + everything web_new depends on
+pnpm turbo run build --filter=web_new^...    # build everything that depends on web_new
 pnpm turbo run build --dry                   # show the task graph without executing
 ```
 

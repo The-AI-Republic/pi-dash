@@ -4,23 +4,29 @@ Pi Dash is a polyglot monorepo with three independent toolchains coexisting at t
 
 ```
 pi-dash/
-├── apps/                ← TS/React frontends + Django backend + Node live server
-│   ├── web/             ← main product UI            (React Router 7)         :3000
-│   ├── admin/           ← instance-admin UI (/god-mode/)                       :3001
-│   ├── space/           ← public "spaces" (guest views)                        :3002
-│   ├── live/            ← Node/Express + Hocuspocus (Yjs realtime)
-│   ├── api/             ← Django 4 / DRF / Channels backend (Python, separate)
-│   └── proxy/           ← Caddy reverse proxy (production only)
+├── apps/
+│   ├── web_new/         ← current product UI (TanStack Router)               :3010
+│   ├── live/            ← Node + Hocuspocus (Yjs realtime)                   :3100
+│   ├── proxy/           ← Caddy reverse proxy (production only)
+│   └── web/ admin/ space/ api/  ← FROZEN fallback: legacy UIs + Django
+│                                  backend (no new code, no behaviour change)
 │
-├── packages/            ← shared TS workspace packages (consumed by apps/web|admin|space)
-│   ├── ui/              ← component library + Storybook
-│   ├── shared-state/    ← MobX stores (canonical client state)
-│   ├── services/        ← API client
+├── packages/            ← shared TS workspace packages
+│   ├── kit/             ← component library for web_new (+ desktop target)
+│   ├── api-client/      ← typed Rust-API client for web_new
 │   ├── editor/          ← Tiptap / ProseMirror integration
 │   ├── i18n/            ← locales + key sync tools
-│   ├── constants/  hooks/  types/  utils/  logger/  propel/  decorators/
+│   ├── constants/  hooks/  types/  utils/  logger/  propel/
 │   ├── codemods/        ← jscodeshift transforms for repo-wide refactors
 │   ├── tailwind-config/   typescript-config/    ← shared base configs
+│   └── ui/ shared-state/ services/ decorators/  ← FROZEN: legacy packages
+│                                                  consumed by apps/web|admin|space
+│
+├── rust-api/            ← current backend: axum routers + services + jobs
+│   ├── crates/{types,db,auth,services,api,jobs,storage,sdk}
+│   ├── bin/pidash-api/  ← `serve` (HTTP :8000) + `worker` (job queue)
+│   ├── contract-tests/  ← pytest suites (Rust binary + Django oracle)
+│   └── Dockerfile.api + bin/docker-entrypoint-*.sh
 │
 ├── runner/              ← Rust binary crate (the `pidash` CLI + daemon)
 │   ├── src/{cli,daemon,cloud,codex,approval,workspace,ipc,history,service,tui,config,util}
@@ -38,8 +44,8 @@ pi-dash/
 │   └── linting.md
 │
 ├── images/              ← assets used in README / marketing
-├── docker-compose.yml          ← production-flavored
-├── docker-compose-local.yml    ← infra-only stack for `pnpm dev`
+├── docker-compose.yml          ← self-host stack (Rust API + web_new + live)
+├── docker-compose-local.yml    ← local dev: infra + migrator; apps run on host
 ├── turbo.json                  ← Turborepo task graph
 ├── pnpm-workspace.yaml         ← workspace + dep catalog
 ├── dist-workspace.toml         ← cargo-dist (runner release packaging)
@@ -52,13 +58,13 @@ pi-dash/
 
 | Stack                                 | Manifest                                                             | Manager          | Lockfile                        |
 | ------------------------------------- | -------------------------------------------------------------------- | ---------------- | ------------------------------- |
-| TS/React frontends + Node live server | `package.json`, `pnpm-workspace.yaml`, `turbo.json`                  | pnpm + Turborepo | `pnpm-lock.yaml`                |
-| Django backend                        | `apps/api/pyproject.toml`, `apps/api/requirements.txt`               | pip / virtualenv | (none — pinned in requirements) |
-| Rust runner                           | `runner/Cargo.toml`, `Cargo.toml` (workspace), `rust-toolchain.toml` | cargo            | `Cargo.lock`                    |
+| TS workspace (web_new, live, kit, api-client) | `package.json`, `pnpm-workspace.yaml`, `turbo.json` | pnpm + Turborepo | `pnpm-lock.yaml`  |
+| Rust backend (`rust-api/`, own workspace)        | `rust-api/Cargo.toml`                               | cargo            | `rust-api/Cargo.lock` |
+| Rust runner + ipc (root workspace)               | `runner/`, `pidash-ipc/`, `Cargo.toml`, `rust-toolchain.toml` | cargo | `Cargo.lock` |
 
-**Important:** `pnpm-workspace.yaml` explicitly excludes `apps/api` (Django) and `apps/proxy` (Caddy). They live inside `apps/` for proximity, but they are **not** in the pnpm workspace — root `pnpm` commands skip them. Treat them as their own projects with their own commands.
+**Important:** `pnpm-workspace.yaml` explicitly excludes `apps/api` (frozen Django) and `apps/proxy` (Caddy). They live inside `apps/` for proximity, but they are **not** in the pnpm workspace — root `pnpm` commands skip them. Never add the frozen paths back.
 
-The `runner/` crate is similarly outside Turborepo. `cargo build` is the only way to build it.
+The Rust crates are similarly outside Turborepo. `cargo build` / `cargo test` is the way to build them — see `rust-api/README.md` and `runner/README.md`.
 
 ## Dependency conventions (TS workspace)
 
@@ -78,7 +84,7 @@ New code starts in an app and graduates to a package the second time it's needed
 
 ## Where the wiki points
 
-- Want to change a UI route? → `apps/web/app/routes/` + [05](./05-frontend-architecture.md).
-- Want to add an API endpoint? → `apps/api/pi_dash/{app,api}/views/` + [06](./06-backend-architecture.md).
+- Want to change a UI route? → `apps/web_new/` + [05](./05-frontend-architecture.md).
+- Want to add an API endpoint? → `rust-api/crates/api/` + [06](./06-backend-architecture.md).
 - Want to teach the runner a new agent? → `runner/src/agent/` + `runner/src/codex/` + [07](./07-runner-architecture.md).
 - Want to ship the runner? → [15 — Releasing](./15-releasing.md).

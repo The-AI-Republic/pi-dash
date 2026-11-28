@@ -61,57 +61,7 @@ O Pi Dash é agnóstico em relação a agentes — traga o seu próprio agente d
 
 ### 1. Plataforma Pi Dash (self-hosted)
 
-#### Requisitos
-
-- Docker Engine instalado e em execução
-- Node.js versão 22+ [versão LTS](https://nodejs.org/en/about/previous-releases)
-- Python versão 3.12+
-- Postgres versão v15+
-- Valkey v7+ (ou Redis 7+, compatível por substituição direta)
-- **Memória**: Recomendado no mínimo **12 GB de RAM**
-  > Executar o projeto em um sistema com apenas 8 GB de RAM pode causar falhas na configuração ou travamentos por falta de memória (especialmente durante o build/inicialização dos containers Docker ou a instalação de dependências). Use ambientes em nuvem como o GitHub Codespaces ou aumente a RAM local, se possível.
-
-#### Configuração
-
-1. Clone o repositório
-
-```bash
-git clone https://github.com/The-AI-Republic/pi-dash.git [folder-name]
-cd [folder-name]
-chmod +x setup.sh
-```
-
-2. Execute o setup.sh
-
-```bash
-./setup.sh
-```
-
-O `setup.sh` copia cada `.env.example` para o seu correspondente `.env` (a raiz do repositório, além de `apps/web`, `apps/api`, `apps/space`, `apps/admin`, `apps/live`), gera uma `SECRET_KEY` exclusiva do Django e a adiciona ao `apps/api/.env`, e então executa o `pnpm install`. Para a configuração padrão de desenvolvimento em loopback, você não precisa editar nenhum arquivo `.env` manualmente — os valores padrão do `.env.example` (URLs de localhost, credenciais do banco de dados `pi-dash`, um endpoint MinIO local, etc.) funcionam de imediato. Edite-os apenas se estiver fazendo o bind a um host/porta diferente do padrão ou integrando serviços externos.
-
-3. Inicie os containers
-
-```bash
-docker compose -f docker-compose-local.yml up
-```
-
-4. Inicie os web apps:
-
-```bash
-pnpm dev
-```
-
-5. Abra o navegador em http://localhost:3001/god-mode/ e registre-se como administrador da instância
-6. Abra o navegador em http://localhost:3000 e faça login usando as mesmas credenciais
-
-#### Implantação em produção
-
-Para implantações self-hosted reais (não desenvolvimento local), escolha o caminho que corresponde a quanto você deseja gerenciar por conta própria:
-
-- **[Imagem Docker All-in-One](./deployments/aio/community/README.md)** — um único container que agrupa todos os serviços do Pi Dash, gerenciados internamente pelo `supervisord`. O caminho mais simples: um único comando `docker run`. Ideal para demonstrações, configurações de homelab, avaliação e equipes pequenas. Ainda são necessários Postgres / Redis / RabbitMQ / armazenamento compatível com S3 externos.
-- **[Self-hosting com Docker Compose / Swarm](./deployments/cli/community/README.md)** — a stack completa de microsserviços (6 containers de serviço + banco de dados + fila + armazenamento). Exige mais configuração, mas oferece escalabilidade independente e atualizações graduais por serviço. Recomendado para qualquer coisa além de avaliação.
-- **Kubernetes / Helm** — a publicação do Helm chart está planejada, mas ainda não foi disponibilizada; consulte [`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md).
-
+A plataforma atual é a API em Rust (`rust-api/`) com o novo frontend (`apps/web_new/`) e o servidor de tempo real (`apps/live/`). Siga o [guia de instalação em inglês](./README.md#-installation) — a tradução desta seção está pendente.
 ### 2. Pi Dash CLI e Runner Daemon
 
 Instale a CLI em qualquer máquina onde você queira que os agentes capturem e executem tarefas. Plataformas atualmente suportadas:
@@ -187,7 +137,7 @@ Usuários do Codex também podem instalar por meio do `$skill-installer` integra
 ## ⚙️ Construído com
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
-[![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
 ## 📝 Documentação

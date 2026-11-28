@@ -6,13 +6,13 @@ The Pi Dash Community All-In-One Docker image packages all Pi Dash services into
 
 The AIO image contains the following services:
 
-- **Web App** (Port 3001): Main Pi Dash web interface
-- **Space** (Port 3002): Public project spaces
-- **Admin** (Port 3003): Administrative interface
-- **API Server** (Port 3004): Backend API
-- **Live Server** (Port 3005): Real-time collaboration
+- **API Server**: Rust API (`pidash-api serve`)
+- **Worker**: Background job processing on the Postgres queue (`pidash-api worker`)
+- **Web App**: New React frontend (`web_new`)
+- **Live Server**: Real-time collaboration
 - **Proxy** (Port 80, 443): Caddy reverse proxy
-- **Worker & Beat**: Background task processing
+
+The Django backend and the legacy frontends are frozen and kept only as a fallback — they are not part of this image.
 
 ## Prerequisites
 
@@ -21,9 +21,10 @@ The AIO image contains the following services:
 The AIO image requires these external services to be running:
 
 - **PostgreSQL Database**: For data storage
-- **Redis**: For caching and session management
-- **RabbitMQ**: For message queuing
+- **Redis / Valkey**: For caching and session management
 - **S3-Compatible Storage**: For file uploads (AWS S3 or MinIO)
+
+The active system needs no RabbitMQ: background jobs run on the Postgres queue drained by the worker.
 
 ### Required Environment Variables
 
@@ -34,7 +35,6 @@ You must provide these environment variables:
 - `DOMAIN_NAME`: Your domain name or IP address
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
-- `AMQP_URL`: RabbitMQ connection string
 
 #### Storage Configuration
 
@@ -48,7 +48,7 @@ You must provide these environment variables:
 
 Generate each with `openssl rand -hex 32`:
 
-- `SECRET_KEY`: Django signing key
+- `SECRET_KEY`: API session signing key (keep stable across restarts)
 - `LIVE_SERVER_SECRET_KEY`: Live server signing key
 
 ## Quick Start
@@ -61,7 +61,6 @@ docker run --name pi-dash-aio --rm -it \
     -e DOMAIN_NAME=your-domain.com \
     -e DATABASE_URL=postgresql://user:pass@host:port/database \
     -e REDIS_URL=redis://host:port \
-    -e AMQP_URL=amqp://user:pass@host:port/vhost \
     -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=your-access-key \
     -e AWS_SECRET_ACCESS_KEY=your-secret-key \
@@ -80,7 +79,6 @@ docker run --name myaio --rm -it \
     -e DOMAIN_NAME=${MYIP} \
     -e DATABASE_URL=postgresql://pi-dash:pi-dash@${MYIP}:15432/pi-dash \
     -e REDIS_URL=redis://${MYIP}:16379 \
-    -e AMQP_URL=amqp://pi-dash:pi-dash@${MYIP}:15673/pi-dash \
     -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY \
     -e AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY \

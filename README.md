@@ -45,7 +45,7 @@ Pi Dash is composed of three major components:
 
 ### Pi Dash Platform
 
-The web-based orchestration hub where you manage projects, define tasks, and monitor agent progress. Create work items, organize them into cycles and modules, review agent output, and track analytics — all from a single dashboard. This is where you spend your time instead of watching terminals.
+The web-based orchestration hub where you manage projects, define tasks, and monitor agent progress. Create work items, organize them into cycles and modules, review agent output, and track analytics — all from a single dashboard. This is where you spend your time instead of watching terminals. It is served by the Rust API (`rust-api/`) with the new React frontend (`apps/web_new/`) and the realtime server (`apps/live/`).
 
 ### Pi Dash CLI & Runner Daemon
 
@@ -61,11 +61,13 @@ Pi Dash is agent-agnostic — bring your own coding agent. Today the runner ship
 
 ### 1. Pi Dash Platform (self-hosted)
 
+The platform is the Rust API (`rust-api/`, binary `pidash-api`) plus the new React frontend (`apps/web_new/`, served on port 3010 in dev) and the realtime server (`apps/live/`, port 3100). The Django backend and the legacy frontends are frozen and kept only as a fallback; local development below runs the active system only.
+
 #### Requirements
 
-- Docker Engine installed and running
+- Docker Engine installed and running (for Postgres, Valkey and MinIO)
 - Node.js version 22+ [LTS version](https://nodejs.org/en/about/previous-releases)
-- Python version 3.12+
+- Rust toolchain (stable; `runner/rust-toolchain.toml` pins channel 1.93 for the runner — `rust-api/` builds with the installed stable toolchain)
 - Postgres version v15+
 - Valkey v7+ (or Redis 7+, drop-in compatible)
 - **Memory**: Minimum **12 GB RAM** recommended
@@ -87,29 +89,61 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-`setup.sh` copies every `.env.example` to its `.env` counterpart (the repo root plus `apps/web`, `apps/api`, `apps/space`, `apps/admin`, `apps/live`), generates a unique Django `SECRET_KEY` and appends it to `apps/api/.env`, then runs `pnpm install`. For the default loopback-dev setup you do not need to edit any `.env` file manually — the `.env.example` defaults (localhost URLs, `pi-dash` database credentials, a local MinIO endpoint, etc.) work out of the box. Edit them only if you're binding to a non-default host/port or wiring in external services.
+`setup.sh` copies every `.env.example` to its `.env` counterpart, provisions a Django `SECRET_KEY` into `apps/api/.env` for the frozen backend, then runs `pnpm install`. (The Rust API reads `SECRET_KEY` from the environment and mints an ephemeral one when unset.) For the default loopback-dev setup you do not need to edit any `.env` file manually — the `.env.example` defaults (localhost URLs, `pi-dash` database credentials, a local MinIO endpoint, etc.) work out of the box. Edit them only if you're binding to a non-default host/port or wiring in external services.
 
-3. Start the containers
-
-```bash
-docker compose -f docker-compose-local.yml up
-```
-
-4. Start web apps:
+3. Start the shared infrastructure
 
 ```bash
-pnpm dev
+docker compose -f docker-compose-local.yml up pi-dash-db pi-dash-redis pi-dash-minio
 ```
 
-5. Open your browser to http://localhost:3001/god-mode/ and register yourself as instance admin
-6. Open your browser to http://localhost:3000 and log in using the same credentials
+This brings up just the dependencies — Postgres, Valkey and MinIO. The app processes themselves run on your host so you keep hot reload. (The active system needs no RabbitMQ: background jobs run on the Postgres queue drained by the Rust worker.)
+
+4. Apply the database schema (one-off install step)
+
+```bash
+docker compose -f docker-compose-local.yml up migrator
+```
+
+The migrator applies Django's migration history to the shared database and then exits — it is the only Python container, and it never stays running. (Temporary until [NEWPIDASH-380](https://pidash.airepublic.com/ai-republic/browse/NEWPIDASH-380) lands the native Rust migrator; services never run migrations themselves.)
+
+5. Start the Rust API and worker (one terminal each)
+
+```bash
+cd rust-api
+export DATABASE_URL="postgresql://pi_dash:pi_dash@127.0.0.1:5432/pi_dash"
+export REDIS_URL="redis://127.0.0.1:6379"
+cargo run -p pidash-api-bin -- serve --bind 127.0.0.1:8000
+```
+
+```bash
+cd rust-api
+export DATABASE_URL="postgresql://pi_dash:pi_dash@127.0.0.1:5432/pi_dash"
+export REDIS_URL="redis://127.0.0.1:6379"
+cargo run -p pidash-api-bin -- worker --concurrency 4
+```
+
+`serve` refuses to boot when the schema is not current — if it exits, re-run the migrator step above. See [`rust-api/README.md`](./rust-api/README.md) for the full runbook.
+
+6. Start the realtime server and the frontend (one terminal each)
+
+```bash
+pnpm --filter live dev
+```
+
+```bash
+pnpm --filter web_new dev
+```
+
+7. Open your browser to http://localhost:3010 and register yourself as instance admin
+8. Log in with the same credentials — this is the actual product
 
 #### Production deployment
 
 For real self-hosted deployments (not local development), pick the path that matches how much you want to manage yourself:
 
-- **[All-in-One Docker image](./deployments/aio/community/README.md)** — one container that bundles every Pi Dash service, managed by `supervisord` internally. Simplest path: a single `docker run` command. Best for demos, homelab setups, evaluation, and small teams. External Postgres / Redis / RabbitMQ / S3-compatible storage are still required.
-- **[Docker Compose / Swarm self-hosting](./deployments/cli/community/README.md)** — the full microservices stack (6 service containers + database + queue + storage). More configuration, but gives you independent scaling and rolling updates per service. Recommended for anything beyond evaluation.
+- **[All-in-One Docker image](./deployments/aio/community/README.md)** — one container that bundles every Pi Dash service, managed by `supervisord` internally. Simplest path: a single `docker run` command. Best for demos, homelab setups, evaluation, and small teams. External Postgres / Valkey / S3-compatible storage are still required.
+- **[Docker Compose / Swarm self-hosting](./deployments/cli/community/README.md)** — the full microservices stack (Rust API + worker, `web_new`, `live`, Caddy proxy + database + cache + storage). More configuration, but gives you independent scaling and rolling updates per service. Recommended for anything beyond evaluation.
 - **Kubernetes / Helm** — Helm chart publishing is planned but not yet shipped; see [`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md).
 
 ### 2. Pi Dash CLI & Runner Daemon
@@ -187,7 +221,7 @@ Codex users can also install via the built-in `$skill-installer` from inside a C
 ## ⚙️ Built with
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
-[![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
 ## 📝 Documentation

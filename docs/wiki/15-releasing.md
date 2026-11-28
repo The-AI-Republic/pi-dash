@@ -3,7 +3,7 @@
 Pi Dash has two independent release streams:
 
 1. **Runner** (`pidash` binary) — versioned, tag-driven, packaged by cargo-dist. **External contract** with installed users.
-2. **Platform** (web + Django) — internal versioning; cloud and self-host follow their own paths.
+2. **Platform** (`web_new` + Rust API + `live`) — internal versioning; cloud and self-host follow their own paths.
 
 ## Runner releases
 
@@ -47,7 +47,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 ### Announce the release to runners
 
-The Django backend reads two env vars and folds them into every `welcome` session response (see [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md)):
+The Rust backend reads two env vars and folds them into every `welcome` session response (see [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md)):
 
 | Env var                 | Effect                                                                                                       |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -66,7 +66,7 @@ For self-hosted or non-Cloud environments, leave both unset to skip the announce
 
 `pidash update` only works for installs done via cargo-dist installers (they leave a receipt). Source builds and `cargo install` builds get a clear "reinstall via the installer if you want self-update" error.
 
-## Platform releases (web + Django)
+## Platform releases (`web_new` + Rust API)
 
 The OSS platform (this repo) uses standard SemVer in `package.json` (currently `1.3.0`). The cut process is intentionally lightweight — see `RELEASING.md` at the repo root for the current procedure.
 
@@ -80,7 +80,7 @@ The hosted Cloud overlay lives in a separate repo. Its release tags are **date-b
 | ----------------------- | ---------------------------------------------------- | --------------------------------- |
 | Runner (`pidash`)       | SemVer with `pidash-v` prefix (e.g. `pidash-v0.1.4`) | This repo                         |
 | Runner wire protocol    | Integer (currently `4`)                              | `runner/src/cloud/protocol.rs`    |
-| Platform (web + Django) | SemVer, root `package.json`                          | This repo                         |
+| Platform (`web_new` + Rust API) | SemVer, root `package.json`                    | This repo                         |
 | Cloud overlay           | Date tags `vYYYY.M.D`                                | `private-pi-dash` (separate repo) |
 
 ## Where to read next

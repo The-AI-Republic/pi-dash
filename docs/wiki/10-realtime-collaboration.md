@@ -1,6 +1,6 @@
 # 10 — Realtime Collaboration
 
-Pi Dash supports realtime multi-user editing of rich-text content (pages, work item descriptions, comments). This is done by a dedicated **Node service**, not by Django Channels — Django's WS layer is reserved for the runner protocol and per-feature notifications.
+Pi Dash supports realtime multi-user editing of rich-text content (pages, work item descriptions, comments). This is done by a dedicated **Node service** (`apps/live`) — clients never go through the Rust API for live edits, and the API never handles editor WebSockets.
 
 ## The two pieces
 
@@ -34,7 +34,7 @@ Located at `packages/editor/`. This is the React component layer that:
 
 - Wraps Tiptap (which wraps ProseMirror) for the editing UI.
 - Wraps the Hocuspocus client to talk to `apps/live`.
-- Exposes typed editor instances to `apps/web`, `apps/space`, and (where applicable) `apps/admin`.
+- Exposes typed editor instances to `apps/web_new` (the frozen legacy frontends have their own pinned editor wiring — do not touch it).
 
 Pages, rich descriptions, and inline comment editors all consume this package.
 
@@ -50,26 +50,26 @@ Browser tab                       apps/live                    Postgres
        │  WS (presence + ops)         │ Pi Dash session auth
        ▼                              ▼
 ┌─────────────────┐            ┌──────────────┐
-│ Other tabs /    │            │ Pi Dash API  │  (apps/api)
+│ Other tabs /    │            │ Rust API     │  (rust-api)
 │ collaborators   │            │ /auth/...    │
 └─────────────────┘            └──────────────┘
 ```
 
-- Clients **do not** talk to Django for live edits — only `apps/live`.
-- `apps/live` validates the session with the Django API on connect.
+- Clients **do not** talk to the API for live edits — only `apps/live`.
+- `apps/live` validates the session against the Rust API on connect.
 - Persistence is async: ops flow over WS in real time; snapshots are flushed to Postgres at intervals / on disconnect.
 
 ## Why a separate Node service?
 
-- Django Channels is single-process per worker and not ideal for the steady WS load of many open editors.
-- Hocuspocus + Yjs are mature Node libraries — reimplementing in Python would buy nothing.
+- The Rust API is request/response HTTP — holding a WebSocket per open editor does not belong in it.
+- Hocuspocus + Yjs are mature Node libraries — reimplementing them would buy nothing.
 - Keeps the realtime concern out of the REST request hot path.
 
 The trade-off: `apps/live` is **deployed alongside** the other web apps. In Docker, it's its own service container.
 
 ## Dev loop
 
-`pnpm dev` (root) starts `apps/live` along with the other apps. Port is set per `.env` (`apps/live/.env`).
+`pnpm dev` (root) starts `apps/live` along with every other workspace app, including the frozen legacy ones — for active-system work, run it filtered (see [04](./04-getting-started.md)). Port is set per `.env` (`apps/live/.env`, default 3100).
 
 Test it in isolation:
 
@@ -81,8 +81,8 @@ pnpm --filter live test
 ## Production
 
 - Caddy (`apps/proxy/Caddyfile.*`) fronts `apps/live` and upgrades the WS connection.
-- In `deployments/cli/community/` and Swarm/K8s, `apps/live` is a separate service alongside `web`/`admin`/`space`/`api`.
-- In the AIO single-container build, `supervisord` keeps the Node process up next to Django/Caddy/Postgres.
+- In `deployments/cli/community/` and Swarm/K8s, `apps/live` is a separate service alongside `web_new` and the Rust `api`.
+- In the AIO single-container build, `supervisord` keeps the Node process up next to the Rust API, Caddy and Postgres.
 
 ## Where to read next
 
