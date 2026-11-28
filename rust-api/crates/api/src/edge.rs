@@ -1,17 +1,19 @@
 //! Cutover edge: routing table, per-prefix flags, web handlers, Django proxy.
 //!
-//! The Rust binary sits in front of Django. [`PREFIX_TABLE`] encodes the URL
-//! prefix map (§0 of the inventory, from `apps/api/pi_dash/urls.py`); every
-//! row has a flip flag ([`Prefix`]) that defaults to Django. Only routes with
-//! a local handler are ever served by Rust — everything else, including
-//! unflipped prefixes, is reverse-proxied to [`EdgeHandle::upstream`].
+//! The Rust binary serves every request itself by default. [`PREFIX_TABLE`]
+//! encodes the URL prefix map (§0 of the inventory, from
+//! `apps/api/pi_dash/urls.py`); every row has a flip flag ([`Prefix`]) that
+//! defaults to Rust. Only routes with a local handler are ever served by
+//! Rust — everything else answers [`bad_gateway`] locally unless the Django
+//! fallback is explicitly opted into (see [`EdgeHandle::from_env`]).
 //!
 //! The first Rust-owned prefix is `web`: `GET /` and `GET /robots.txt`,
 //! byte-identical to `pi_dash.web.views` (see the `web_edge` contract suite).
 //! The canonical handlers live in [`crate::web`]; this module keeps the
 //! routing table, flags, proxy, and the shared serve-or-proxy helper.
-//! Unsafe methods on those paths still proxy: Django's CSRF-failure page
-//! embeds the deployment root URL, so Rust cannot reproduce it byte for byte.
+//! Unsafe methods on those paths still proxy when the fallback is on:
+//! Django's CSRF-failure page embeds the deployment root URL, so Rust
+//! cannot reproduce it byte for byte.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -24,9 +26,15 @@ use axum::Json;
 
 use crate::state::AppState;
 
-/// Upstream Django used when no flag is set. Matches Django's dev default.
+/// Django's dev default, kept for explicit test handles. It is NOT the
+/// runtime default: [`EdgeHandle::from_env`] proxies only when
+/// [`UPSTREAM_ENV`] is set, so a bare server never dials this address
+/// (inside the Rust container port 8000 is the Rust server itself).
 pub const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:8000";
-/// Env var for the Django upstream base URL (no trailing slash).
+/// Env var for the Django upstream base URL (no trailing slash). Unset or
+/// empty means Rust-only: no proxying, every unowned route answers
+/// [`bad_gateway`] locally without opening a connection. Set it (plus an
+/// explicit `PIDASH_RUST_<PREFIX>=0` opt-out) only for the fallback window.
 pub const UPSTREAM_ENV: &str = "PIDASH_DJANGO_UPSTREAM";
 /// Prefix of every per-prefix flip flag, e.g. `PIDASH_RUST_WEB`.
 pub const FLAG_ENV_PREFIX: &str = "PIDASH_RUST_";
@@ -125,34 +133,41 @@ pub fn match_prefixes(path: &str) -> Vec<Prefix> {
     best
 }
 
-/// Per-prefix flip flags. Everything defaults off: all traffic proxies.
+/// Per-prefix flip flags. Everything defaults on: Rust serves the whole
+/// site unless a prefix is explicitly opted back out to Django.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EdgeFlags {
     flags: [bool; 11],
 }
 
 impl EdgeFlags {
-    /// All flags off: the whole site proxies to Django.
+    /// All flags on: Rust serves every prefix (the default; see
+    /// [`EdgeFlags::from_env`]).
+    pub fn all_on() -> Self {
+        Self { flags: [true; 11] }
+    }
+
+    /// All flags off: the whole site proxies to Django. Only the fallback
+    /// window uses this: explicit `PIDASH_RUST_<PREFIX>=0` opt-outs plus
+    /// the [`UPSTREAM_ENV`] upstream reproduce the old cutover routing.
     pub fn all_off() -> Self {
         Self { flags: [false; 11] }
     }
 
-    /// Read flags from `PIDASH_RUST_*`. Absent or anything but
-    /// `1/true/yes/on` (case-insensitive) means off: a misspelled flag
-    /// fails safe toward Django, the known-good backend.
+    /// Read flags from `PIDASH_RUST_*`. Absent (or anything but an explicit
+    /// `0/false/no/off`, case-insensitive) means on: Rust serves the prefix
+    /// and never contacts Django for it. A misspelled flag fails safe
+    /// toward Rust, the backend that now owns the traffic; rollback is an
+    /// explicit opt-out (`PIDASH_RUST_<PREFIX>=0`) plus [`UPSTREAM_ENV`].
     pub fn from_env() -> Self {
-        let mut flags = Self::all_off();
+        let mut flags = Self::all_on();
         for prefix in Prefix::ALL {
             let name = format!("{FLAG_ENV_PREFIX}{}", prefix.env_suffix());
-            flags.set(prefix, env_is_truthy(&name));
+            if env_is_falsy(&name) {
+                flags.set(prefix, false);
+            }
         }
         flags
-    }
-
-    /// All flags on. Only the shadow router uses this: the shadow dispatch
-    /// answers "what would Rust serve if this prefix were flipped".
-    pub fn all_on() -> Self {
-        Self { flags: [true; 11] }
     }
 
     fn index(prefix: Prefix) -> usize {
@@ -167,15 +182,14 @@ impl EdgeFlags {
         self.flags[Self::index(prefix)]
     }
 
-    /// True when any matched prefix is flipped to Rust.
+    /// True when any matched prefix is served by Rust (its flag is on).
     pub fn any_rust(&self, prefixes: &[Prefix]) -> bool {
         prefixes.iter().any(|p| self.is_rust(*p))
     }
 }
 
-/// The shared truthy rule for `PIDASH_RUST_*` and the shadow flags:
-/// `1/true/yes/on` (case-insensitive) is on, everything else (including
-/// absent) is off.
+/// The shared truthy rule for the shadow flags: `1/true/yes/on`
+/// (case-insensitive) is on, everything else (including absent) is off.
 pub(crate) fn env_is_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|v| {
@@ -187,9 +201,25 @@ pub(crate) fn env_is_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The opt-out rule for the `PIDASH_RUST_*` prefix flags: an explicit
+/// `0/false/no/off` (case-insensitive, trimmed) sends the prefix back to
+/// Django; everything else — including absent and misspelled values — keeps
+/// Rust serving the prefix.
+pub(crate) fn env_is_falsy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug)]
 struct EdgeState {
-    upstream: String,
+    /// `None` is Rust-only: the proxy fails closed without dialing.
+    upstream: Option<String>,
     client: reqwest::Client,
     flags: RwLock<EdgeFlags>,
     /// True for handles derived by [`EdgeHandle::shadow_side`]: the proxy
@@ -220,7 +250,25 @@ impl EdgeHandle {
             .build()?;
         Ok(Self {
             inner: Arc::new(EdgeState {
-                upstream: upstream.into().trim_end_matches('/').to_owned(),
+                upstream: Some(upstream.into().trim_end_matches('/').to_owned()),
+                client,
+                flags: RwLock::new(flags),
+                shadow_side: false,
+            }),
+        })
+    }
+
+    /// Build with no upstream: Rust-only. The proxy fails closed with
+    /// [`bad_gateway`] without opening a connection — this is what
+    /// [`EdgeHandle::from_env`] builds when [`UPSTREAM_ENV`] is unset.
+    pub fn without_upstream(flags: EdgeFlags) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .timeout(PROXY_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            inner: Arc::new(EdgeState {
+                upstream: None,
                 client,
                 flags: RwLock::new(flags),
                 shadow_side: false,
@@ -249,19 +297,41 @@ impl EdgeHandle {
         self.inner.shadow_side
     }
 
-    /// All flags off, pointing at [`DEFAULT_UPSTREAM`].
+    /// All flags off, pointing at an explicit upstream. Tests that need
+    /// the old cutover routing (unflipped prefixes proxy) use this with a
+    /// stub or dead upstream; tests for the Rust-only default use
+    /// [`EdgeHandle::without_upstream`] with [`EdgeFlags::all_on`].
     pub fn for_tests(upstream: impl Into<String>) -> Self {
         Self::new(upstream, EdgeFlags::all_off()).expect("test edge handle")
     }
 
-    /// Read upstream + flags from the environment.
+    /// Read upstream + flags from the environment. Rust-only by default:
+    /// flags default on and the upstream is `None` unless [`UPSTREAM_ENV`]
+    /// is set (empty counts as unset), so a bare server proxies nothing and
+    /// never dials Django. Opt back into the Django fallback per prefix
+    /// with an explicit `PIDASH_RUST_<PREFIX>=0` (see
+    /// [`EdgeFlags::from_env`]).
     pub fn from_env() -> Result<Self, reqwest::Error> {
-        let upstream = std::env::var(UPSTREAM_ENV).unwrap_or_else(|_| DEFAULT_UPSTREAM.to_owned());
-        Self::new(upstream, EdgeFlags::from_env())
+        let upstream = std::env::var(UPSTREAM_ENV)
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let flags = EdgeFlags::from_env();
+        match upstream {
+            Some(upstream) => Self::new(upstream, flags),
+            None => Self::without_upstream(flags),
+        }
     }
 
-    pub fn upstream(&self) -> &str {
-        &self.inner.upstream
+    /// The Django upstream, if the fallback is opted in. `None` is
+    /// Rust-only: the proxy fails closed without opening a connection.
+    pub fn upstream(&self) -> Option<&str> {
+        self.inner.upstream.as_deref()
+    }
+
+    /// True when this handle can proxy: an upstream is configured.
+    pub fn can_proxy(&self) -> bool {
+        self.inner.upstream.is_some()
     }
 
     pub fn flags(&self) -> EdgeFlags {
@@ -275,16 +345,21 @@ impl EdgeHandle {
         }
     }
 
-    fn target(&self, path_and_query: &str) -> String {
-        format!("{}{}", self.inner.upstream, path_and_query)
+    fn target(&self, path_and_query: &str) -> Option<String> {
+        self.inner
+            .upstream
+            .as_ref()
+            .map(|upstream| format!("{upstream}{path_and_query}"))
     }
 }
 
 /// Serve one Rust-owned web-edge response, or proxy when Django owns it.
-/// Shared by the canonical D-00 handlers in [`crate::web`]: owned only
-/// while the web prefix is flipped and only for `GET`/`HEAD`; every other
-/// method, and every request while unflipped, proxies so Django's exact
-/// behavior (including the CSRF-failure page) is preserved.
+/// Shared by the canonical D-00 handlers in [`crate::web`]: owned while
+/// the web prefix flag is on (the default) and only for `GET`/`HEAD`;
+/// every other method, and every request while opted out
+/// (`PIDASH_RUST_WEB=0`), proxies so Django's exact behavior (including
+/// the CSRF-failure page) is preserved. Without an upstream the proxy
+/// fails closed, so opted-out methods answer 502 locally.
 pub(crate) async fn serve_web_bytes(
     state: &AppState,
     req: Request,
@@ -317,7 +392,8 @@ pub(crate) async fn serve_web_bytes(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProxiedUpstream;
 
-/// Fallback: reverse-proxy to Django.
+/// Fallback: reverse-proxy to Django when the fallback is opted in, else
+/// fail closed with [`bad_gateway`] without opening a connection.
 pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     let mut response = proxy_request(&state, req).await;
     response.extensions_mut().insert(ProxiedUpstream);
@@ -325,7 +401,8 @@ pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
 }
 
 /// An owned path: the `owned` methods serve from `methods` as built,
-/// everything else falls through to Django ([`proxy`]).
+/// everything else falls through to [`proxy`] (Django when the fallback
+/// is opted in, 502 locally otherwise).
 ///
 /// Canonical home of the per-module `owned` cutover helper
 /// (PIDASHCONV-1593): every other copy is a call to this. `owned`
@@ -370,22 +447,30 @@ async fn proxy_request(state: &AppState, req: Request) -> Response {
             crate::edge_shadow::NoHandlerReason::Proxied,
         );
     }
+    // Rust-only (no upstream configured): fail closed without dialing.
+    // This is the default; the fallback window opts back in with
+    // `PIDASH_DJANGO_UPSTREAM` (see [`EdgeHandle::from_env`]).
+    let edge = state.edge();
+    let Some(target) = edge.target(
+        &req.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str().to_owned())
+            .unwrap_or_else(|| "/".to_owned()),
+    ) else {
+        return bad_gateway();
+    };
     // Shadow eligibility is decided before proxying; `None` (including
     // "shadow disabled") keeps the code path below exactly today's.
     let shadow = crate::edge_shadow::precheck(state, &req);
     let shadow_headers = shadow.as_ref().map(|_| req.headers().clone());
     let shadow_version = shadow.as_ref().map(|_| req.version());
-    let edge = state.edge();
     let method = req.method().clone();
     let path_and_query = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_owned())
         .unwrap_or_else(|| "/".to_owned());
-    let mut outgoing = edge
-        .inner
-        .client
-        .request(method.clone(), edge.target(&path_and_query));
+    let mut outgoing = edge.inner.client.request(method.clone(), target);
 
     let mut forwarded = HeaderMap::new();
     for (name, value) in req.headers() {
@@ -631,32 +716,105 @@ mod tests {
         assert_eq!(ROBOTS_BODY, b"User-agent: *\nDisallow: /");
     }
 
+    /// One test owns every `PIDASH_RUST_*` / `PIDASH_DJANGO_UPSTREAM` env
+    /// mutation: tests run in parallel in one process, so splitting these
+    /// across fns races. It restores every var it touches.
     #[test]
-    fn flags_from_env_default_off_and_parse_truthy() {
+    fn cutover_env_defaults_rust_only_with_explicit_opt_out() {
         for prefix in Prefix::ALL {
             std::env::remove_var(format!("{FLAG_ENV_PREFIX}{}", prefix.env_suffix()));
         }
-        assert_eq!(EdgeFlags::from_env(), EdgeFlags::all_off());
+        std::env::remove_var(UPSTREAM_ENV);
 
-        std::env::set_var("PIDASH_RUST_WEB", "1");
-        std::env::set_var("PIDASH_RUST_API_V1", "true");
-        std::env::set_var("PIDASH_RUST_AUTH", "banana");
+        // Rust-only default: no flag set means every prefix serves itself.
+        assert_eq!(EdgeFlags::from_env(), EdgeFlags::all_on());
+
+        // Only an explicit opt-out sends a prefix back to Django.
+        std::env::set_var("PIDASH_RUST_WEB", "0");
+        std::env::set_var("PIDASH_RUST_API_V1", "off");
+        std::env::set_var("PIDASH_RUST_AUTH", "FALSE");
+        std::env::set_var("PIDASH_RUST_APP", "no");
         let flags = EdgeFlags::from_env();
-        assert!(flags.is_rust(Prefix::Web));
-        assert!(flags.is_rust(Prefix::ApiV1));
+        assert!(!flags.is_rust(Prefix::Web));
+        assert!(!flags.is_rust(Prefix::ApiV1));
         assert!(!flags.is_rust(Prefix::Auth));
         assert!(!flags.is_rust(Prefix::App));
+        // Everything else — including garbage — stays on Rust.
+        std::env::set_var("PIDASH_RUST_AUTH", "banana");
+        std::env::set_var("PIDASH_RUST_APP", "1");
+        let flags = EdgeFlags::from_env();
+        assert!(flags.is_rust(Prefix::Auth));
+        assert!(flags.is_rust(Prefix::App));
+        assert!(flags.is_rust(Prefix::Space));
 
+        // `from_env` with a clean env is Rust-only with no upstream.
         for prefix in Prefix::ALL {
             std::env::remove_var(format!("{FLAG_ENV_PREFIX}{}", prefix.env_suffix()));
         }
+        std::env::remove_var(UPSTREAM_ENV);
+        let edge = EdgeHandle::from_env().expect("from_env");
+        assert_eq!(edge.flags(), EdgeFlags::all_on());
+        assert_eq!(edge.upstream(), None);
+        assert!(!edge.can_proxy());
+        assert_eq!(edge.target("/?a=1"), None);
+        // Empty counts as unset.
+        std::env::set_var(UPSTREAM_ENV, "");
+        let edge = EdgeHandle::from_env().expect("from_env");
+        assert_eq!(edge.upstream(), None);
+        std::env::remove_var(UPSTREAM_ENV);
+
+        // Opt-in: an upstream plus an explicit `=0` restores the proxy.
+        std::env::set_var(UPSTREAM_ENV, "http://django:8000/");
+        std::env::set_var("PIDASH_RUST_WEB", "0");
+        let edge = EdgeHandle::from_env().expect("from_env");
+        assert_eq!(edge.upstream(), Some("http://django:8000"));
+        assert!(edge.can_proxy());
+        assert!(!edge.flags().is_rust(Prefix::Web));
+        assert!(edge.flags().is_rust(Prefix::App));
+        assert_eq!(
+            edge.target("/?a=1"),
+            Some("http://django:8000/?a=1".to_owned())
+        );
+        std::env::remove_var(UPSTREAM_ENV);
+        std::env::remove_var("PIDASH_RUST_WEB");
     }
 
     #[test]
     fn upstream_normalizes_trailing_slash() {
         let edge = EdgeHandle::for_tests("http://django:8000/");
-        assert_eq!(edge.upstream(), "http://django:8000");
-        assert_eq!(edge.target("/?a=1"), "http://django:8000/?a=1");
+        assert_eq!(edge.upstream(), Some("http://django:8000"));
+        assert_eq!(
+            edge.target("/?a=1"),
+            Some("http://django:8000/?a=1".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn rust_only_fallback_fails_closed_without_dialing() {
+        use tower::ServiceExt;
+
+        // No upstream configured: the fallback answers 502 locally. There
+        // is no address to dial, so no connection can be opened.
+        let state = AppState::with_edge(
+            "0.1.0",
+            EdgeHandle::without_upstream(EdgeFlags::all_on()).expect("rust-only edge"),
+        );
+        assert!(!state.edge().can_proxy());
+        let app = crate::routes::with_routes(state, axum::Router::new());
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/v1/things")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body.as_ref(), BAD_GATEWAY_BODY.as_bytes());
     }
 
     #[tokio::test]

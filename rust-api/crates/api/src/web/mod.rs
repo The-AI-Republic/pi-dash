@@ -10,10 +10,11 @@
 //!
 //! Both are served byte-identical to Django (see the `F-WEB-01`/`F-WEB-02`
 //! fixture goldens under `rust-api/fixtures/web/`). The ownership rule lives
-//! on one code path in [`crate::edge`]: a request is Rust-served only while
-//! the web prefix flag is on and only for `GET`/`HEAD`; everything else
-//! proxies so Django's exact behavior — including the CSRF-failure page for
-//! unsafe methods without a token — is preserved.
+//! on one code path in [`crate::edge`]: a request is Rust-served while the
+//! web prefix flag is on (the default) and only for `GET`/`HEAD`; everything
+//! else proxies when the Django fallback is opted in, so Django's exact
+//! behavior — including the CSRF-failure page for unsafe methods without a
+//! token — is preserved, and fails closed with 502 otherwise.
 
 use axum::extract::{Request, State};
 use axum::response::Response;
