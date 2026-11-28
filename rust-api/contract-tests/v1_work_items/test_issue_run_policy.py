@@ -11,6 +11,7 @@ DIFF-53 (Django moves/trigger proceeds, Rust answers 403
 """
 
 import httpx
+import pytest
 
 from .conftest import issue_url
 from _harness.diffs import expect, is_rust
@@ -21,6 +22,25 @@ MESSAGE = (
     "Ask the creator to assign you, or ask a project admin to change the "
     "project's 'Who can run issues' setting."
 )
+
+
+@pytest.fixture(autouse=True)
+def _project_states(db, seeder, world):
+    # The v1 world seeds its project through SQL with no states, so the
+    # API-created issue has none; the state-move cases need two to move
+    # between.
+    for name, group in (("Backlog", "backlog"), ("Todo", "unstarted")):
+        seeder.create_state(
+            world["workspace"]["id"], world["project"]["id"], name=name, group=group
+        )
+    yield
+    # The API-created issue is not tracked, so a moved issue would keep
+    # its seeded state alive (the tracker swallows the FK error). Clear
+    # the reference before the tracker deletes the states.
+    db.execute(
+        "UPDATE issues SET state_id = NULL WHERE project_id = %s",
+        (world["project"]["id"],),
+    )
 
 
 def _states(api, world):
@@ -85,7 +105,12 @@ def test_assignee_moves_state(api, world, seeder, settings):
             issue_url(world, issue["id"]), json={"assignees": [member["id"]]}
         )
         assert resp.status_code == 200, resp.text[:500]
-        target = _other_state(_states(api, world), issue["state"])
+        # The assignee write gives the stateless issue a state, so pick the
+        # target from the persisted state: moving to the same state is a
+        # no-op that skips the run-policy gate and would prove nothing.
+        before = _get_issue(api, world, issue["id"])["state"]
+        target = _other_state(_states(api, world), before)
+        assert target != before
         resp = client.patch(issue_url(world, issue["id"]), json={"state": target})
         assert resp.status_code == 200, resp.text[:500]
         assert _get_issue(client, world, issue["id"])["state"] == target
@@ -93,9 +118,9 @@ def test_assignee_moves_state(api, world, seeder, settings):
         client.close()
 
 
-def test_other_member_cannot_move_state(api, world, seeder):
+def test_other_member_cannot_move_state(api, world, seeder, settings):
     # DIFF-53: Django moves (200), Rust refuses (403, whole change).
-    member, client = _member_client(seeder, world)
+    member, client = _member_client(seeder, world, settings)
     try:
         issue = world["issue"]
         target = _other_state(_states(api, world), issue["state"])
@@ -120,14 +145,17 @@ def test_removed_assignee_cannot_move_state(api, world, seeder, settings):
         assert resp.status_code == 200, resp.text[:500]
         resp = api.patch(issue_url(world, issue["id"]), json={"assignees": []})
         assert resp.status_code == 200, resp.text[:500]
-        target = _other_state(_states(api, world), issue["state"])
+        # The assignee writes give the stateless issue a state on both
+        # backends, so compare with the state just before the move.
+        before = _get_issue(api, world, issue["id"])["state"]
+        target = _other_state(_states(api, world), before)
         resp = client.patch(issue_url(world, issue["id"]), json={"state": target})
         assert resp.status_code == expect("DIFF-53", django=200, rust=403), (
             resp.text[:500]
         )
         if is_rust():
             assert resp.json() == {"error": MESSAGE, "reason": REASON}
-            assert _get_issue(api, world, issue["id"])["state"] == issue["state"]
+            assert _get_issue(api, world, issue["id"])["state"] == before
     finally:
         client.close()
 
@@ -149,9 +177,13 @@ def test_guest_cannot_move_state(api, world, guest_client):
     issue = world["issue"]
     target = _other_state(_states(api, world), issue["state"])
     resp = guest_client.patch(issue_url(world, issue["id"]), json={"state": target})
+    # Guests hold no write rights in either mode: the generic permission
+    # gate answers before the run-policy gate, on both backends (as on the
+    # app route, app_project/test_issue_run_policy.py).
     assert resp.status_code == 403, resp.text[:500]
-    if is_rust():
-        assert resp.json() == {"error": MESSAGE, "reason": REASON}
+    assert resp.json() == {
+        "detail": "You do not have permission to perform this action."
+    }
 
 
 def test_project_members_allows_member(api, world, seeder, settings):
@@ -167,11 +199,11 @@ def test_project_members_allows_member(api, world, seeder, settings):
         client.close()
 
 
-def test_run_ai_refused_for_other_member(api, world, seeder):
+def test_run_ai_refused_for_other_member(api, world, seeder, settings):
     # DIFF-53: the run-ai trigger is gated before any run is created.
     # Django proceeds to dispatch (any nonno-runner reason); Rust answers
     # 403 `not_issue_runner` and creates nothing.
-    member, client = _member_client(seeder, world)
+    member, client = _member_client(seeder, world, settings)
     try:
         issue = world["issue"]
         slug = world["workspace"]["slug"]

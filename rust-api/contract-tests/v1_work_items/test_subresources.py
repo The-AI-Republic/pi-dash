@@ -9,6 +9,7 @@ enqueued activity tasks never execute); everything else goes through the API.
 import pytest
 
 from .conftest import ENVELOPE_KEYS, issue_url
+from _harness.diffs import expect
 
 pytestmark = pytest.mark.contract
 
@@ -393,12 +394,20 @@ def test_relate_unrelate_roundtrip(api, world):
 
 def test_workpad_get_patch(api, world):
     issue_id = world["issue"]["id"]
+    # DIFF-60: Rust also answers the stored body's `body_sha256` (the
+    # stale-write guard); Django answers the timestamp/body only.
     gotten = api.get(sub_url(world, issue_id, "workpad"))
     assert gotten.status_code == 200
-    assert set(gotten.json()) == {"body", "updated_at"}
+    assert set(gotten.json()) == expect(
+        "DIFF-60",
+        django={"body", "updated_at"},
+        rust={"body", "body_sha256", "updated_at"},
+    )
     patched = api.patch(sub_url(world, issue_id, "workpad"), json={"body": "# notes"})
     assert patched.status_code == 200, patched.text
-    assert set(patched.json()) == {"updated_at"}
+    assert set(patched.json()) == expect(
+        "DIFF-60", django={"updated_at"}, rust={"body_sha256", "updated_at"}
+    )
     assert api.get(sub_url(world, issue_id, "workpad")).json()["body"] == "# notes"
 
 
