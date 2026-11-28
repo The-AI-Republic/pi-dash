@@ -23,6 +23,34 @@ pub const INITIAL_RETRY_DELAY_SECS: f64 = 0.5;
 pub const MAX_RETRY_DELAY_SECS: f64 = 8.0;
 /// Largest honoured `retry-after`, seconds.
 pub const RETRY_AFTER_MAX_SECS: f64 = 60.0;
+/// Consecutive failed attempts that open an endpoint's breaker.
+pub const BREAKER_FAILURE_THRESHOLD: usize = 5;
+/// How long an open breaker fails fast before letting one probe through.
+pub const BREAKER_OPEN_SECS: u64 = 30;
+
+/// The process-wide circuit breaker for one provider endpoint. Every
+/// send loop that posts to `endpoint` shares it, so a down provider
+/// fails fast instead of costing each request `MAX_RETRIES + 1` attempts.
+pub fn provider_breaker(endpoint: &str) -> llm_resilience::CircuitBreaker {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static BREAKERS: OnceLock<Mutex<HashMap<String, llm_resilience::CircuitBreaker>>> =
+        OnceLock::new();
+    let mut breakers = BREAKERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    breakers
+        .entry(endpoint.to_owned())
+        .or_insert_with(|| {
+            llm_resilience::CircuitBreaker::new(
+                BREAKER_FAILURE_THRESHOLD,
+                1.0,
+                std::time::Duration::from_secs(BREAKER_OPEN_SECS),
+            )
+        })
+        .clone()
+}
 
 /// `_should_retry` (`openai/_base_client.py:773-807`): the
 /// `x-should-retry` override wins, else 408/409/429/5xx retry.
@@ -107,5 +135,16 @@ mod tests {
         assert_eq!(retry_after_seconds(Some(&headers)), Some(3.0));
         headers.insert("retry-after", HeaderValue::from_static("2.5"));
         assert_eq!(retry_after_seconds(Some(&headers)), Some(2.5));
+    }
+
+    #[test]
+    fn provider_breaker_opens_per_endpoint() {
+        let down = "http://breaker-test-down.invalid/v1/messages";
+        let up = "http://breaker-test-up.invalid/v1/messages";
+        for _ in 0..BREAKER_FAILURE_THRESHOLD {
+            provider_breaker(down).try_acquire().unwrap().failure();
+        }
+        assert!(provider_breaker(down).try_acquire().is_none());
+        assert!(provider_breaker(up).try_acquire().is_some());
     }
 }

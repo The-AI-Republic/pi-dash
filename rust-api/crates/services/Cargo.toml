@@ -119,6 +119,8 @@ pulldown-cmark = "0.13.4"
 # Same spec as pidash-api (locked unicode-general-category 1.1.0,
 # Unicode 16.0 data — no lock churn).
 unicode-general-category = "1"
+# Per-endpoint circuit breaker for the provider send loops.
+llm-resilience = "0.2.1"
 
 [dev-dependencies]
 # PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs

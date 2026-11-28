@@ -63,7 +63,9 @@ use crate::cloud_agent::provider::{
     ANTHROPIC_VERSION, USER_AGENT,
 };
 use crate::cloud_agent::usage::{ProviderTable, RequestUsage};
-use pidash_services::assistant::retry::{should_retry_status, sleep_for_retry, MAX_RETRIES};
+use pidash_services::assistant::retry::{
+    provider_breaker, should_retry_status, sleep_for_retry, MAX_RETRIES,
+};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -1655,7 +1657,11 @@ async fn post_stream(
     client: &reqwest::Client,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut retries_taken: u32 = 0;
+    let breaker = provider_breaker(&request.endpoint_url);
     loop {
+        let Some(permit) = breaker.try_acquire() else {
+            return Err(ProviderError::Connection);
+        };
         let mut outgoing = client
             .post(request.endpoint_url.clone())
             .header("Content-Type", "application/json")
@@ -1676,6 +1682,7 @@ async fn post_stream(
         // (same call as the D-11 lanes).
         match outgoing.body(request.body.clone()).send().await {
             Err(error) if error.is_timeout() => {
+                permit.failure();
                 if retries_taken < MAX_RETRIES {
                     sleep_for_retry(retries_taken, None).await;
                     retries_taken += 1;
@@ -1686,6 +1693,7 @@ async fn post_stream(
             Err(_) => {
                 // Any other send failure reads as a connection error
                 // (the SDK's bare `except Exception` arm).
+                permit.failure();
                 if retries_taken < MAX_RETRIES {
                     sleep_for_retry(retries_taken, None).await;
                     retries_taken += 1;
@@ -1696,7 +1704,11 @@ async fn post_stream(
             Ok(response) => {
                 let status = response.status().as_u16();
                 if status < 400 {
+                    permit.success();
                     return Ok(response);
+                }
+                if status == 429 || status >= 500 {
+                    permit.failure();
                 }
                 if retries_taken < MAX_RETRIES && should_retry_status(status, response.headers()) {
                     sleep_for_retry(retries_taken, Some(response.headers())).await;
