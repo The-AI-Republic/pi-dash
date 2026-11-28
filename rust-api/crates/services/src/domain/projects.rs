@@ -577,7 +577,7 @@ pub struct ProjectUpdate<'a> {
     pub created_by: Option<Uuid>,
 }
 
-/// The app PATCH/PUT statement: all 44 setter columns for one row.
+/// The app PATCH/PUT statement: all 46 setter columns for one row.
 fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<projects::Entity> {
     use projects::Column as C;
     projects::Entity::update_many()
@@ -651,6 +651,7 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
             C::MembersCanEditStates,
             Expr::value(upd.members_can_edit_states),
         )
+        .col_expr(C::DefaultWorkType, Expr::value(upd.default_work_type))
         .col_expr(C::WorkspaceId, Expr::value(upd.workspace_id))
         .col_expr(C::DeletedAt, Expr::value(upd.deleted_at))
         .col_expr(C::UpdatedAt, Expr::value(upd.updated_at))
@@ -660,7 +661,7 @@ fn project_update_stmt(project_id: Uuid, upd: &ProjectUpdate<'_>) -> UpdateMany<
 }
 
 /// The app project PATCH/PUT write (`ProjectSerializer.update()` +
-/// `save()`): all 44 setter columns for one row. Runs on the
+/// `save()`): all 46 setter columns for one row. Runs on the
 /// caller's connection (the update tx also holds the default-clear).
 pub async fn apply_update(
     db: &impl ConnectionTrait,
@@ -2881,9 +2882,10 @@ mod tests {
         let update = sql(&project_update_stmt(id, &upd));
         assert_eq!(
             update.matches(" = ").count(),
-            45 + 1,
-            "45 setters plus the id filter"
+            46 + 1,
+            "46 setters plus the id filter"
         );
+        assert!(update.contains("\"default_work_type\" = 'software'"));
         assert!(update.contains(&format!("\"created_by_id\" = '{actor}'")));
         assert!(update.contains("\"deleted_at\" = NULL"));
         assert!(update.ends_with(&format!("WHERE \"projects\".\"id\" = '{id}'")));
