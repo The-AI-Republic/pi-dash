@@ -1666,6 +1666,7 @@ class IssueLinkListCreateAPIEndpoint(BaseAPIView):
                 project__project_projectmember__is_active=True,
             )
             .filter(project__archived_at__isnull=True)
+            .select_related("issue", "issue__state")
             .order_by(self.kwargs.get("order_by", "-created_at"))
             .distinct()
         )
@@ -1771,6 +1772,7 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
                 project__project_projectmember__is_active=True,
             )
             .filter(project__archived_at__isnull=True)
+            .select_related("issue", "issue__state")
             .order_by(self.kwargs.get("order_by", "-created_at"))
             .distinct()
         )
@@ -1914,7 +1916,7 @@ class IssueCommentListCreateAPIEndpoint(BaseAPIView):
                 project__project_projectmember__is_active=True,
             )
             .filter(project__archived_at__isnull=True)
-            .select_related("workspace", "project", "issue", "actor")
+            .select_related("workspace", "project", "issue", "issue__state", "actor")
             .annotate(
                 is_member=Exists(
                     ProjectMember.objects.filter(
@@ -2070,7 +2072,7 @@ class IssueCommentDetailAPIEndpoint(BaseAPIView):
                 project__project_projectmember__is_active=True,
             )
             .filter(project__archived_at__isnull=True)
-            .select_related("workspace", "project", "issue", "actor")
+            .select_related("workspace", "project", "issue", "issue__state", "actor")
             .annotate(
                 is_member=Exists(
                     ProjectMember.objects.filter(
@@ -2263,7 +2265,7 @@ class IssueActivityListAPIEndpoint(BaseAPIView):
                 project__project_projectmember__is_active=True,
             )
             .filter(project__archived_at__isnull=True)
-            .select_related("actor", "workspace", "issue", "project")
+            .select_related("actor", "workspace", "issue", "issue__state", "project")
         ).order_by(request.GET.get("order_by", "created_at"))
 
         return self.paginate(
@@ -2319,7 +2321,7 @@ class IssueActivityDetailAPIEndpoint(BaseAPIView):
                     project__project_projectmember__is_active=True,
                 )
                 .filter(project__archived_at__isnull=True)
-                .select_related("actor", "workspace", "issue", "project")
+                .select_related("actor", "workspace", "issue", "issue__state", "project")
             )
             .order_by(request.GET.get("order_by", "created_at"))
             .first()
