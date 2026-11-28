@@ -142,16 +142,28 @@ function updateEnvFile() {
             # "&", "\\" and the delimiter are special: the value is kept
             # byte for byte. Writing back through the same file keeps its
             # owner and mode.
+            # The original is only replaced once the full copy is written.
             local tmp line
-            tmp=$(mktemp)
-            while IFS= read -r line || [ -n "$line" ]; do
+            if ! tmp=$(mktemp) || [ -z "$tmp" ]; then
+                echo "Could not update $key in $file: no temporary file" >&2
+                return 1
+            fi
+            if ! { while IFS= read -r line || [ -n "$line" ]; do
                 if [[ $line == "$key="* ]]; then
                     printf '%s=%s\n' "$key" "$value"
                 else
                     printf '%s\n' "$line"
                 fi
-            done < "$file" > "$tmp"
-            cat "$tmp" > "$file"
+            done < "$file" > "$tmp"; } 2>/dev/null; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file: writing a temporary copy failed" >&2
+                return 1
+            fi
+            if ! cat "$tmp" > "$file"; then
+                rm -f "$tmp"
+                echo "Could not update $key in $file" >&2
+                return 1
+            fi
             rm -f "$tmp"
         fi
     else
@@ -398,7 +410,6 @@ IFS= read -r -d '' CREDENTIAL_PROBE <<'PROBE' || true
 import os
 import re
 import signal
-import sys
 import time
 
 SERVICES = os.environ.get("CREDENTIAL_CHECK_SERVICES", "").split()
@@ -412,18 +423,16 @@ def say(status, service, detail=""):
     print(f"credential-check\t{status}\t{service}\t{detail}", flush=True)
 
 
+class Deadline(Exception):
+    """Raised by the alarm when one attempt hangs past every client timeout."""
+
+
 def give_up(signum, frame):
-    say("NOTREADY", CURRENT[0], f"no answer within {SECONDS}s")
-    sys.stdout.flush()
-    os._exit(0)
-
-
-CURRENT = ["PostgreSQL"]
+    raise Deadline()
 
 
 def retry(service, attempt):
     """Run attempt() until it returns a result or the deadline passes."""
-    CURRENT[0] = service
     end = time.monotonic() + SECONDS
     signal.signal(signal.SIGALRM, give_up)
     signal.alarm(SECONDS + 3 * TIMEOUT)
@@ -439,6 +448,9 @@ def retry(service, attempt):
                 say("NOTREADY", service, last)
                 return
             time.sleep(INTERVAL)
+    except Deadline:
+        # Ends this service's check only; the next one still runs.
+        say("NOTREADY", service, f"no answer within {SECONDS}s")
     finally:
         signal.alarm(0)
 

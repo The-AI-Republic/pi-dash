@@ -240,6 +240,29 @@ describe("install.sh env file values", () => {
     });
   }
 
+  it("leaves the env file untouched when the rewrite cannot be prepared", () => {
+    const env = "A=1\nDATABASE_URL=old\nB=2\n";
+    const { status, file, out } = runEnv(
+      `mktemp() { return 1; }
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
+      { env }
+    );
+    assert.equal(file, env, out);
+    assert.match(out, /status=[1-9]/);
+    assert.equal(status, 0, out);
+  });
+
+  it("leaves the env file untouched when the temporary copy cannot be written", () => {
+    const env = "A=1\nDATABASE_URL=old\nB=2\n";
+    const { file, out } = runEnv(
+      `mktemp() { echo /nonexistent-dir/tmp; }
+updateEnvFile DATABASE_URL new "$DOCKER_ENV_PATH"; echo "status=$?"`,
+      { env }
+    );
+    assert.equal(file, env, out);
+    assert.match(out, /status=[1-9]/);
+  });
+
   it("carries a connection URL from the backup into the new env file on upgrade", () => {
     const { file, out } = runEnv("syncEnvFile", {
       env: "APP_RELEASE=stable\nDATABASE_URL=\nAMQP_URL=\n",

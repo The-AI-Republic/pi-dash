@@ -397,7 +397,9 @@ Chainguard's free MinIO image was considered and rejected: it only publishes `la
 
 The `self-host-checks` CI workflow re-checks all of this on every change. It confirms that the pinned reference still resolves for both platforms, that this table names the same digest as the compose files, and that the image serves an existing volume and bootstraps the local bucket.
 
-## **Re-pinning.** Never switch to `latest`. To move to a newer release, pick a tag from Docker Hub and read the upstream release notes and security advisories. Resolve its digest with `docker buildx imagetools inspect pgsty/silo:<tag>` and confirm that it matches the release notes and lists `linux/amd64` and `linux/arm64`. Then update the compose files and this table in the same change. If an official MinIO image becomes anonymously pullable again, prefer it.
+**Re-pinning.** Never switch to `latest`. To move to a newer release, pick a tag from Docker Hub and read the upstream release notes and security advisories. Resolve its digest with `docker buildx imagetools inspect pgsty/silo:<tag>` and confirm that it matches the release notes and lists `linux/amd64` and `linux/arm64`. Then update the compose files and this table in the same change. If an official MinIO image becomes anonymously pullable again, prefer it.
+
+---
 
 ### View Logs
 

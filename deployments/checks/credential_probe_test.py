@@ -322,6 +322,27 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(results["PostgreSQL"][0], "MISMATCH", out)
         self.assertEqual(results["RabbitMQ"][0], "ERROR", out)
 
+    def test_a_check_cut_off_by_the_hard_deadline_does_not_end_the_probe(self):
+        # The alarm is the backstop for an attempt that hangs past every
+        # client timeout. It must end that service's check only.
+        script = (
+            "import time\n"
+            f"exec(compile({self.source!r}, 'probe', 'exec'))\n"
+            "SECONDS, TIMEOUT = 1, 0\n"
+            "retry('PostgreSQL', lambda: time.sleep(30))\n"
+            "retry('RabbitMQ', lambda: ('OK', ''))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env={"PATH": os.environ.get("PATH", "")},
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        lines = [line.split("\t") for line in result.stdout.splitlines() if line.startswith("credential-check\t")]
+        statuses = {line[2]: line[1] for line in lines}
+        self.assertEqual(statuses, {"PostgreSQL": "NOTREADY", "RabbitMQ": "OK"}, result.stdout + result.stderr)
+
     def test_postgres_external_host_is_skipped(self):
         results, out = self.run_probe({"DATABASE_URL": "postgresql://app:secret@external-db/app"}, services="db")
         self.assertEqual(results["PostgreSQL"][0], "SKIP", out)
