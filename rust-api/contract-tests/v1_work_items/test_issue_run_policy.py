@@ -25,7 +25,7 @@ MESSAGE = (
 
 
 @pytest.fixture(autouse=True)
-def _project_states(seeder, world):
+def _project_states(db, seeder, world):
     # The v1 world seeds its project through SQL with no states, so the
     # API-created issue has none; the state-move cases need two to move
     # between.
@@ -33,6 +33,14 @@ def _project_states(seeder, world):
         seeder.create_state(
             world["workspace"]["id"], world["project"]["id"], name=name, group=group
         )
+    yield
+    # The API-created issue is not tracked, so a moved issue would keep
+    # its seeded state alive (the tracker swallows the FK error). Clear
+    # the reference before the tracker deletes the states.
+    db.execute(
+        "UPDATE issues SET state_id = NULL WHERE project_id = %s",
+        (world["project"]["id"],),
+    )
 
 
 def _states(api, world):
