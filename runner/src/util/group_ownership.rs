@@ -323,6 +323,13 @@ impl GroupOwner {
         self.pgid
     }
 
+    /// Every member a proven snapshot has shown, as `(pid, start)`, sorted.
+    pub fn known_ids(&self) -> Vec<(i32, u64)> {
+        let mut ids: Vec<(i32, u64)> = self.known.iter().map(|k| (k.pid, k.start)).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Whether some remembered process has this pid (tests only).
     #[cfg(test)]
     pub fn knows_pid(&self, pid: i32) -> bool {
@@ -425,10 +432,38 @@ impl GroupOwner {
     /// decision was made on; a proven but unpinned group is reported as
     /// [`Proof::Unproven`] and left alone.
     pub fn signal(&mut self, sig: GroupSignal) -> Proof {
-        match self.observe() {
-            Proof::Ours(live) if self.anchor.is_none() => Proof::Unproven(live),
+        self.signal_with(sig, Self::observe, procinfo::info, send_killpg)
+    }
+
+    /// Whether an anchor keeps the group id reserved through delivery. A
+    /// spawned anchor is this daemon's unreaped child, so it always does.
+    /// An adopted one (crash recovery) is not: it pins the group only while
+    /// it is still the recorded, live process in the group, so it is re-read
+    /// right before the signal. What is left is the gap between that read
+    /// and `killpg`; the anchor ends only by SIGKILL, and its pid would then
+    /// have to be reaped and handed to a new group leader within that gap.
+    fn pinned(&self, reread: impl Fn(i32) -> Option<ProcInfo>) -> bool {
+        match &self.anchor {
+            None => false,
+            Some(a) if a.child.is_some() => true,
+            Some(a) => reread(a.id.pid)
+                .is_some_and(|r| ProcId::from(&r) == a.id && r.pgid == self.pgid && !r.zombie),
+        }
+    }
+
+    /// [`signal`](Self::signal) with the snapshot, the anchor re-read and
+    /// the delivery injected.
+    fn signal_with(
+        &mut self,
+        sig: GroupSignal,
+        observe: impl FnOnce(&mut Self) -> Proof,
+        reread: impl Fn(i32) -> Option<ProcInfo>,
+        send: impl FnOnce(i32, GroupSignal),
+    ) -> Proof {
+        match observe(self) {
+            Proof::Ours(live) if !self.pinned(reread) => Proof::Unproven(live),
             Proof::Ours(live) => {
-                send_killpg(self.pgid, sig);
+                send(self.pgid, sig);
                 Proof::Ours(live)
             }
             other => other,
@@ -661,6 +696,53 @@ mod tests {
             |pid| (pid == 20).then(|| p(20, 10, 700)),
         );
         assert_eq!(proof, Proof::Empty);
+    }
+
+    /// Review of #3501 at 591a610 (MUST 1) and #3502 at 7ba3185 (MUST 2):
+    /// an adopted anchor is not this daemon's unreaped child, so it pins the
+    /// group only while it is still alive. A proof that rests on a
+    /// remembered member alone must not lead to a group-wide signal once
+    /// the adopted anchor is gone: that member could exit before delivery.
+    #[test]
+    fn an_adopted_group_is_signalled_only_while_its_anchor_lives() {
+        let anchor = ProcId {
+            pid: 20,
+            start: 700,
+        };
+        let proven = |_: &mut GroupOwner| Proof::Ours(vec![p(11, 10, 600)]);
+        let mut owner = GroupOwner::adopt(10, anchor);
+        let mut sent = Vec::new();
+        let proof = owner.signal_with(
+            GroupSignal::Term,
+            proven,
+            |_| None,
+            |pgid, sig| sent.push((pgid, sig)),
+        );
+        assert!(matches!(proof, Proof::Unproven(_)), "{proof:?}");
+        assert!(
+            sent.is_empty(),
+            "signalled a group its gone anchor no longer pins"
+        );
+        // A replaced, moved or exited anchor pins nothing either.
+        for read in [p(20, 10, 701), p(20, 12, 700), zombie(20, 10, 700)] {
+            let proof = owner.signal_with(
+                GroupSignal::Kill,
+                proven,
+                |_| Some(read.clone()),
+                |pgid, sig| sent.push((pgid, sig)),
+            );
+            assert!(matches!(proof, Proof::Unproven(_)), "{read:?}");
+        }
+        assert!(sent.is_empty());
+        // The exact live anchor still pins the group.
+        let proof = owner.signal_with(
+            GroupSignal::Term,
+            proven,
+            |pid| (pid == 20).then(|| p(20, 10, 700)),
+            |pgid, sig| sent.push((pgid, sig)),
+        );
+        assert!(matches!(proof, Proof::Ours(_)));
+        assert_eq!(sent, vec![(10, GroupSignal::Term)]);
     }
 
     #[test]

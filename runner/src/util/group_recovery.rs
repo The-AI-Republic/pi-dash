@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::util::containment::CleanupOutcome;
-use crate::util::group_ownership::{GroupOwner, ProcId};
+use crate::util::group_ownership::{GroupOwner, ProcId, Proof};
 use crate::util::procinfo::{self, ProcInfo};
 
 /// Whether this platform records anchored groups and recovers them after a
@@ -277,7 +277,7 @@ impl Recovery {
 /// Groups whose recovery is unresolved, for runner admission: a runner a
 /// held group affects stays reserved, since the old run's processes may
 /// still use its working copy.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RecoveryHold {
     dir: PathBuf,
     held: Vec<GroupRecord>,
@@ -503,7 +503,9 @@ fn recover_record_with(
 
 /// What to keep of `record` after a forced cleanup that left its group
 /// unresolved (review of #3501 at 1524d8e): `verdict` judges the anchor
-/// now, `survivors` are the members a fresh proven scan still found. While
+/// now, `survivors` are the members a fresh proven scan still found
+/// (`None`: the scan was inconclusive), `known` every member proven before
+/// the SIGKILL. While
 /// the anchor lingers the record stays as it is. Once the group's SIGKILL
 /// has also ended the anchor, the record can only prove the group through
 /// its survivors, so it is rewritten with them; with none, nothing can
@@ -511,11 +513,26 @@ fn recover_record_with(
 fn after_forced_cleanup(
     record: &GroupRecord,
     verdict: Verdict,
-    survivors: Vec<(i32, u64)>,
+    survivors: Option<Vec<(i32, u64)>>,
+    known: Vec<(i32, u64)>,
 ) -> Option<GroupRecord> {
     if matches!(verdict, Verdict::Orphaned | Verdict::Unknown(_)) {
         return Some(record.clone());
     }
+    let Some(survivors) = survivors else {
+        // The scan could not say what is left (review of #3501 at
+        // 591a610): keep the record, provable through every member known
+        // from before the SIGKILL. Those that are gone prove nothing at the
+        // next check; one still alive keeps the group reserved.
+        let mut kept = record.survivors.clone();
+        kept.extend(known);
+        kept.sort_unstable();
+        kept.dedup();
+        return Some(GroupRecord {
+            survivors: kept,
+            ..record.clone()
+        });
+    };
     if survivors.is_empty() {
         return None;
     }
@@ -568,14 +585,18 @@ fn stop_adopted(path: &Path, record: &GroupRecord, grace: Duration) -> CleanupOu
         crate::util::containment::stop_owned_group(record.run_id, &owner, grace);
     crate::util::containment::cleanup_report(record.run_id, "process-group-recovery", &stopped);
     if outcome != CleanupOutcome::Clean {
-        let survivors = match crate::util::containment::lock_owner(&owner).observe() {
-            crate::util::group_ownership::Proof::Ours(live) => {
-                live.iter().map(|p| (p.pid, p.start)).collect()
-            }
-            _ => Vec::new(),
+        let (survivors, known) = {
+            let mut o = crate::util::containment::lock_owner(&owner);
+            let survivors = match o.observe() {
+                Proof::Ours(live) => Some(live.iter().map(|p| (p.pid, p.start)).collect()),
+                Proof::Empty => Some(Vec::new()),
+                // The scan cannot say which members are left.
+                Proof::Unproven(_) | Proof::Unknown => None,
+            };
+            (survivors, o.known_ids())
         };
         let verdict = judge_read(record, procinfo::read_with_parent);
-        match after_forced_cleanup(record, verdict, survivors) {
+        match after_forced_cleanup(record, verdict, survivors, known) {
             Some(kept) => {
                 if kept != *record
                     && let Err(e) = write_record_at(path, &kept)
@@ -654,7 +675,8 @@ mod tests {
     fn a_forced_cleanup_keeps_the_group_provable_through_its_survivors() {
         let r = rec();
         let gone = Verdict::Unproven("anchor is gone");
-        let kept = after_forced_cleanup(&r, gone, vec![(11, 600)]).expect("record kept");
+        let kept =
+            after_forced_cleanup(&r, gone, Some(vec![(11, 600)]), vec![]).expect("record kept");
         let survivor = |start: u64, pgid: i32| {
             move |pid: i32| (pid == 11).then(|| (anchor(11, pgid, start, false), 1))
         };
@@ -672,10 +694,29 @@ mod tests {
         // While the anchor lingers the record stays as it is; with neither
         // anchor nor survivors there is nothing left to prove the group.
         assert_eq!(
-            after_forced_cleanup(&r, Verdict::Orphaned, vec![(11, 600)]),
+            after_forced_cleanup(&r, Verdict::Orphaned, Some(vec![(11, 600)]), vec![]),
             Some(r.clone())
         );
-        assert_eq!(after_forced_cleanup(&r, gone, Vec::new()), None);
+        assert_eq!(
+            after_forced_cleanup(&r, gone, Some(Vec::new()), vec![]),
+            None
+        );
+    }
+
+    /// Review of #3501 at 591a610 (MUST 2) and #3502 at 7ba3185 (MUST 3):
+    /// the group's SIGKILL ended the anchor and the follow-up scan failed.
+    /// That says nothing about what is left, so the record must stay, and
+    /// it must still prove the group once the anchor is gone: through the
+    /// members known from before the SIGKILL.
+    #[test]
+    fn an_inconclusive_scan_after_a_forced_cleanup_keeps_the_record() {
+        let r = rec();
+        let gone = Verdict::Unproven("anchor is gone");
+        let kept = after_forced_cleanup(&r, gone, None, vec![(11, 600), (12, 610)])
+            .expect("an inconclusive scan dropped the record");
+        assert_eq!(kept.survivors, vec![(11, 600), (12, 610)]);
+        let alive = |pid: i32| (pid == 12).then(|| (anchor(12, 10, 610, false), 1));
+        assert_eq!(judge(&kept, alive), Verdict::Survivors);
     }
 
     /// Review of #3501 at 1524d8e (MUST 2): a group whose recovery is

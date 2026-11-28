@@ -175,8 +175,12 @@ impl Supervisor {
         // processes in a runner's working copy: keep that runner reserved
         // until a re-check resolves it (review of #3501 at 1524d8e).
         #[cfg(unix)]
+        let recovery = RecoveryReservations::new(recovery_hold);
+        #[cfg(not(unix))]
+        let recovery = RecoveryReservations::default();
+        #[cfg(unix)]
         hold_runners_for_recovery(
-            recovery_hold,
+            recovery.clone(),
             instances
                 .iter()
                 .map(|i| (i.runner_id, i.state.clone()))
@@ -295,6 +299,7 @@ impl Supervisor {
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
             instances: ipc_instances.clone(),
+            recovery: recovery.clone(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -599,6 +604,9 @@ pub(crate) struct RunnerSpawnCtx {
     /// (reconfigure, credential change) while the others keep running,
     /// and every runner is aborted on daemon shutdown.
     tasks: Arc<std::sync::Mutex<HashMap<uuid::Uuid, SpawnedInstanceTasks>>>,
+    /// Crash-recovery reservations: a runner added while a crashed
+    /// daemon's group that may be its own is unresolved starts reserved.
+    recovery: RecoveryReservations,
     /// Serialises every add / stop / restart of a runner.
     activation_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serialises turning the engine on for a project (`EngineRunnerAdd`,
@@ -1251,6 +1259,15 @@ impl RunnerSpawnCtx {
             &self.daemon,
         )
         .await?;
+        // Before the runner is published or started: its working copy may
+        // still hold a crashed daemon's unresolved processes.
+        self.recovery
+            .reserve_if_held(inst.runner_id, &inst.state)
+            .await;
+        // A replaced runner's undelivered result stays reported in flight.
+        if let Some(coord) = self.run_coordinator.as_ref() {
+            restore_pending_report_for(coord, inst.runner_id, &inst.state).await;
+        }
         {
             let mut mailboxes = self.mailboxes.write().await;
             mailboxes.insert(inst.runner_id, inst.mailbox_tx.clone());
@@ -1289,7 +1306,13 @@ fn same_block(running: &RunnerConfig, on_disk: &RunnerConfig) -> bool {
 /// chat turn holding its working copy, or a finished run whose cleanup is
 /// unresolved.
 fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
-    if let Some(run_id) = *inst.state.rx_in_flight.borrow() {
+    // A finished run kept in flight only until its undelivered result is
+    // sent does not block a restart (review of #3502 at 7ba3185): its
+    // result is in the outbox, and the replacement reports it in flight
+    // again ([`restore_pending_report_for`]) and retries it with the new
+    // credentials. Refusing would keep a re-login from ever taking effect.
+    let in_flight = *inst.state.rx_in_flight.borrow();
+    if let Some(run_id) = in_flight.filter(|id| inst.state.report_pending() != Some(*id)) {
         anyhow::bail!(
             "runner {:?} is mid-run (run {run_id}); try again when it is idle",
             inst.name
@@ -2083,53 +2106,106 @@ async fn replay_drain_journal_once(
     delivered
 }
 
-/// Reserve every runner a held recovery group may belong to, and re-check
-/// the held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
-/// releasing each runner once nothing held affects it. While reserved, a
-/// runner refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+/// Crash-recovery reservations, shared by daemon start and the hot-add
+/// path (review of #3501 at 591a610, MUST 6): a runner a held recovery
+/// group may belong to stays reserved, whether it was there at start or
+/// added while the group is still unresolved. While reserved, a runner
+/// refuses assignments and chat ([`StateHandle::cleanup_reserved`]).
+#[derive(Clone, Default)]
+pub(crate) struct RecoveryReservations(Arc<std::sync::Mutex<RecoveryReservationState>>);
+
+#[derive(Default)]
+struct RecoveryReservationState {
+    hold: crate::util::group_recovery::RecoveryHold,
+    /// The runners this hold reserved, to release once it stops affecting them.
+    reserved: Vec<(uuid::Uuid, StateHandle)>,
+}
+
+impl RecoveryReservations {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn new(hold: crate::util::group_recovery::RecoveryHold) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(RecoveryReservationState {
+            hold,
+            reserved: Vec::new(),
+        })))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecoveryReservationState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reserve `runner_id` before it starts taking work when a held group
+    /// may belong to it. `true`: reserved.
+    async fn reserve_if_held(&self, runner_id: uuid::Uuid, state: &StateHandle) -> bool {
+        let held = {
+            let mut s = self.lock();
+            let held = s.hold.affects(runner_id);
+            if held {
+                s.reserved.push((runner_id, state.clone()));
+            }
+            held
+        };
+        if held {
+            state.set_cleanup_reserved(true).await;
+        }
+        held
+    }
+
+    /// Install a re-checked hold and release every reserved runner it no
+    /// longer affects. `false` once nothing is held or reserved.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    async fn update(&self, hold: crate::util::group_recovery::RecoveryHold) -> bool {
+        let (release, active) = {
+            let mut s = self.lock();
+            s.hold = hold;
+            let (keep, release): (Vec<_>, Vec<_>) = std::mem::take(&mut s.reserved)
+                .into_iter()
+                .partition(|(id, _)| s.hold.affects(*id));
+            s.reserved = keep;
+            (release, !s.hold.is_empty() || !s.reserved.is_empty())
+        };
+        for (_, state) in release {
+            state.set_cleanup_reserved(false).await;
+        }
+        active
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn hold(&self) -> crate::util::group_recovery::RecoveryHold {
+        self.lock().hold.clone()
+    }
+}
+
+/// Reserve every runner `reservations` holds a group for, and re-check the
+/// held groups every [`UNRESOLVED_CLEANUP_RECHECK`] in the background,
+/// releasing each runner once nothing held affects it.
 #[cfg(unix)]
 async fn hold_runners_for_recovery(
-    mut hold: crate::util::group_recovery::RecoveryHold,
+    reservations: RecoveryReservations,
     runners: Vec<(uuid::Uuid, StateHandle)>,
 ) {
-    if hold.is_empty() {
+    if reservations.hold().is_empty() {
         return;
     }
-    let held = apply_recovery_hold(&hold, &runners, Vec::new()).await;
+    let mut held = 0;
+    for (id, state) in &runners {
+        held += usize::from(reservations.reserve_if_held(*id, state).await);
+    }
     tracing::warn!(
-        runners = held.len(),
+        runners = held,
         "process groups of a crashed daemon could not be emptied; their runners stay reserved"
     );
     tokio::spawn(async move {
-        let mut held = held;
-        while !held.is_empty() {
+        loop {
             tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK).await;
+            let mut hold = reservations.hold();
             hold.recheck().await;
-            held = apply_recovery_hold(&hold, &runners, held).await;
+            if !reservations.update(hold).await {
+                break;
+            }
         }
         tracing::info!("crashed daemon's process groups resolved; runners released");
     });
-}
-
-/// Reserve the runners `hold` affects and release the ones in `held` (the
-/// runners it reserved before) it no longer affects. Returns the runners it
-/// now reserves.
-#[cfg(unix)]
-async fn apply_recovery_hold(
-    hold: &crate::util::group_recovery::RecoveryHold,
-    runners: &[(uuid::Uuid, StateHandle)],
-    held: Vec<uuid::Uuid>,
-) -> Vec<uuid::Uuid> {
-    let mut now = Vec::new();
-    for (id, state) in runners {
-        if hold.affects(*id) {
-            state.set_cleanup_reserved(true).await;
-            now.push(*id);
-        } else if held.contains(id) {
-            state.set_cleanup_reserved(false).await;
-        }
-    }
-    now
 }
 
 /// For the shutdown drain: take `run_id`'s held terminal report (or
@@ -2236,14 +2312,25 @@ async fn restore_pending_reports(
     runners: &Arc<RwLock<HelloRunnerMap>>,
 ) {
     let guard = runners.read().await;
+    for (runner_id, (_, state, _)) in guard.iter() {
+        restore_pending_report_for(coord, *runner_id, state).await;
+    }
+}
+
+/// [`restore_pending_reports`] for one runner's state: also used when a
+/// runner is replaced (credential rotation, reconfigure) while a finished
+/// run's result is still undelivered.
+async fn restore_pending_report_for(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runner_id: uuid::Uuid,
+    state: &StateHandle,
+) {
     for entry in coord.terminal_pending() {
-        if entry.pending_terminal_payload.is_none() || coord.holds_run(entry.run_id) {
-            continue;
-        }
-        let Some((_, state, _)) = guard.get(&entry.runner_id) else {
-            continue;
-        };
-        if state.rx_in_flight.borrow().is_some() {
+        if entry.runner_id != runner_id
+            || entry.pending_terminal_payload.is_none()
+            || coord.holds_run(entry.run_id)
+            || state.rx_in_flight.borrow().is_some()
+        {
             continue;
         }
         state
@@ -2281,6 +2368,13 @@ async fn replay_terminal_outbox_once(
             continue;
         };
         let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+            // In-process, a runner can be missing only for a moment while
+            // it is replaced (credential rotation, reconfigure); its record
+            // stays for the replacement. Startup drops records of runners
+            // that are gone.
+            if skip_held {
+                continue;
+            }
             tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: runner no longer configured");
             let _ = coord.complete_terminal(entry.run_id);
             continue;
@@ -5225,6 +5319,14 @@ impl AssignWorker {
         // here, before admission and any workspace preparation.
         if !self.wait_while_reserved().await {
             tracing::info!(%run_id, "run stopped while the runner was reserved; not started");
+            // An explicit cancel (not a shutdown, which leaves a restored
+            // entry queued for the next start): the loop's cancel handler
+            // only dropped the queue entry, so acknowledge it here and stop
+            // reporting the run in flight.
+            if self.state.shutdown_reason().is_none() && self.cancel.is_cancelled() {
+                acknowledge_cancel_without_active_process(&self.out, run_id).await;
+                self.state.set_current_run(None).await;
+            }
             return Ok(());
         }
         if let Some(coord) = self.coordinator.as_ref() {
@@ -5397,15 +5499,19 @@ impl AssignWorker {
                 break;
             }
             let run_id = terminal_run_id(&msg);
+            // Before the send, so a failed send finds the exact record and
+            // does not journal a copy (see `deliver`). A delivered report's
+            // record goes with the slot release.
+            let payload = run_id.and_then(|r| self.persistable_terminal(r, &msg));
+            let recorded = run_id.filter(|r| self.ensure_outbox_record(*r, payload.as_deref()));
             if !self.deliver(msg).await {
                 self.state.note_terminal_undelivered();
-                undelivered = undelivered.or(run_id);
+                // Only a run with a retryable outbox record stays pending.
+                undelivered = undelivered.or(recorded);
             }
         }
         if self.state.release_clears_current_run() {
-            // Only a managed run has an outbox record the retry delivers.
-            let kept = undelivered
-                .filter(|_| self.coordinator.is_some() && !self.state.terminal_drained());
+            let kept = undelivered.filter(|_| !self.state.terminal_drained());
             match kept {
                 // Still reported in flight until the outbox retry delivers
                 // the report: a run the runner stops reporting would be
@@ -5712,9 +5818,7 @@ impl AssignWorker {
                     } else {
                         self.crash_reason()
                     };
-                    let base = auth
-                        .map(|a| a.detail())
-                        .unwrap_or_else(|| format!("{e:#}"));
+                    let base = auth.map(|a| a.detail()).unwrap_or_else(|| format!("{e:#}"));
                     let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
@@ -6575,6 +6679,30 @@ impl AssignWorker {
         }
     }
 
+    /// Whether the outbox holds a terminal record for `run_id` the retry can
+    /// deliver (review of #3501 at 591a610). A held result whose write
+    /// failed is written now from `payload`; when that fails too, `false`:
+    /// nothing would ever deliver the result, so the run must not be kept
+    /// reported in flight on its account.
+    fn ensure_outbox_record(&self, run_id: uuid::Uuid, payload: Option<&[u8]>) -> bool {
+        let Some(coord) = self.coordinator.as_ref() else {
+            return false;
+        };
+        if coord.terminal_pending().iter().any(|e| e.run_id == run_id) {
+            return true;
+        }
+        let Some(payload) = payload else {
+            return false;
+        };
+        match coord.persist_terminal_if_absent(run_id, payload, &format!("held-{run_id}")) {
+            Ok(_) => coord.terminal_pending().iter().any(|e| e.run_id == run_id),
+            Err(e) => {
+                tracing::warn!(%run_id, "undelivered terminal report could not be recorded: {e}");
+                false
+            }
+        }
+    }
+
     /// Send `msg` now, bypassing the terminal hold. `false`: the send failed.
     async fn deliver(&self, msg: ClientMsg) -> bool {
         // Clone the journal-relevant fields BEFORE the send consumes
@@ -6596,7 +6724,18 @@ impl AssignWorker {
             };
         if let Err(err) = self.out.send(msg).await {
             tracing::warn!(error = %err, "failed to send runner lifecycle message");
-            if let Some((run_id, reason, ended_at, detail)) = failed_signal {
+            // A managed run whose exact result is already in the SQLite
+            // outbox is retried from there. A journal copy would be
+            // replayed first at startup, without tokens or model, and the
+            // cloud keeps the first report it accepts.
+            let in_outbox = |run_id: uuid::Uuid| {
+                self.coordinator
+                    .as_ref()
+                    .is_some_and(|c| c.terminal_pending().iter().any(|e| e.run_id == run_id))
+            };
+            if let Some((run_id, reason, ended_at, detail)) =
+                failed_signal.filter(|(run_id, ..)| !in_outbox(*run_id))
+            {
                 // Journal the signal so the (always-on) replay loop
                 // redelivers it until the cloud acknowledges; the
                 // server's first-writer-wins finalize makes a late
@@ -6884,6 +7023,7 @@ mod tests {
             tokens,
             paths: paths.clone(),
             daemon,
+            recovery: RecoveryReservations::default(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mailboxes: Arc::new(RwLock::new(
                 insts
@@ -8924,6 +9064,20 @@ mod tests {
         );
     }
 
+    /// Reopen a queue store the test dropped. A subprocess another test
+    /// forks can hold the old lock's file description until it execs, so
+    /// the lock may stay taken for a moment after the drop.
+    fn reopen_queue(dir: std::path::PathBuf) -> crate::daemon::run_queue::Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match crate::daemon::run_queue::Coordinator::new(dir.clone(), 1) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     fn hello_map(inst: &RunnerInstance) -> Arc<RwLock<HelloRunnerMap>> {
         Arc::new(RwLock::new(
             std::iter::once(inst)
@@ -9091,7 +9245,7 @@ mod tests {
         // store finds the exact result to replay.
         drop(worker);
         drop(coord);
-        let after_crash = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after_crash = reopen_queue(queue_dir);
         let pending = after_crash.terminal_pending();
         assert_eq!(pending.len(), 1, "the held result was not persisted");
         let replayed: ClientMsg =
@@ -9180,26 +9334,44 @@ mod tests {
             runners: vec![],
             cli: None,
         };
-        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let runners = vec![(a, StateHandle::new(cfg())), (b, StateHandle::new(cfg()))];
-        let hold = crate::util::group_recovery::RecoveryHold::for_tests(vec![Some(a)]);
-        let held = apply_recovery_hold(&hold, &runners, Vec::new()).await;
-        assert_eq!(held, vec![a]);
+        let (a, b, c) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (sa, sb, sc) = (
+            StateHandle::new(cfg()),
+            StateHandle::new(cfg()),
+            StateHandle::new(cfg()),
+        );
+        let reservations =
+            RecoveryReservations::new(crate::util::group_recovery::RecoveryHold::for_tests(vec![
+                Some(a),
+                Some(c),
+            ]));
+        assert!(reservations.reserve_if_held(a, &sa).await);
+        assert!(!reservations.reserve_if_held(b, &sb).await);
         assert!(
-            runners[0].1.cleanup_reserved(),
+            sa.cleanup_reserved(),
             "the affected runner was not reserved"
         );
-        assert!(!runners[1].1.cleanup_reserved());
-        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(!sb.cleanup_reserved());
+        // Review of #3501 at 591a610 (MUST 6): a runner added while its
+        // group is still unresolved starts reserved too.
+        assert!(reservations.reserve_if_held(c, &sc).await);
         assert!(
-            apply_recovery_hold(&resolved, &runners, held)
-                .await
-                .is_empty()
+            sc.cleanup_reserved(),
+            "a runner added during recovery started unreserved"
         );
+        let resolved = crate::util::group_recovery::RecoveryHold::for_tests(vec![]);
+        assert!(!reservations.update(resolved).await);
         assert!(
-            !runners[0].1.cleanup_reserved(),
+            !sa.cleanup_reserved() && !sc.cleanup_reserved(),
             "the reservation outlived recovery"
         );
+        // Once resolved, a runner added later is not reserved.
+        let d = StateHandle::new(cfg());
+        assert!(!reservations.reserve_if_held(a, &d).await);
     }
 
     /// Review of #3501 at 1524d8e (MUST 4): once the shutdown drain has
@@ -9249,7 +9421,7 @@ mod tests {
 
         assert!(!coord.holds_run(run_id), "the slot was not released");
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert_eq!(
             after.terminal_pending().len(),
             1,
@@ -9541,6 +9713,49 @@ mod tests {
         assert!(coord.holds_run(run_id) && !coord.is_admitted(run_id));
     }
 
+    /// Review of #3501 at 591a610 (MUST 5): the cloud cancels a restored
+    /// run while it waits on the reservation. The loop's cancel handler
+    /// only drops the queue entry and cancels the worker, so the worker must
+    /// acknowledge the cancellation and stop reporting the run in flight.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_run_cancelled_while_reserved_is_acknowledged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let state = worker.state.clone();
+        let cancel = worker.cancel.clone();
+        let run_id = uuid::Uuid::new_v4();
+        state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "preparing".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        state.set_cleanup_reserved(true).await;
+        let task = tokio::spawn(async move {
+            worker
+                .run(run_id, "p".into(), None, None, AssignContext::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the waiting run ignored its cancellation")
+            .unwrap()
+            .unwrap();
+        let acked = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|e| matches!(e.body, ClientMsg::RunCancelled { run_id: r, .. } if r == run_id));
+        assert!(acked, "the cancellation was never acknowledged");
+        assert!(
+            state.rx_in_flight.borrow().is_none(),
+            "the cancelled run is still reported in flight"
+        );
+    }
+
     /// Review of #3502 at 968b972 (MUST 2): a released run whose report
     /// could not be sent stays reported in flight, so the cloud's heartbeat
     /// reaper cannot fail it before the outbox retry delivers the real
@@ -9703,6 +9918,61 @@ mod tests {
         assert!(coord.terminal_pending().is_empty());
     }
 
+    /// Review of #3501 at 591a610 (MUST 4): a run is kept reported in
+    /// flight only while a retryable outbox record exists. When the held
+    /// result could not be written (here: the queue has no row for the
+    /// run, as after a failed write) and its send fails, nothing would ever
+    /// deliver it, so the run must not stay in flight for good.
+    #[tokio::test]
+    async fn an_undelivered_run_without_an_outbox_record_is_not_kept_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("norecord", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.state = inst.state.clone();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        worker.coordinator = Some(coord.clone());
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        drop(rx);
+        worker.release_terminal().await;
+
+        assert!(coord.terminal_pending().is_empty());
+        assert_eq!(inst.state.report_pending(), None);
+        assert!(
+            inst.state.rx_in_flight.borrow().is_none(),
+            "a run with no retryable record stays reported in flight forever"
+        );
+    }
+
     /// The in-process outbox retry delivers a released run's kept record,
     /// and leaves a record whose run the queue still holds (its result is
     /// held for cleanup) untouched and unsent.
@@ -9840,8 +10110,78 @@ mod tests {
 
         assert!(!coord.holds_run(run_id));
         drop(coord);
-        let after = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        let after = reopen_queue(queue_dir);
         assert!(after.terminal_pending().is_empty());
+    }
+
+    /// Review of #3502 at 7ba3185 (MUST 1): a runner whose only "work" is
+    /// a finished run's undelivered result must still be replaceable, so a
+    /// re-login can rotate its credentials; the replacement picks the
+    /// pending result back up from the outbox. A real run still blocks.
+    #[tokio::test]
+    async fn a_runner_only_reporting_a_result_can_be_restarted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let cfg = runner_config("reporting", "WEB", tmp.path().join("wd"));
+        let runner_id = cfg.runner_id;
+        let inst = RunnerInstance::new(cfg.clone(), &paths, out_tx.clone());
+        let run_id = uuid::Uuid::new_v4();
+        let summary = CurrentRunSummary {
+            run_id,
+            thread_id: None,
+            status: "reporting".to_string(),
+            started_at: Utc::now(),
+            events: 0,
+        };
+        inst.state.set_current_run(Some(summary.clone())).await;
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a live run was treated as idle"
+        );
+        inst.state.set_report_pending(run_id);
+        assert!(
+            ensure_idle(&inst).is_ok(),
+            "a runner only waiting to report a result blocks credential rotation"
+        );
+
+        // The replacement reports the same run in flight until delivery.
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir, 1).unwrap();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        assert!(coord.persist_terminal(run_id, b"{}", "held").unwrap());
+        coord.release_slot(run_id).unwrap();
+        assert!(!coord.holds_run(run_id));
+        let fresh = RunnerInstance::new(cfg, &paths, out_tx);
+        restore_pending_report_for(&coord, runner_id, &fresh.state).await;
+        assert_eq!(*fresh.state.rx_in_flight.borrow(), Some(run_id));
+        assert_eq!(fresh.state.report_pending(), Some(run_id));
+        // While the runner is between stop and start it is absent from the
+        // registry; the in-process retry must not drop its record then.
+        let empty: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(HashMap::new()));
+        assert_eq!(replay_terminal_outbox_once(&coord, &empty, true).await, 0);
+        assert_eq!(
+            coord.terminal_pending().len(),
+            1,
+            "a restarting runner's undelivered result was dropped"
+        );
     }
 
     /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup
@@ -10035,6 +10375,79 @@ mod tests {
             journal[0].detail,
             "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
         );
+    }
+
+    /// Review of #3501 at 591a610 (MUST 3): a managed run's exact result is
+    /// already in the SQLite outbox. If its send fails, the legacy journal
+    /// must not get a copy too: startup replays the journal first, without
+    /// tokens or model, and the cloud keeps the first report it accepts.
+    #[tokio::test]
+    async fn a_managed_failure_with_an_outbox_record_is_not_journaled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx); // every send fails
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.daemon_paths.ensure().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        let failed = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::AgentCrash,
+            detail: Some("boom".into()),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        assert!(
+            coord
+                .persist_terminal(run_id, &serde_json::to_vec(&failed).unwrap(), "held")
+                .unwrap()
+        );
+
+        assert!(!worker.deliver(failed).await);
+
+        assert!(
+            drain_journal::load(&worker.daemon_paths).is_empty(),
+            "journaled a failure whose exact payload is already in the outbox"
+        );
+        // Without an outbox record the journal is still the fallback.
+        let other = uuid::Uuid::new_v4();
+        assert!(
+            !worker
+                .deliver(ClientMsg::RunFailed {
+                    run_id: other,
+                    reason: FailureReason::AgentCrash,
+                    detail: None,
+                    ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .await
+        );
+        let journal = drain_journal::load(&worker.daemon_paths);
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].run_id, other);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
