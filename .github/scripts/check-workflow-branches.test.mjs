@@ -72,3 +72,48 @@ test("no workflow in .github/workflows lists master in its branch filters", () =
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows");
   assert.deepEqual(checkDir(dir), []);
 });
+
+test("resolves YAML aliases in branch filters", () => {
+  const yml =
+    "on:\n  push:\n    branches: &old [master]\n  pull_request:\n    branches: *old\n  merge_group:\n    branches-ignore: &one master\n  workflow_run:\n    branches: [main, *one]\n";
+  assert.deepEqual(findBannedBranches(yml), [
+    { line: 3, branch: "master" },
+    { line: 5, branch: "master" },
+    { line: 7, branch: "master" },
+    { line: 9, branch: "master" },
+  ]);
+});
+
+test("resolves aliased events and filter maps", () => {
+  const yml = "on:\n  push: &ev\n    branches: [master]\n  pull_request: *ev\n";
+  assert.deepEqual(findBannedBranches(yml), [
+    { line: 3, branch: "master" },
+    { line: 4, branch: "master" },
+  ]);
+});
+
+test("uses GitHub filter semantics: ? and + apply to the preceding character", () => {
+  const yml = "on:\n  push:\n    branches: ['masterx?', 'mas+ter', 'mainx?', 'release.?']\n";
+  assert.deepEqual(findBannedBranches(yml), [
+    { line: 3, branch: "masterx?" },
+    { line: 3, branch: "mas+ter" },
+  ]);
+});
+
+test("flags globs that match master but not main, even without the literal name", () => {
+  const yml = "on:\n  push:\n    branches: ['*ster', 'm[a]ster', 'ma*', '*', 'm*n']\n";
+  assert.deepEqual(findBannedBranches(yml), [
+    { line: 3, branch: "*ster" },
+    { line: 3, branch: "m[a]ster" },
+  ]);
+});
+
+test("CodeQL runs on pushes and pull requests to main", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { parse } = await import("yaml");
+  const file = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", "codeql.yml");
+  const { on } = parse(readFileSync(file, "utf8"), { version: "1.2" });
+  for (const event of ["push", "pull_request"]) {
+    assert.ok(on[event]?.branches?.includes("main"), `codeql.yml ${event} must target main`);
+  }
+});

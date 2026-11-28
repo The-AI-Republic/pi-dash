@@ -1,5 +1,5 @@
 // Tests for check-release-version.mjs.
-// Run: node --test .github/scripts/check-release-version.test.mjs
+// Run: npm ci --prefix .github/scripts && node --test .github/scripts/check-release-version.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -40,8 +40,16 @@ test("CLI exits 1 on mismatch and 0 on match", () => {
 
 test("check-version no longer gates ordinary PRs; the platform release checks the tag", async () => {
   const { readFileSync, existsSync } = await import("node:fs");
+  const { parse } = await import("yaml");
   const wf = join(dirname(script), "..", "workflows");
   assert.equal(existsSync(join(wf, "check-version.yml")), false, "check-version.yml must not run on every PR");
-  const build = readFileSync(join(wf, "build-branch.yml"), "utf8");
-  assert.match(build, /check-release-version\.mjs/);
+  const { jobs } = parse(readFileSync(join(wf, "build-branch.yml"), "utf8"));
+  // The check runs in the setup job, before anything is built or published.
+  const step = jobs.branch_build_setup.steps.find((s) => /check-release-version\.mjs/.test(s.run ?? ""));
+  assert.ok(step, "branch_build_setup must run check-release-version.mjs");
+  assert.match(step.run, /BUILD_TYPE.*!=.*"Release"/, "the check must be skipped only for non-release builds");
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name === "branch_build_setup") continue;
+    assert.ok([job.needs].flat().includes("branch_build_setup"), `${name} must wait for the version check`);
+  }
 });
