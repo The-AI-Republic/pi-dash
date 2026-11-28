@@ -34,19 +34,27 @@ use crate::ipc::protocol::{
     HelloWorkspace, IPC_VERSION, Response, RunnerChanges, version_lt,
 };
 use crate::ipc::server::IpcServer;
-use crate::util::containment::{self, RunGroup};
+use crate::util::containment::{self, CleanupOutcome, RunGroup};
 
 /// Empty a run's containment unit and execute its run-end hook, if the
 /// run wrote one (parity-stack teardown). Runs on the normal terminal
-/// path, after the cloud has been told; the abort path relies on the
-/// guard's [`Drop`] (processes only — hooks are left for the sweep).
-async fn run_cleanup(mut guard: RunGroup) {
-    guard.cleanup().await;
-    guard.mark_cleaned();
+/// path, before the cloud is told the run ended; the abort path relies on
+/// the guard's [`Drop`] (processes only — hooks are left for the sweep).
+/// The hook runs once even when processes are left over: it tears down
+/// what lives outside the unit and must not wait on what is inside it.
+async fn run_cleanup(guard: &mut RunGroup) -> CleanupOutcome {
+    let outcome = guard.cleanup().await;
+    if outcome == CleanupOutcome::Clean {
+        guard.mark_cleaned();
+    }
     if let Some(ws) = guard.workspace().map(|p| p.to_path_buf()) {
         containment::run_end_hook(&ws).await;
     }
+    outcome
 }
+
+/// How often a runner held by unresolved run-end cleanup re-checks it.
+const UNRESOLVED_CLEANUP_RECHECK: Duration = Duration::from_secs(5);
 use crate::util::fs::create_dir_all_private;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -314,7 +322,7 @@ impl Supervisor {
             // Legacy journal dispositions first, then SQLite outbox retry:
             // managed terminal signals redeliver their exact payload.
             if let Some(coord) = run_coordinator.as_ref() {
-                replay_terminal_outbox_once(coord, &hello_runners).await;
+                replay_terminal_outbox_once(coord, &hello_runners, false).await;
             }
             // Always-on retry loop (NEWPIDASH-251): normal RunFailed
             // sends journaled mid-run (not only shutdown drains) must
@@ -325,11 +333,13 @@ impl Supervisor {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
                 let replay_previous = previous_exit.clone();
+                let replay_outbox = run_coordinator.clone();
                 replay_retry_handle = Some(tokio::spawn(async move {
                     replay_drain_journal_retry_loop(
                         replay_paths,
                         replay_runners,
                         replay_previous,
+                        replay_outbox,
                         DRAIN_JOURNAL_RETRY_INTERVAL,
                     )
                     .await;
@@ -1248,8 +1258,9 @@ fn same_block(running: &RunnerConfig, on_disk: &RunnerConfig) -> bool {
     }
 }
 
-/// Refuse to stop a runner that is doing work: a run in flight or a local
-/// chat turn holding its working copy.
+/// Refuse to stop a runner that is doing work: a run in flight, a local
+/// chat turn holding its working copy, or a finished run whose cleanup is
+/// unresolved.
 fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
     if let Some(run_id) = *inst.state.rx_in_flight.borrow() {
         anyhow::bail!(
@@ -1260,6 +1271,15 @@ fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
     if inst.chat_active.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!(
             "runner {:?} has a local chat turn in flight; try again when it is idle",
+            inst.name
+        );
+    }
+    // A finished run whose cleanup is unresolved still owns the working
+    // copy and its machine-queue slot; replacing the runner now would
+    // orphan both.
+    if inst.state.cleanup_reserved() {
+        anyhow::bail!(
+            "runner {:?} is still cleaning up its last run's processes; try again when it is idle",
             inst.name
         );
     }
@@ -1664,7 +1684,8 @@ pub(crate) fn with_previous_exit(detail: &str, previous_exit: Option<&str>) -> S
 /// run with the cryptic ``reaped by heartbeat: ... in_flight_run=
 /// (none)`` message after the daemon restarts and the next session
 /// Hello legitimately reports null. This sends a clean terminal
-/// signal instead.
+/// signal instead. A run that already finished and is only waiting on
+/// its run-end cleanup gets its held result instead of the failure.
 ///
 /// Returns the count of runs we successfully drained. Send errors are
 /// logged at warn but do not abort the drain — one runner's
@@ -1695,50 +1716,67 @@ async fn drain_in_flight_runs(
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
-    let snapshot: Vec<(uuid::Uuid, Option<uuid::Uuid>, RunnerOut)> = {
+    let now = Utc::now();
+    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
+    // One report per in-flight run: the run's own result when it already
+    // finished and only its run-end cleanup is pending (held in the
+    // runner's state, PDASHOSS01-417), otherwise a DaemonRestart failure.
+    // Taking the held reports also stops the worker from sending a second
+    // one if it finishes cleanup before the process exits.
+    let snapshot: Vec<(uuid::Uuid, uuid::Uuid, ClientMsg, RunnerOut)> = {
         let guard = runners.read().await;
         guard
             .iter()
-            .map(|(rid, (out, state, _))| (*rid, *state.rx_in_flight.borrow(), out.clone()))
+            .filter_map(|(rid, (out, state, _))| {
+                let run_id = (*state.rx_in_flight.borrow())?;
+                let msg = state
+                    .take_terminal_for_drain()
+                    .into_iter()
+                    .find(|m| terminal_run_id(m) == Some(run_id))
+                    .unwrap_or_else(|| ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::DaemonRestart,
+                        detail: Some(detail.clone()),
+                        ended_at: now,
+                        tokens: None,
+                        model: None,
+                    });
+                Some((*rid, run_id, msg, out.clone()))
+            })
             .collect()
     };
-    let now = Utc::now();
-    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
     // Split by ownership: managed queue attempts persist their exact
-    // DaemonRestart payload to the SQLite terminal outbox before sending;
-    // legacy in-flight runs use the drain journal (unchanged).
+    // payload to the SQLite terminal outbox before sending; legacy
+    // in-flight runs journal a RunFailed (a held RunCompleted or
+    // RunCancelled is sent best-effort, as the worker itself would).
     let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
     let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
-    for (runner_id, in_flight, _) in &snapshot {
-        let Some(run_id) = in_flight else {
-            continue;
-        };
+    for (runner_id, run_id, msg, _) in &snapshot {
         let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
         if is_managed {
-            let msg = ClientMsg::RunFailed {
-                run_id: *run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: Some(detail.clone()),
-                ended_at: now,
-                tokens: None,
-                model: None,
-            };
-            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            let payload = serde_json::to_vec(msg).unwrap_or_default();
             if let Some(c) = coord.as_ref() {
                 let key = format!("drain-{}", run_id);
                 let _ = c.persist_terminal(*run_id, &payload, &key);
             }
             managed.push((*runner_id, *run_id));
-        } else {
+        } else if let ClientMsg::RunFailed {
+            reason,
+            detail: failed_detail,
+            ended_at,
+            ..
+        } = msg
+        {
+            let restart = matches!(reason, FailureReason::DaemonRestart);
             pending.push(drain_journal::PendingRunFailure {
                 runner_id: *runner_id,
                 run_id: *run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: detail.clone(),
-                ended_at: now,
+                reason: *reason,
+                detail: failed_detail.clone().unwrap_or_default(),
+                ended_at: *ended_at,
                 recorded_at: now,
-                trigger: Some(trigger.as_str().to_string()),
-                previous_exit: previous_exit.clone(),
+                trigger: restart.then(|| trigger.as_str().to_string()),
+                previous_exit: if restart { previous_exit.clone() } else { None },
             });
         }
     }
@@ -1764,43 +1802,32 @@ async fn drain_in_flight_runs(
             Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
         }
     }
-    let drains = snapshot
-        .into_iter()
-        .filter_map(|(runner_id, in_flight, out)| {
-            let run_id = in_flight?;
-            let msg = ClientMsg::RunFailed {
-                run_id,
-                reason: FailureReason::DaemonRestart,
-                detail: Some(detail.clone()),
-                ended_at: now,
-                tokens: None,
-                model: None,
-            };
-            Some(async move {
-                // Per-attempt timeout so one stuck cloud client can't keep
-                // a parallel sibling from completing in time.
-                match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
-                    RunFailedSend::Delivered => {
-                        tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
-                        Some(run_id)
-                    }
-                    RunFailedSend::Failed(e) => {
-                        tracing::warn!(
-                            %runner_id, %run_id,
-                            "drain send failed (journaled for replay on next start): {e:#}"
-                        );
-                        None
-                    }
-                    RunFailedSend::TimedOut => {
-                        tracing::warn!(
-                            %runner_id, %run_id,
-                            "drain send timed out at 2s (journaled for replay on next start)"
-                        );
-                        None
-                    }
+    let drains = snapshot.into_iter().map(|(runner_id, run_id, msg, out)| {
+        async move {
+            // Per-attempt timeout so one stuck cloud client can't keep
+            // a parallel sibling from completing in time.
+            match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
+                RunFailedSend::Delivered => {
+                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                    Some(run_id)
                 }
-            })
-        });
+                RunFailedSend::Failed(e) => {
+                    tracing::warn!(
+                        %runner_id, %run_id,
+                        "drain send failed (journaled for replay on next start): {e:#}"
+                    );
+                    None
+                }
+                RunFailedSend::TimedOut => {
+                    tracing::warn!(
+                        %runner_id, %run_id,
+                        "drain send timed out at 2s (journaled for replay on next start)"
+                    );
+                    None
+                }
+            }
+        }
+    });
     let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(drains)
         .await
         .into_iter()
@@ -1833,6 +1860,17 @@ async fn drain_in_flight_runs(
         }
     }
     delivered.len()
+}
+
+/// The run a terminal report (`RunCompleted`/`RunFailed`/`RunCancelled`)
+/// is about; `None` for any other message.
+fn terminal_run_id(msg: &ClientMsg) -> Option<uuid::Uuid> {
+    match msg {
+        ClientMsg::RunCompleted { run_id, .. }
+        | ClientMsg::RunFailed { run_id, .. }
+        | ClientMsg::RunCancelled { run_id, .. } => Some(*run_id),
+        _ => None,
+    }
 }
 
 /// Outcome of one bounded `RunFailed` send attempt. Shared by the
@@ -2010,16 +2048,43 @@ async fn replay_drain_journal_once(
     delivered
 }
 
+/// Release a finished run's machine-queue slot. The run's terminal outbox
+/// record stays when the report may not have reached the cloud: the
+/// shutdown drain took it (the drain deletes the record once its send
+/// succeeds), or the worker's send failed. The outbox retry then delivers
+/// it. Otherwise the worker delivered the report and the record goes with
+/// the slot.
+fn release_finished_slot(
+    coord: &crate::daemon::run_queue::Coordinator,
+    state: &StateHandle,
+    run_id: uuid::Uuid,
+) {
+    let undelivered = state.take_terminal_undelivered();
+    if state.terminal_drained() || undelivered {
+        let _ = coord.release_slot(run_id);
+    } else {
+        let _ = coord.complete(run_id);
+    }
+}
+
 /// Retry SQLite terminal-outbox records once at startup: managed queue
 /// attempts redeliver their exact persisted payload (same bytes/key),
 /// never re-executing. Records for removed runners are cleared (the
 /// cloud reaper handles the run). Runs redelivered in flight are
 /// resolved without a second signal.
+///
+/// `skip_held` (the in-process retry): leave a record alone while the queue
+/// still holds its run. That run's result is held for run-end cleanup and
+/// is the worker's to send.
 async fn replay_terminal_outbox_once(
     coord: &crate::daemon::run_queue::Coordinator,
     runners: &Arc<RwLock<HelloRunnerMap>>,
+    skip_held: bool,
 ) -> usize {
-    let pending = coord.terminal_pending();
+    let mut pending = coord.terminal_pending();
+    if skip_held {
+        pending.retain(|entry| !coord.holds_run(entry.run_id));
+    }
     if pending.is_empty() {
         return 0;
     }
@@ -2035,12 +2100,15 @@ async fn replay_terminal_outbox_once(
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         };
-        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+        if *state.rx_in_flight.borrow() == Some(entry.run_id)
+            && state.report_pending() != Some(entry.run_id)
+        {
             tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
             let _ = coord.complete_terminal(entry.run_id);
             continue;
         }
         let out = out.clone();
+        let state = state.clone();
         sends.push(async move {
             let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
             match msg {
@@ -2048,11 +2116,13 @@ async fn replay_terminal_outbox_once(
                     RunFailedSend::Delivered => {
                         tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         true
                     }
                     RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
                         tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
                         let _ = coord.complete_terminal(entry.run_id);
+                        state.clear_report_pending(entry.run_id).await;
                         false
                     }
                     RunFailedSend::Failed(e) => {
@@ -2105,14 +2175,24 @@ const DRAIN_JOURNAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// skips that tick; entries past the TTL are dropped by
 /// [`replay_drain_journal_once`]. Exits only when the owning task is
 /// aborted on shutdown (see the abort-before-drain in `Supervisor::run`).
+///
+/// Each tick also retries the machine queue's terminal outbox (`outbox`):
+/// a released run whose report the worker could not send keeps its record
+/// there, and `RunCompleted` / `RunCancelled` have no journal entry.
 async fn replay_drain_journal_retry_loop(
     paths: Paths,
     runners: Arc<RwLock<HelloRunnerMap>>,
     previous_exit: Option<String>,
+    outbox: Option<Arc<crate::daemon::run_queue::Coordinator>>,
     interval: Duration,
 ) {
     loop {
         tokio::time::sleep(interval).await;
+        if let Some(coord) = outbox.as_deref()
+            && !coord.terminal_pending().is_empty()
+        {
+            replay_terminal_outbox_once(coord, &runners, true).await;
+        }
         if drain_journal::load(&paths).is_empty() {
             continue;
         }
@@ -2681,6 +2761,7 @@ impl RunnerLoop {
                 engine,
                 coordinator,
                 queue_blocked,
+                run_end: RunEnd::default(),
             };
             if let Err(e) = worker
                 .run(run_id, prompt, repo_url, expected_codex_model, context)
@@ -2700,6 +2781,9 @@ impl RunnerLoop {
                     .await;
                 worker.state.set_current_run(None).await;
             }
+            // The run has been reported; the runner stays reserved (the
+            // loop keeps `current_run`) until its cleanup is resolved.
+            worker.hold_while_unresolved().await;
             let _ = done_tx.send(());
         });
     }
@@ -2764,7 +2848,7 @@ impl RunnerLoop {
                         if let Some(finished) = self.current_run.take()
                             && let Some(coord) = self.coordinator.as_ref()
                         {
-                            let _ = coord.complete(finished.run_id);
+                            release_finished_slot(coord, &self.state, finished.run_id);
                         }
                         continue;
                     }
@@ -4636,6 +4720,19 @@ struct AssignWorker {
     /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
     coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
     queue_blocked: bool,
+    run_end: RunEnd,
+}
+
+/// Run-end state of an [`AssignWorker`] (PDASHOSS01-417). The terminal
+/// report itself is held in the runner's [`StateHandle`]
+/// (`hold_terminal`), where the shutdown drain can reach it.
+#[derive(Default)]
+struct RunEnd {
+    /// The run's unit when cleanup left processes it could not account
+    /// for. While set, the worker does not finish, so the runner loop keeps
+    /// the run in flight and rejects new assignments and chat; the state's
+    /// cleanup reservation turns away local (desktop) chat.
+    unresolved: Option<RunGroup>,
 }
 
 struct RunMetadata {
@@ -4727,6 +4824,11 @@ impl AssignWorker {
         // covering every exit path — normal end, failure, cancellation,
         // daemon shutdown and task abort alike.
         let mut guard = containment::create_run_group(run_id);
+        // The run's terminal report is held while the run executes and
+        // sent only after cleanup, so the cloud never sees the run finished
+        // (and offers the runner new work) while its processes or its
+        // teardown hook are still pending.
+        self.hold_terminal();
         // Scope the run context over everything this run does so every
         // agent subprocess the bridges spawn (and re-spawn per turn)
         // inherits `PIDASH_RUN_ID` plus the issue/project/agent names —
@@ -4769,13 +4871,144 @@ impl AssignWorker {
         // Cleanup runs even when the run fails: a failed run must not
         // leave its processes (or its parity-stack hook) behind.
         let result = scope.await;
-        // Containment cleanup runs after the run's terminal report has
-        // been sent: empty the unit, then execute a run-end hook the
-        // run opted into (parity-stack teardown), outside the unit.
-        // `workspace` is None when workspace resolution never produced
-        // one; then there is no hook to run either.
-        run_cleanup(guard).await;
+        // An internal failure is known now: stage its report in the hold
+        // before cleanup starts, so a shutdown during a slow cleanup or
+        // hook reports this error, not a DaemonRestart.
+        let result = self.stage_internal_failure(run_id, result).await;
+        // Empty the unit, then execute a run-end hook the run opted into
+        // (parity-stack teardown), outside the unit. `workspace` is None
+        // when workspace resolution never produced one; then there is no
+        // hook to run either.
+        let outcome = run_cleanup(&mut guard).await;
+        if outcome == CleanupOutcome::Unresolved {
+            self.reserve_unresolved(guard).await;
+        }
+        self.release_terminal().await;
         result
+    }
+
+    /// Report a run that failed with an internal error as
+    /// `RunFailed{Internal}` through the terminal hold, and clear the
+    /// in-flight run (deferred while held). The error is consumed, so the
+    /// caller does not report the run a second time.
+    async fn stage_internal_failure(&self, run_id: uuid::Uuid, result: Result<()>) -> Result<()> {
+        let Err(e) = result else {
+            return Ok(());
+        };
+        tracing::error!("run {run_id} failed: {e:#}");
+        self.send(ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::Internal,
+            detail: Some(format!("{e:#}")),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        })
+        .await;
+        self.clear_current_run().await;
+        Ok(())
+    }
+
+    /// Keep the runner reserved for a run whose cleanup is unresolved. Set
+    /// before the run's report goes out, so local chat never sees the
+    /// working copy free while the run's processes may still use it.
+    async fn reserve_unresolved(&mut self, guard: RunGroup) {
+        self.state.set_cleanup_reserved(true).await;
+        self.run_end.unresolved = Some(guard);
+    }
+
+    /// Start holding terminal reports (see [`StateHandle::hold_terminal`]).
+    fn hold_terminal(&self) {
+        self.state.hold_terminal();
+    }
+
+    /// Stop holding and send what was held, in order. Nothing is sent when
+    /// the shutdown drain already reported the run.
+    ///
+    /// The reports stay in the state until the in-flight run is cleared, so
+    /// a shutdown drain that starts mid-send still finds the real result
+    /// and takes the send over; the worker then stops sending. A report the
+    /// worker had already sent may then be sent once more by the drain:
+    /// the same payload, which the cloud's first-writer-wins finalize
+    /// acknowledges as a no-op.
+    async fn release_terminal(&self) {
+        let mut undelivered = None;
+        for msg in self.state.begin_release() {
+            if !self.state.releasing() {
+                break;
+            }
+            let run_id = terminal_run_id(&msg);
+            if !self.deliver(msg).await {
+                self.state.note_terminal_undelivered();
+                undelivered = undelivered.or(run_id);
+            }
+        }
+        if self.state.release_clears_current_run() {
+            // Only a managed run has an outbox record the retry delivers.
+            let kept = undelivered
+                .filter(|_| self.coordinator.is_some() && !self.state.terminal_drained());
+            match kept {
+                // Still reported in flight until the outbox retry delivers
+                // the report: a run the runner stops reporting would be
+                // failed by the cloud's heartbeat reaper, and the real
+                // result could no longer replace that failure.
+                Some(run_id) => self.state.set_report_pending(run_id),
+                None => self.state.set_current_run(None).await,
+            }
+        }
+        self.state.finish_release();
+    }
+
+    /// Clear the in-flight run, or defer it while terminal reports are
+    /// held: the shutdown drain reports runs that are still in flight, so a
+    /// run whose report is held must stay visible to it.
+    async fn clear_current_run(&self) {
+        if !self.state.defer_clear_current_run() {
+            self.state.set_current_run(None).await;
+        }
+    }
+
+    /// Keep the runner reserved while the finished run's cleanup is
+    /// unresolved: re-check every [`UNRESOLVED_CLEANUP_RECHECK`] (each
+    /// check re-proves ownership before any signal) until nothing is left.
+    /// Each re-check that finds the group still ours signals it again
+    /// (TERM, grace, KILL), so a run's survivors are re-signalled every
+    /// round. Daemon shutdown ends the wait, whenever it lands; the unit's
+    /// drop then makes one more ownership-proven attempt. The cleanup
+    /// reservation stays set then: the daemon is going away.
+    async fn hold_while_unresolved(&mut self) {
+        let Some(mut guard) = self.run_end.unresolved.take() else {
+            return;
+        };
+        tracing::warn!(
+            runner = %self.runner_config.name,
+            "run-end cleanup is unresolved; runner stays reserved until the run's processes are gone"
+        );
+        let shutdown = self.state.shutdown_notified();
+        // `notify_waiters` stores no permit, so one waiter is registered up
+        // front and kept across rounds, and the recorded reason covers a
+        // shutdown signalled before it was registered.
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        loop {
+            if self.state.shutdown_reason().is_some() {
+                return;
+            }
+            tokio::select! {
+                _ = &mut notified => return,
+                _ = tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK) => {}
+            }
+            if guard.cleanup().await == CleanupOutcome::Clean {
+                guard.mark_cleaned();
+                self.state.set_cleanup_reserved(false).await;
+                tracing::info!(
+                    runner = %self.runner_config.name,
+                    "run-end cleanup resolved; runner released"
+                );
+                return;
+            }
+        }
     }
 
     async fn handle_assign_inner(
@@ -4817,7 +5050,7 @@ impl AssignWorker {
                     // synchronously when the Assign arrived; clear it now so
                     // a session reconnect after the failure doesn't claim a
                     // run that no longer exists.
-                    self.state.set_current_run(None).await;
+                    self.clear_current_run().await;
                     return Ok(());
                 }
             }
@@ -4936,7 +5169,7 @@ impl AssignWorker {
                     model: None,
                 })
                 .await;
-                self.state.set_current_run(None).await;
+                self.clear_current_run().await;
                 return Ok(());
             }
         };
@@ -4992,7 +5225,7 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                self.state.set_current_run(None).await;
+                self.clear_current_run().await;
                 if cancelled {
                     self.send(ClientMsg::RunCancelled {
                         run_id,
@@ -5020,9 +5253,7 @@ impl AssignWorker {
                     } else {
                         self.crash_reason()
                     };
-                    let base = auth
-                        .map(|a| a.detail())
-                        .unwrap_or_else(|| format!("{e:#}"));
+                    let base = auth.map(|a| a.detail()).unwrap_or_else(|| format!("{e:#}"));
                     let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
@@ -5042,7 +5273,7 @@ impl AssignWorker {
                     })
                     .await;
                     bridge.shutdown(Duration::from_secs(5)).await.ok();
-                    self.state.set_current_run(None).await;
+                    self.clear_current_run().await;
                     return Ok(());
                 }
             };
@@ -5132,7 +5363,7 @@ impl AssignWorker {
 
         if status_label == "cancelled" {
             let terminal_metadata = self.run_metadata().await;
-            self.state.set_current_run(None).await;
+            self.clear_current_run().await;
             self.send(ClientMsg::RunCancelled {
                 run_id,
                 cancelled_at: Utc::now(),
@@ -5143,7 +5374,7 @@ impl AssignWorker {
             return Ok(());
         }
 
-        self.state.set_current_run(None).await;
+        self.clear_current_run().await;
         Ok(())
     }
 
@@ -5835,6 +6066,56 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
+        if let Some(run_id) = terminal_run_id(&msg) {
+            let payload = self.persistable_terminal(run_id, &msg);
+            if let Some(now) = self.state.hold_terminal_msg(msg) {
+                self.deliver(now).await;
+            } else if let Some(payload) = payload
+                && self.state.holding_first_terminal()
+            {
+                self.persist_held_terminal(run_id, &payload);
+            }
+        } else {
+            self.deliver(msg).await;
+        }
+    }
+
+    /// The exact payload of a terminal report for a run the machine queue
+    /// owns, or `None` when no outbox can hold it (no coordinator, or a
+    /// run the queue does not know).
+    fn persistable_terminal(&self, run_id: uuid::Uuid, msg: &ClientMsg) -> Option<Vec<u8>> {
+        let coord = self.coordinator.as_ref()?;
+        if !coord.holds_run(run_id) {
+            return None;
+        }
+        serde_json::to_vec(msg).ok()
+    }
+
+    /// Persist a held terminal report to the queue's terminal outbox (review
+    /// of #3499 at 78368f6): while run-end cleanup or its hook runs, the
+    /// result lives only in memory, and a daemon that is killed (no
+    /// graceful drain) would lose it, so the cloud would later reap a
+    /// finished run as failed. The next daemon start replays the outbox
+    /// verbatim. Only the first held report is persisted: delivery sends it
+    /// first, so a later one (say a history-write failure after an agent
+    /// failure) must not replace it. Delivery and the slot release still
+    /// wait for cleanup; a
+    /// normal release ends with `complete`, which deletes the record.
+    fn persist_held_terminal(&self, run_id: uuid::Uuid, payload: &[u8]) {
+        let Some(coord) = self.coordinator.as_ref() else {
+            return;
+        };
+        match coord.persist_terminal(run_id, payload, &format!("held-{run_id}")) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(%run_id, "held terminal report: no queue record to persist it in")
+            }
+            Err(e) => tracing::warn!(%run_id, "failed to persist held terminal report: {e}"),
+        }
+    }
+
+    /// Send `msg` now, bypassing the terminal hold. `false`: the send failed.
+    async fn deliver(&self, msg: ClientMsg) -> bool {
         // Clone the journal-relevant fields BEFORE the send consumes
         // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
         // otherwise be discarded with only a warn log, leaving the
@@ -5882,7 +6163,9 @@ impl AssignWorker {
                     Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
                 }
             }
+            return false;
         }
+        true
     }
 }
 
@@ -7054,6 +7337,191 @@ mod tests {
         assert_eq!(resolve_working_dir(&inst), Some(expected));
     }
 
+    /// An `AssignWorker` for a Codex run in `wd` whose agent binary is
+    /// `binary`, reporting on `tx`. No cloud context, no coordinator.
+    #[cfg(unix)]
+    fn codex_worker(
+        tmp: &std::path::Path,
+        wd: std::path::PathBuf,
+        binary: &std::path::Path,
+        tx: mpsc::Sender<Envelope<ClientMsg>>,
+    ) -> AssignWorker {
+        let paths = paths_for(tmp);
+        paths.ensure().unwrap();
+        let mut config = runner_config("general-tasks", "TEST", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::Codex;
+        config.codex.binary = binary.to_string_lossy().into_owned();
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let engine_paths = paths.clone();
+        AssignWorker {
+            runner_paths,
+            daemon_paths: paths,
+            runner_config: config.clone(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                engine_paths,
+                WorkspaceTokens::default(),
+                None,
+            ),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                auth_event: None,
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            coordinator: None,
+            queue_blocked: false,
+            run_end: RunEnd::default(),
+        }
+    }
+
+    /// PDASHOSS01-417 part 2 (review item 2 on #2952): when run-end cleanup
+    /// is unresolved, the worker does not finish, so the runner loop keeps
+    /// the run in flight and turns away new work. The group it cannot prove
+    /// is never signalled, and the runner is released once it is gone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_cleanup_keeps_the_runner_reserved_until_resolved() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        // A stranger now holds the run's recorded pgid: same pid, other
+        // start time, so its ownership can never be proven.
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let info = crate::util::procinfo::info(stranger.id() as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let (tx, _rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        let state = worker.state.clone();
+        worker
+            .reserve_unresolved(RunGroup::claimed_for_test(&recorded))
+            .await;
+        let held = tokio::spawn(async move { worker.hold_while_unresolved().await });
+        tokio::time::sleep(UNRESOLVED_CLEANUP_RECHECK * 4).await;
+        let reserved = !held.is_finished();
+        // Review item 1 on #3499: local chat sees the reservation too.
+        let chat_blocked = state.cleanup_reserved();
+        let survived = stranger.try_wait().unwrap().is_none();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(reserved, "runner was released while cleanup was unresolved");
+        assert!(
+            chat_blocked,
+            "local chat could claim the working copy during cleanup"
+        );
+        assert!(survived, "an unproven process group was signalled");
+        tokio::time::timeout(UNRESOLVED_CLEANUP_RECHECK * 3, held)
+            .await
+            .expect("runner stayed reserved after the group was gone")
+            .unwrap();
+        assert!(!state.cleanup_reserved(), "reservation outlived cleanup");
+    }
+
+    /// The hold ends on daemon shutdown even when the shutdown lands while
+    /// a re-check is running, not only during the sleep between checks.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_hold_ends_on_a_shutdown_signalled_during_a_recheck() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let info = crate::util::procinfo::info(stranger.id() as i32).unwrap();
+        let recorded = crate::util::procinfo::ProcInfo {
+            start: info.start - 1,
+            ..info
+        };
+        let (tx, _rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        let state = worker.state.clone();
+        worker
+            .reserve_unresolved(RunGroup::claimed_for_test(&recorded))
+            .await;
+        // Signalled before the hold starts waiting: no waiter is registered,
+        // just as when it lands during a re-check.
+        state.shutdown_with_reason(DaemonShutdownTrigger::SigTerm);
+        let held = tokio::spawn(async move { worker.hold_while_unresolved().await });
+        let ended = tokio::time::timeout(UNRESOLVED_CLEANUP_RECHECK * 4, held).await;
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        ended
+            .expect("a shutdown during a re-check was lost")
+            .unwrap();
+    }
+
+    /// PDASHOSS01-417 part 2: the run's terminal report goes out only
+    /// after run-end cleanup (process stop, then the run-end hook) is
+    /// done, so the cloud never sees a run finished while its processes
+    /// or teardown are still pending. The test runs on one thread: once
+    /// `RunFailed` is received the worker cannot make progress before
+    /// the assertion, so a hook still pending at that point is caught.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_report_is_sent_after_run_end_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("task-folder");
+        std::fs::create_dir_all(&wd).unwrap();
+        // The agent opts into a run-end hook, then crashes on startup.
+        let agent = tmp.path().join("fake-codex");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\nmkdir -p .pidash\necho 'touch hook-ran' > .pidash/run-end-hook\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd.clone(), &agent, tx);
+        let run = tokio::spawn(async move {
+            worker
+                .run(
+                    uuid::Uuid::new_v4(),
+                    "Summarize".into(),
+                    None,
+                    None,
+                    AssignContext::default(),
+                )
+                .await
+        });
+        loop {
+            let msg = rx.recv().await.expect("worker ended without a report").body;
+            if matches!(
+                msg,
+                ClientMsg::RunFailed { .. }
+                    | ClientMsg::RunCompleted { .. }
+                    | ClientMsg::RunCancelled { .. }
+            ) {
+                break;
+            }
+        }
+        assert!(
+            wd.join("hook-ran").exists(),
+            "terminal report was sent before run-end cleanup finished"
+        );
+        run.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn repo_free_assignment_reaches_agent_spawn_and_skips_branch_checkout() {
         for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
@@ -7101,6 +7569,7 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 coordinator: None,
                 queue_blocked: false,
+                run_end: RunEnd::default(),
             };
             worker
                 .run(
@@ -7735,6 +8204,733 @@ mod tests {
         );
     }
 
+    /// Review item 2 on #3499: a run that finished while its cleanup is
+    /// still pending has its real result held. A shutdown in that window
+    /// must report that result, not turn the run into a DaemonRestart
+    /// failure, and the worker must not report the run a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_reports_the_held_result_of_a_run_still_in_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        inst.state.hold_terminal();
+        let held = inst.state.hold_terminal_msg(ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({"ok": true}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        });
+        assert!(held.is_none(), "the result is held while cleanup runs");
+        assert!(inst.state.defer_clear_current_run());
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::SigTerm, None).await;
+        assert_eq!(sent, 1);
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for the drained report")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunCompleted { run_id: got, .. } => assert_eq!(got, run_id),
+            other => panic!("expected the held RunCompleted, got {other:?}"),
+        }
+        // Cleanup then finishes: nothing more is sent for the run.
+        let later = inst.state.begin_release();
+        assert!(later.is_empty(), "the run would be reported twice");
+        assert!(inst.state.release_clears_current_run());
+        assert!(
+            inst.state
+                .hold_terminal_msg(ClientMsg::RunCancelled {
+                    run_id,
+                    cancelled_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .is_none(),
+            "a report after the drain must be dropped"
+        );
+    }
+
+    /// Reopen a queue store the test dropped. A subprocess another test
+    /// forks can hold the old lock's file description until it execs, so
+    /// the lock may stay taken for a moment after the drop.
+    fn reopen_queue(dir: std::path::PathBuf) -> crate::daemon::run_queue::Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match crate::daemon::run_queue::Coordinator::new(dir.clone(), 1) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
+    fn hello_map(inst: &RunnerInstance) -> Arc<RwLock<HelloRunnerMap>> {
+        Arc::new(RwLock::new(
+            std::iter::once(inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    /// Review item 1 on #3499 at cc5a1a7: the worker has started sending
+    /// the held result but has not cleared the in-flight run. A shutdown
+    /// drain landing then must still find the real result (and own the
+    /// send from there), not report a DaemonRestart failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_during_the_release_reports_the_real_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        inst.state.hold_terminal();
+        assert!(
+            inst.state
+                .hold_terminal_msg(ClientMsg::RunCompleted {
+                    run_id,
+                    done_payload: serde_json::json!({"ok": true}),
+                    ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .is_none()
+        );
+        assert!(inst.state.defer_clear_current_run());
+        // The worker takes the held result to send it...
+        let sending = inst.state.begin_release();
+        assert_eq!(sending.len(), 1);
+        // ...and the shutdown drain lands before the run is cleared.
+        let sent = drain_in_flight_runs(
+            hello_map(&inst),
+            &paths,
+            None,
+            DaemonShutdownTrigger::SigTerm,
+            None,
+        )
+        .await;
+        assert_eq!(sent, 1);
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for the drained report")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunCompleted { run_id: got, .. } => assert_eq!(got, run_id),
+            other => panic!("expected the real RunCompleted, got {other:?}"),
+        }
+        // The drain now owns the send; the worker stops sending.
+        assert!(!inst.state.releasing());
+        assert!(inst.state.release_clears_current_run());
+    }
+
+    /// The worker side of the release: the held result is sent, the run is
+    /// cleared before the hold ends, and nothing is held afterwards.
+    #[tokio::test]
+    async fn release_sends_the_held_result_then_clears_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let run_id = uuid::Uuid::new_v4();
+        worker
+            .state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCancelled {
+                run_id,
+                cancelled_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        assert!(rx.try_recv().is_err(), "the result was not held");
+        assert!(worker.state.rx_in_flight.borrow().is_some());
+        worker.release_terminal().await;
+        assert!(matches!(
+            rx.try_recv().unwrap().body,
+            ClientMsg::RunCancelled { .. }
+        ));
+        assert!(worker.state.rx_in_flight.borrow().is_none());
+        assert!(!worker.state.releasing());
+        assert!(worker.state.take_terminal_for_drain().is_empty());
+    }
+
+    /// Review item 2 on #3499 at 78368f6: a held result is persisted to the
+    /// machine queue's terminal outbox as soon as it is staged, so a daemon
+    /// killed during run-end cleanup (no graceful drain) replays the exact
+    /// result on its next start. Delivery and the slot release still wait
+    /// for cleanup.
+    #[tokio::test]
+    async fn a_held_result_is_persisted_before_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        let result = ClientMsg::RunCompleted {
+            run_id,
+            done_payload: serde_json::json!({"ok": true}),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        worker.send(result.clone()).await;
+        assert!(rx.try_recv().is_err(), "the result was not held");
+        // The daemon dies here, mid-cleanup: a fresh coordinator on the same
+        // store finds the exact result to replay.
+        drop(worker);
+        drop(coord);
+        let after_crash = reopen_queue(queue_dir);
+        let pending = after_crash.terminal_pending();
+        assert_eq!(pending.len(), 1, "the held result was not persisted");
+        let replayed: ClientMsg =
+            serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&result).unwrap()
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 5): when a second terminal report is
+    /// held for the same run (an agent failure, then a history-write
+    /// failure), the outbox keeps the first one, the result live delivery
+    /// sends first, so a crash during cleanup replays the real outcome.
+    #[tokio::test]
+    async fn the_first_held_result_is_the_one_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        let agent_failure = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::AgentCrash,
+            detail: Some("agent exited".into()),
+            ended_at: Utc::now(),
+            tokens: None,
+            model: None,
+        };
+        worker.send(agent_failure.clone()).await;
+        worker
+            .stage_internal_failure(run_id, Err(anyhow::anyhow!("history write failed")))
+            .await
+            .unwrap();
+        drop(worker);
+        // Read the store the crashed daemon would replay: reopening the
+        // queue here could race a sibling test's child that briefly holds
+        // the queue lock's inherited descriptor.
+        let pending = coord.terminal_pending();
+        assert_eq!(pending.len(), 1);
+        let replayed: ClientMsg =
+            serde_json::from_slice(pending[0].pending_terminal_payload.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&agent_failure).unwrap(),
+            "a later held report replaced the first in the outbox"
+        );
+    }
+
+    /// Review of #3501 at 1524d8e (MUST 4): once the shutdown drain has
+    /// taken a run's held result and persisted it for replay, the worker
+    /// finishing cleanup releases the queue slot but must not delete that
+    /// outbox record: the drain's send may still time out, and the next
+    /// daemon start must find the result to replay.
+    #[test]
+    fn a_drain_owned_terminal_record_survives_the_slot_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        state.hold_terminal();
+        // The drain takes the held report and persists it before sending.
+        let _ = state.take_terminal_for_drain();
+        assert!(coord.persist_terminal(run_id, b"{}", "drain").unwrap());
+
+        release_finished_slot(&coord, &state, run_id);
+
+        assert!(!coord.holds_run(run_id), "the slot was not released");
+        drop(coord);
+        let after = reopen_queue(queue_dir);
+        assert_eq!(
+            after.terminal_pending().len(),
+            1,
+            "the drain's terminal record was deleted"
+        );
+    }
+
+    /// Review of #3501 at 5542f04 (MUST 3): when the worker's send of a held
+    /// result fails, releasing the slot must keep the run's terminal outbox
+    /// record, so the outbox retry still delivers it. Only `RunFailed` has
+    /// the drain journal as a fallback; `RunCompleted` would be lost.
+    #[tokio::test]
+    async fn an_undelivered_result_keeps_its_terminal_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: worker.runner_config.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        // The cloud connection is gone when cleanup ends.
+        drop(rx);
+        worker.release_terminal().await;
+
+        release_finished_slot(&coord, &worker.state, run_id);
+
+        assert!(!coord.holds_run(run_id), "the slot was not released");
+        assert_eq!(
+            coord.terminal_pending().len(),
+            1,
+            "an undelivered RunCompleted lost its terminal record"
+        );
+    }
+
+    /// A released run whose report
+    /// could not be sent stays reported in flight, so the cloud's heartbeat
+    /// reaper cannot fail it before the outbox retry delivers the real
+    /// result; once delivered, the runner stops reporting it.
+    #[tokio::test]
+    async fn an_undelivered_run_stays_in_flight_until_the_retry_delivers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("pending", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let mut worker = codex_worker(tmp.path(), tmp.path().join("wd"), &tmp.path().join("x"), tx);
+        worker.state = inst.state.clone();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord =
+            Arc::new(crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap());
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: inst.runner_id,
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        worker.coordinator = Some(coord.clone());
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        worker.hold_terminal();
+        worker
+            .send(ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({"ok": true}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        worker.clear_current_run().await;
+        // The terminal POST fails when cleanup ends; polling still works.
+        drop(rx);
+        worker.release_terminal().await;
+        release_finished_slot(&coord, &inst.state, run_id);
+
+        assert_eq!(
+            *inst.state.rx_in_flight.borrow(),
+            Some(run_id),
+            "an undelivered run stopped being reported, so the reaper can fail it"
+        );
+
+        let delivered = replay_terminal_outbox_once(&coord, &hello_map(&inst), true).await;
+        assert_eq!(delivered, 1, "the retry dropped the run's own report");
+        assert!(matches!(
+            out_rx.try_recv().unwrap().body,
+            ClientMsg::RunCompleted { .. }
+        ));
+        assert!(
+            inst.state.rx_in_flight.borrow().is_none(),
+            "the delivered run is still reported in flight"
+        );
+        assert!(coord.terminal_pending().is_empty());
+    }
+
+    /// The in-process outbox retry delivers a released run's kept record,
+    /// and leaves a record whose run the queue still holds (its result is
+    /// held for cleanup) untouched and unsent.
+    #[tokio::test]
+    async fn the_outbox_retry_skips_runs_the_queue_still_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("outbox", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 2).unwrap();
+        let mut ids = Vec::new();
+        for seq in 1..=2 {
+            let run_id = uuid::Uuid::new_v4();
+            coord
+                .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                    cloud_origin: "test".to_string(),
+                    runner_id: inst.runner_id,
+                    run_id,
+                    assignment_token: Some(uuid::Uuid::new_v4()),
+                    sequence: seq,
+                    queued_at: 0,
+                    phase: "waiting".to_string(),
+                    assignment_payload: vec![],
+                    report_revision: 0,
+                    process_scope_id: None,
+                    pending_terminal_payload: None,
+                    pending_terminal_message_id: None,
+                })
+                .unwrap();
+            assert!(coord.admit(run_id).unwrap());
+            let msg = ClientMsg::RunCompleted {
+                run_id,
+                done_payload: serde_json::json!({}),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            };
+            let payload = serde_json::to_vec(&msg).unwrap();
+            assert!(coord.persist_terminal(run_id, &payload, "held").unwrap());
+            ids.push(run_id);
+        }
+        let (released, held) = (ids[0], ids[1]);
+        assert!(coord.release_slot(released).unwrap());
+
+        let delivered = replay_terminal_outbox_once(&coord, &hello_map(&inst), true).await;
+
+        assert_eq!(delivered, 1);
+        match out_rx.try_recv().unwrap().body {
+            ClientMsg::RunCompleted { run_id, .. } => assert_eq!(run_id, released),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(out_rx.try_recv().is_err(), "a held run's result was sent");
+        let pending: Vec<_> = coord
+            .terminal_pending()
+            .into_iter()
+            .map(|e| e.run_id)
+            .collect();
+        assert_eq!(pending, vec![held]);
+    }
+
+    /// A drained runner's later run, which the drain never reported, has no
+    /// terminal record: its row goes with the slot.
+    #[test]
+    fn a_drained_runner_without_a_terminal_record_deletes_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        assert!(coord.release_slot(run_id).unwrap());
+        assert!(!coord.holds_run(run_id));
+        assert!(coord.store_has_row(run_id).is_some_and(|has| !has));
+    }
+
+    /// A normal release (no drain) deletes the record as before.
+    #[test]
+    fn a_normal_slot_release_deletes_the_terminal_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let coord = crate::daemon::run_queue::Coordinator::new(queue_dir.clone(), 1).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        coord
+            .enqueue(crate::daemon::run_queue_store::QueueEntry {
+                cloud_origin: "test".to_string(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id,
+                assignment_token: Some(uuid::Uuid::new_v4()),
+                sequence: 1,
+                queued_at: 0,
+                phase: "waiting".to_string(),
+                assignment_payload: vec![],
+                report_revision: 0,
+                process_scope_id: None,
+                pending_terminal_payload: None,
+                pending_terminal_message_id: None,
+            })
+            .unwrap();
+        assert!(coord.admit(run_id).unwrap());
+        let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        });
+        assert!(coord.persist_terminal(run_id, b"{}", "held").unwrap());
+
+        release_finished_slot(&coord, &state, run_id);
+
+        assert!(!coord.holds_run(run_id));
+        drop(coord);
+        let after = reopen_queue(queue_dir);
+        assert!(after.terminal_pending().is_empty());
+    }
+
+    /// Review item 2 on #3499 at cc5a1a7: a runner whose last run's cleanup
+    /// is unresolved is not idle, so a credential or config change must not
+    /// hot-restart it.
+    #[tokio::test]
+    async fn a_runner_with_unresolved_cleanup_is_not_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        assert!(ensure_idle(&inst).is_ok());
+        inst.state.set_cleanup_reserved(true).await;
+        assert!(
+            ensure_idle(&inst).is_err(),
+            "a runner still cleaning up was treated as idle"
+        );
+        inst.state.set_cleanup_reserved(false).await;
+        assert!(ensure_idle(&inst).is_ok());
+    }
+
+    /// Review item 4 on #3499 at cc5a1a7: an internal error (here the
+    /// history write) is known before run-end cleanup starts, so its
+    /// `RunFailed{Internal}` goes through the terminal hold, where a
+    /// shutdown drain during cleanup finds it, and the run is reported once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_internal_failure_is_staged_before_run_end_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut worker = codex_worker(tmp.path(), wd, &tmp.path().join("unused"), tx);
+        // The run's history file cannot be created.
+        let runs = worker.runner_paths.runs_dir();
+        let _ = std::fs::remove_dir_all(&runs);
+        std::fs::write(&runs, b"not a directory").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let result = worker
+            .handle_assign(run_id, "p".into(), None, None, AssignContext::default())
+            .await;
+        assert!(
+            result.is_ok(),
+            "the failure would be reported a second time"
+        );
+        let mut failed = Vec::new();
+        while let Ok(env) = rx.try_recv() {
+            if let ClientMsg::RunFailed { reason, .. } = env.body {
+                failed.push(reason);
+            }
+        }
+        assert!(
+            matches!(failed.as_slice(), [FailureReason::Internal]),
+            "expected one RunFailed{{Internal}}, got {failed:?}"
+        );
+        assert!(worker.state.rx_in_flight.borrow().is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_in_flight_runs_no_op_when_all_idle() {
         // Common path: nothing in flight, drain should send nothing.
@@ -7874,6 +9070,7 @@ mod tests {
             ),
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         let run_id = uuid::Uuid::new_v4();
         let ended_at = Utc::now();
@@ -7938,6 +9135,7 @@ mod tests {
             ),
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         worker
             .send(ClientMsg::RunFailed {
@@ -8161,6 +9359,7 @@ mod tests {
             paths.clone(),
             runners.clone(),
             None,
+            None,
             Duration::from_millis(20),
         ));
         // Let a few empty ticks elapse. With the buggy `return` the
@@ -8300,6 +9499,7 @@ mod tests {
             engine,
             coordinator: None,
             queue_blocked: false,
+            run_end: RunEnd::default(),
         };
         let run_id = uuid::Uuid::new_v4();
         let hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();

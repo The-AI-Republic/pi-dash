@@ -386,6 +386,34 @@ impl Coordinator {
         Ok(removed)
     }
 
+    /// Release a finished run's slot but keep its terminal record: the
+    /// shutdown drain owns it and deletes it (`complete_terminal`) only
+    /// once the cloud took the report; until then the next daemon start
+    /// replays it. A row with no terminal record is deleted as by
+    /// [`Self::complete`].
+    pub fn release_slot(&self, run_id: Uuid) -> Result<bool, String> {
+        let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+        let removed = inner.active.remove(&run_id).is_some();
+        if removed {
+            inner.revision += 1;
+        }
+        drop(inner);
+        if removed {
+            // The row's phase in SQLite decides: a terminal outbox record
+            // is never deleted here, even when it cannot be read.
+            let _ = self.store.delete_unless_terminal(run_id);
+            self.admission.notify_waiters();
+        }
+        Ok(removed)
+    }
+
+    /// Whether the store still has a row for `run_id` (`None`: unreadable).
+    #[cfg(test)]
+    pub fn store_has_row(&self, run_id: Uuid) -> Option<bool> {
+        let rows = self.store.list_all_phases().ok()?;
+        Some(rows.iter().any(|(id, _)| *id == run_id))
+    }
+
     pub fn complete(&self, run_id: Uuid) -> Result<bool, String> {
         let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
         let removed = if inner.active.remove(&run_id).is_some() {
@@ -410,6 +438,20 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reopen a store the test dropped. A subprocess another test forks
+    /// can hold the old lock's file description until it execs, so the
+    /// lock may stay taken for a moment after the drop.
+    fn reopen(dir: &std::path::Path) -> Coordinator {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match Coordinator::new(dir.to_path_buf(), 3) {
+                Ok(c) => return c,
+                Err(e) if std::time::Instant::now() >= deadline => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
     fn entry(runner: Uuid, seq: u64) -> QueueEntry {
         QueueEntry {
             cloud_origin: "test".to_string(),
@@ -502,7 +544,7 @@ mod tests {
         assert_eq!(coord.counts().waiting, 1);
         drop(coord);
         // Reopen: canceled entry must not resurrect; tombstone persists.
-        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        let coord2 = reopen(&dir);
         assert_eq!(coord2.counts().waiting, 1);
         assert_eq!(coord2.position(e2.run_id), Some(1));
         assert_eq!(coord2.position(e1.run_id), None);
@@ -627,11 +669,42 @@ mod tests {
         assert_eq!(pending[0].phase, "terminal_pending");
         // Restart: receipt still loadable from the store.
         drop(coord);
-        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        let coord2 = reopen(&dir);
         assert_eq!(coord2.terminal_pending().len(), 1);
         // Successful redelivery clears.
         coord2.complete_terminal(e1.run_id).unwrap();
         assert!(coord2.terminal_pending().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Releasing a slot must not delete a terminal outbox record because
+    /// the outbox could not be read: only the row's phase in SQLite may
+    /// authorise the delete.
+    #[test]
+    fn release_slot_keeps_the_outbox_record_when_the_outbox_is_unreadable() {
+        let dir = std::env::temp_dir().join(format!("coord_unreadable_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        coord.enqueue(e1.clone()).unwrap();
+        assert!(coord.admit(e1.run_id).unwrap());
+        assert!(coord.persist_terminal(e1.run_id, b"{}", "mid-1").unwrap());
+        // Another outbox row the reader cannot decode makes the whole
+        // outbox read fail, while a delete still succeeds.
+        let raw = rusqlite::Connection::open(dir.join("run_queue.sqlite3")).unwrap();
+        raw.execute(
+            "INSERT INTO queue_entries (cloud_origin, runner_id, run_id, sequence, queued_at, phase, assignment_payload) VALUES ('test', 'r', 'other', 'not-a-number', 0, 'terminal_pending', x'')",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert!(coord.store.list_terminal_pending().is_err());
+        assert!(coord.release_slot(e1.run_id).unwrap());
+        assert_eq!(
+            coord.store_has_row(e1.run_id),
+            Some(true),
+            "the undelivered result's outbox record was deleted"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

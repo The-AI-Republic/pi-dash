@@ -1,18 +1,35 @@
 //! Read-only process inspection for ownership-proven group signalling
 //! (PDASHOSS01-417, part 1; adapted from PR #2952's `procinfo`).
 //!
-//! [`crate::util::containment`]'s process-group backend uses this to prove
-//! that a recorded process group is still the one the run created before
-//! it signals it. A process is identified by its pid together with its
-//! **exact** kernel start time ([`ProcInfo::start`]): a reused pid has a
-//! different start time, so it can never be mistaken for the original.
+//! [`crate::util::containment`]'s process-group backend uses this to tell
+//! whether a recorded process group is still the one the run created. A
+//! process is fingerprinted by its pid together with its **exact** kernel
+//! start time ([`ProcInfo::start`]): a pid reused by normal wraparound has
+//! a different start time.
+//!
+//! The fingerprint is not proof that signalling is safe (review of #3496).
+//! Linux exposes the start in clock ticks, and a pid reused within the
+//! same tick — possible with privileged checkpoint/restore (`clone3`
+//! `set_tid`) — reads the same. The kernel-backed identity is the run's
+//! anchor (part 1b, `group_ownership`): an unreaped child of the daemon
+//! that leads the run's group, so neither its pid nor the group id can be
+//! handed to another process while it lives. A group is signalled only
+//! while that anchor holds it; the fingerprint only adds a cross-check.
 //!
 //! * Linux: `/proc/<pid>/stat` (state, pgid, `starttime` in clock ticks
 //!   since boot, compared raw — never converted, so never rounded).
+//!   A group scan is complete or an error: a listed process that cannot
+//!   be read, or a `/proc` mounted with `hidepid=2`, could hide a member.
 //! * macOS: `sysctl(KERN_PROC_PID)` / `sysctl(KERN_PROC_PGRP)`. Both
 //!   return `kinfo_proc`, so one source gives every start time
 //!   (`p_starttime`, microseconds) and a comparison is always exact. The
-//!   group listing includes zombies.
+//!   group listing includes zombies. Known limit: macOS has no fork
+//!   counter, so [`group_members_settled`] cannot rule out a member that
+//!   forked and exited while the kernel built the list.
+//! * Linux empty-group verdicts use [`group_members_settled`], which keeps
+//!   reading newly listed pids until no process was created while it ran.
+//!   Known limit: it relies on cyclic pid allocation, which a privileged
+//!   checkpoint/restore (`clone3` `set_tid`) can bypass.
 //! * Elsewhere: nothing is readable, so every proof fails and callers do
 //!   not signal.
 
@@ -25,11 +42,42 @@ pub struct ProcInfo {
     /// macOS: microseconds since the epoch). Opaque: only ever compared for
     /// exact equality with another value read on the same host.
     pub start: u64,
-    /// Exited but not reaped yet, or (macOS) already exiting. Still holds
-    /// its pid and group membership, but can never run again.
+    /// Exited but not reaped yet (Linux `Z`/`X`, macOS `SZOMB`). Still holds
+    /// its pid and group membership, but can never run again. A process
+    /// that is still exiting is not a zombie: one of its threads may run.
+    /// On Linux a process whose leader thread exited is a zombie only once
+    /// none of its threads can run.
     pub zombie: bool,
     /// Short command name, for logs only.
     pub name: String,
+}
+
+/// Whether this platform can inspect processes at all. Where it cannot,
+/// every [`group_members`] call fails, so no group is ever proven.
+pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
+/// Whether group scans can work on this host right now: the platform is
+/// supported and (Linux) `/proc` neither hides nor locks other users'
+/// processes, checked by a real scan. Where a scan always fails, no group
+/// could ever be shown empty, so a process-group run would hold its runner
+/// forever (review of #3499 at 78368f6); callers then pick no containment.
+pub fn inspection_usable() -> bool {
+    SUPPORTED && imp::inspection_usable()
+}
+
+/// [`group_members`], but an `Ok` result is guaranteed not to have been
+/// raced by process creation: on Linux newly listed pids are read until the
+/// kernel's fork counter (`processes` in `/proc/stat`) did not move while
+/// a round ran ([`settled_group`]), and it fails with `Interrupted` when
+/// the counter keeps moving. A plain scan
+/// lists `/proc` before reading entries, so a member that forks and exits
+/// in between hides its child; use this before concluding a group is empty.
+/// macOS returns [`group_members`] as is.
+pub fn group_members_settled(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
+    if pgid <= 0 {
+        return Ok(Vec::new());
+    }
+    imp::group_members_settled(pgid)
 }
 
 /// Inspect one process. `None` when it does not exist or cannot be read.
@@ -104,42 +152,278 @@ fn fetch_retrying<T>(
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MACOS_SZOMB: u32 = 5;
 /// `P_WEXIT` from macOS `<sys/proc.h>`: the process is working on exiting.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 const MACOS_P_WEXIT: i32 = 0x0000_2000;
 
-/// Whether a macOS `kinfo_proc` entry can never run again: a zombie, or a
-/// process still exiting (right after SIGKILL macOS reports `SRUN` with
-/// `P_WEXIT` before `SZOMB`).
+/// Whether a macOS `kinfo_proc` entry can never run again: `SZOMB` only.
+/// `P_WEXIT` does not count (review of #3496): XNU sets it before it
+/// terminates the task's threads, so another thread of an exiting
+/// process may still run. `p_flag` is ignored on purpose.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_exited_or_exiting(p_stat: u32, p_flag: i32) -> bool {
-    p_stat == MACOS_SZOMB || p_flag & MACOS_P_WEXIT != 0
+fn macos_exited_or_exiting(p_stat: u32, _p_flag: i32) -> bool {
+    p_stat == MACOS_SZOMB
+}
+
+/// Whether a failed read of `/proc/<pid>/stat` means the process is gone
+/// (it exited during the scan). Any other failure (`EACCES`, `EPERM` under
+/// `hidepid=1`, an LSM denial) hides a process that may still be a member.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_entry_gone(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(3 /* ESRCH */)
+}
+
+/// Collect the members of `pgid` from the processes `pids`, read one at a
+/// time with `read` (`Ok(None)`: the process is gone). The scan is complete
+/// or it fails: an entry that exists but cannot be read makes the whole
+/// scan an error, never a smaller group, since the hidden process may be a
+/// live member (review of #3499).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn collect_group(
+    pgid: i32,
+    pids: impl IntoIterator<Item = i32>,
+    read: impl Fn(i32) -> std::io::Result<Option<ProcInfo>>,
+) -> std::io::Result<Vec<ProcInfo>> {
+    let mut members = Vec::new();
+    for pid in pids {
+        if let Some(p) = read(pid)?
+            && p.pgid == pgid
+        {
+            members.push(p);
+        }
+    }
+    Ok(members)
+}
+
+/// How many rounds [`settled_group`] runs while processes keep being
+/// created.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SETTLE_ROUNDS: usize = 32;
+
+/// The members of `pgid`, from a scan no process creation raced (review
+/// of #3499 at 78368f6). `list` lists the pids in `/proc`, `read` reads one
+/// (`Ok(None)`: gone), `forks` reads the kernel's fork counter.
+///
+/// A scan lists every pid before it reads any, so a member that forks and
+/// exits in between hides its child. Each round reads the fork counter
+/// around the reads; when it did not move, no process was created while
+/// they ran, so every process alive at the end was listed and read. When
+/// it moved, the next round lists `/proc` again and reads only the pids it
+/// has not read yet, plus those that read as gone (their pid now belongs
+/// to a new process): a pid read alive cannot be handed to a new process
+/// within the scan, since Linux allocates pids cyclically. Rounds are
+/// cheap, so the scan settles even while unrelated processes fork. Fails
+/// with `Interrupted` when the counter moved in every round, and with the
+/// read's error when an entry cannot be read ([`collect_group`]).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn settled_group(
+    pgid: i32,
+    mut forks: impl FnMut() -> std::io::Result<u64>,
+    mut list: impl FnMut() -> std::io::Result<Vec<i32>>,
+    read: impl Fn(i32) -> std::io::Result<Option<ProcInfo>>,
+) -> std::io::Result<Vec<ProcInfo>> {
+    use std::collections::HashSet;
+    let mut before = forks()?;
+    let mut to_read = list()?;
+    let mut listed: HashSet<i32> = to_read.iter().copied().collect();
+    let mut members: Vec<ProcInfo> = Vec::new();
+    for _ in 0..SETTLE_ROUNDS {
+        let mut gone = HashSet::new();
+        for pid in to_read {
+            match read(pid)? {
+                Some(p) => {
+                    if p.pgid == pgid {
+                        members.retain(|m| m.pid != p.pid);
+                        members.push(p);
+                    }
+                }
+                None => {
+                    members.retain(|m| m.pid != pid);
+                    gone.insert(pid);
+                }
+            }
+        }
+        let after = forks()?;
+        if after == before {
+            return Ok(members);
+        }
+        before = after;
+        to_read = list()?
+            .into_iter()
+            .filter(|pid| listed.insert(*pid) || gone.contains(pid))
+            .collect();
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "processes kept being created during the group scan",
+    ))
+}
+
+/// The `processes` line of `/proc/stat`: forks since boot, never reset.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_total_forks(stat: &str) -> Option<u64> {
+    stat.lines()
+        .find_map(|l| l.strip_prefix("processes "))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+/// Whether Linux group scans can work: `/proc` (per `mountinfo`) has no
+/// `hidepid` restriction — with `hidepid=1` other users' entries cannot be
+/// read, with 2 or 4 they are not even listed, and either way every scan
+/// fails — and `probe` (a real scan) succeeds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_inspection_usable(mountinfo: &str, probe: impl FnOnce() -> bool) -> bool {
+    !proc_hidepid(
+        mountinfo,
+        &["1", "noaccess", "2", "invisible", "4", "ptraceable"],
+    ) && probe()
+}
+
+/// The real-scan half of [`linux_inspection_usable`]: a scan of the own
+/// group (`scan`) works and the kernel's fork counter (`forks`, read from
+/// `/proc/stat`) can be read. Without the counter no scan can settle, so no
+/// group could ever be shown empty: `/proc` mounted with `subset=pid`
+/// (systemd `ProcSubset=pid`) lists processes but has no `/proc/stat`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_scan_probe<T>(scan: std::io::Result<T>, forks: std::io::Result<u64>) -> bool {
+    scan.is_ok() && forks.is_ok()
+}
+
+/// Whether the `/proc` mount in `mountinfo` (the text of
+/// `/proc/self/mountinfo`) hides other users' processes from listing
+/// (`hidepid=2`/`invisible` or `hidepid=4`/`ptraceable`). Then a process
+/// of the run that changed its user is not even listed, so a scan can
+/// never show the group complete. `hidepid=1`/`noaccess` keeps entries
+/// listed (their reads fail, which [`collect_group`] catches).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_hides_pids(mountinfo: &str) -> bool {
+    proc_hidepid(mountinfo, &["2", "invisible", "4", "ptraceable"])
+}
+
+/// Whether the top `/proc` mount in `mountinfo` has `hidepid=` one of
+/// `levels`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_hidepid(mountinfo: &str, levels: &[&str]) -> bool {
+    let mut hides = false;
+    for line in mountinfo.lines() {
+        let Some((pre, post)) = line.split_once(" - ") else {
+            continue;
+        };
+        if pre.split_whitespace().nth(4) != Some("/proc") {
+            continue;
+        }
+        let mut post = post.split_whitespace();
+        if post.next() != Some("proc") {
+            continue;
+        }
+        let opts = post.nth(1).unwrap_or("");
+        // The last matching line is the mount on top.
+        hides = opts.split(',').any(|o| {
+            o.strip_prefix("hidepid=")
+                .is_some_and(|level| levels.contains(&level))
+        });
+    }
+    hides
 }
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{ProcInfo, parse_linux_stat};
+    use super::{
+        ProcInfo, collect_group, linux_entry_gone, linux_inspection_usable, linux_scan_probe,
+        parse_linux_stat, parse_total_forks, proc_hides_pids, settled_group,
+    };
 
-    pub fn info(pid: i32) -> Option<ProcInfo> {
-        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-        let (state, pgid, start, name) = parse_linux_stat(&stat)?;
-        Some(ProcInfo {
-            pid,
-            pgid,
-            start,
-            zombie: matches!(state, 'Z' | 'X'),
-            name,
+    pub fn inspection_usable() -> bool {
+        let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+            return false;
+        };
+        linux_inspection_usable(&mountinfo, || {
+            super::info(std::process::id() as i32)
+                .is_some_and(|me| linux_scan_probe(group_members(me.pgid), total_forks()))
         })
     }
 
-    /// Fails only when `/proc` itself cannot be listed. An entry that
-    /// cannot be read is skipped: it exited during the scan, or it is not
-    /// ours to inspect.
+    pub fn group_members_settled(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
+        if proc_hides_pids(&std::fs::read_to_string("/proc/self/mountinfo")?) {
+            return group_members(pgid);
+        }
+        settled_group(pgid, total_forks, list_pids, read_info)
+    }
+
+    fn total_forks() -> std::io::Result<u64> {
+        parse_total_forks(&std::fs::read_to_string("/proc/stat")?).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "no processes line in /proc/stat",
+            )
+        })
+    }
+
+    pub fn info(pid: i32) -> Option<ProcInfo> {
+        read_info(pid).ok().flatten()
+    }
+
+    /// `Ok(None)` when the process is gone; `Err` when it exists but its
+    /// record cannot be read or parsed.
+    fn read_info(pid: i32) -> std::io::Result<Option<ProcInfo>> {
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if linux_entry_gone(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let (state, pgid, start, name) = parse_linux_stat(&stat).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unparseable /proc/{pid}/stat"),
+            )
+        })?;
+        Ok(Some(ProcInfo {
+            pid,
+            pgid,
+            start,
+            zombie: exited(state) && !has_live_thread(pid),
+            name,
+        }))
+    }
+
+    fn exited(state: char) -> bool {
+        matches!(state, 'Z' | 'X')
+    }
+
+    /// Whether any thread of `pid` can still run. The stat of a process
+    /// whose leader thread exited reads `Z` while its other threads keep
+    /// running, so a `Z` leader is only dead once every thread is. A task
+    /// list or thread that cannot be read counts as live: wrongly calling a process
+    /// dead could report its group empty.
+    fn has_live_thread(pid: i32) -> bool {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return true;
+        };
+        tasks.flatten().any(|t| {
+            std::fs::read(t.path().join("stat"))
+                .ok()
+                .and_then(|s| parse_linux_stat(&s))
+                .is_none_or(|(state, ..)| !exited(state))
+        })
+    }
+
+    /// Fails when `/proc` cannot be listed, when it hides other users'
+    /// processes, or when a listed process cannot be read: each could hide
+    /// a live member, so the group is unknown rather than smaller. A
+    /// process that exited during the scan is skipped.
     pub fn group_members(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
-        let rd = std::fs::read_dir("/proc")?;
-        Ok(rd
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+        if proc_hides_pids(&mountinfo) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "/proc is mounted with hidepid: a group scan cannot be complete",
+            ));
+        }
+        collect_group(pgid, list_pids()?, read_info)
+    }
+
+    fn list_pids() -> std::io::Result<Vec<i32>> {
+        Ok(std::fs::read_dir("/proc")?
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-            .filter_map(info)
-            .filter(|p| p.pgid == pgid)
             .collect())
     }
 }
@@ -317,6 +601,16 @@ mod imp {
             .filter(|p| p.pgid == pgid)
             .collect())
     }
+
+    /// One `sysctl` call fills the whole list; macOS exposes no fork
+    /// counter to settle it against (a known limit, see the module doc).
+    pub fn group_members_settled(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
+        group_members(pgid)
+    }
+
+    pub fn inspection_usable() -> bool {
+        true
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -333,11 +627,151 @@ mod imp {
             "process inspection is not available on this platform",
         ))
     }
+
+    pub fn group_members_settled(pgid: i32) -> std::io::Result<Vec<ProcInfo>> {
+        group_members(pgid)
+    }
+
+    pub fn inspection_usable() -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_hidden_by_a_racing_fork_is_found_by_the_settled_scan() {
+        // Review item 3 on #3499 at 78368f6: /proc is listed before any entry
+        // is read. Member 5 forked 9 and exited in between, so the first
+        // round reads 5 as gone and never sees 9. The fork counter moved,
+        // so the next round lists /proc again and reads only the new pid.
+        let counter = std::cell::Cell::new(100u64);
+        let lists = std::cell::Cell::new(0);
+        let reads = std::cell::RefCell::new(Vec::new());
+        let got = settled_group(
+            1,
+            || Ok(counter.get()),
+            || {
+                lists.set(lists.get() + 1);
+                Ok(if lists.get() == 1 {
+                    vec![1, 5, 7]
+                } else {
+                    vec![1, 7, 9]
+                })
+            },
+            |pid| {
+                reads.borrow_mut().push(pid);
+                Ok(match pid {
+                    1 => Some(info_in(1, 1)),
+                    5 => {
+                        counter.set(101); // 5 forked 9, then exited
+                        None
+                    }
+                    7 => Some(info_in(7, 3)),
+                    9 => Some(info_in(9, 1)),
+                    _ => None,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(got.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![1, 9]);
+        assert_eq!(
+            *reads.borrow(),
+            vec![1, 5, 7, 9],
+            "only new pids are re-read"
+        );
+        // A pid read as gone is read again when it is listed again (reused).
+        let counter = std::cell::Cell::new(0u64);
+        let got = settled_group(
+            1,
+            || Ok(counter.get()),
+            || Ok(vec![5]),
+            |pid| {
+                counter.set(counter.get() + 1);
+                Ok((counter.get() > 1).then(|| info_in(pid, 1)))
+            },
+        )
+        .unwrap();
+        assert_eq!(got, vec![info_in(5, 1)]);
+        // A counter that moves in every round never yields a result.
+        let counter = std::cell::Cell::new(0u64);
+        let err = settled_group(
+            1,
+            || {
+                counter.set(counter.get() + 1);
+                Ok(counter.get())
+            },
+            || Ok(vec![1]),
+            |pid| Ok(Some(info_in(pid, 1))),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    }
+
+    fn info_in(pid: i32, pgid: i32) -> ProcInfo {
+        ProcInfo {
+            pid,
+            pgid,
+            start: 1,
+            zombie: false,
+            name: format!("p{pid}"),
+        }
+    }
+
+    #[test]
+    fn the_fork_counter_is_read_from_proc_stat() {
+        let stat = "cpu  1 2 3\nctxt 99\nbtime 1700000000\nprocesses 123456\nprocs_running 2\n";
+        assert_eq!(parse_total_forks(stat), Some(123_456));
+        assert_eq!(parse_total_forks("cpu 1\n"), None);
+    }
+
+    #[test]
+    fn hidepid_or_a_failing_probe_makes_inspection_unusable() {
+        // Review item 1 on #3499 at 78368f6: with hidepid=1/2/4 every group
+        // scan fails, so a process-group run could never be released.
+        let mount = |opts: &str| format!("22 1 0:21 / /proc rw,nosuid - proc proc rw,{opts}\n");
+        for opts in [
+            "hidepid=1",
+            "hidepid=2",
+            "hidepid=4",
+            "hidepid=noaccess",
+            "hidepid=invisible",
+            "hidepid=ptraceable",
+        ] {
+            assert!(!linux_inspection_usable(&mount(opts), || true), "{opts}");
+        }
+        for opts in ["hidepid=0", "hidepid=off", "subset=pid"] {
+            assert!(linux_inspection_usable(&mount(opts), || true), "{opts}");
+        }
+        assert!(!linux_inspection_usable(&mount("hidepid=0"), || false));
+    }
+
+    #[test]
+    fn a_scan_without_the_fork_counter_is_unusable() {
+        // `/proc` with `subset=pid` lists processes but has no `/proc/stat`,
+        // so no scan could ever settle and no group could be shown empty.
+        fn missing<T>() -> std::io::Result<T> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        assert!(!linux_scan_probe(Ok(()), missing()));
+        assert!(!linux_scan_probe::<()>(missing(), Ok(7)));
+        assert!(linux_scan_probe(Ok(()), Ok(7)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspection_is_usable_on_this_host_exactly_when_a_scan_works() {
+        let own = info(std::process::id() as i32).unwrap().pgid;
+        let forks = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|s| parse_total_forks(&s));
+        assert_eq!(
+            inspection_usable(),
+            group_members(own).is_ok() && forks.is_some()
+        );
+    }
 
     #[test]
     fn linux_stat_parses_fields_after_a_tricky_comm() {
@@ -388,6 +822,54 @@ mod tests {
         let seen = seen.expect("a non-UTF-8 name must not hide the process");
         assert!(listed, "group listing lost the process");
         assert!(seen.start > 0);
+    }
+
+    /// Review item 3 on #3499: a Linux thread-group leader that has exited
+    /// shows `Z` in `/proc/<pid>/stat` while its other threads still run.
+    /// Such a process is alive and must not be reported as a zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_leader_with_running_threads_is_not_a_zombie() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let script = "import threading, time, ctypes\n\
+                      threading.Thread(target=lambda: time.sleep(300)).start()\n\
+                      print('ready', flush=True)\n\
+                      ctypes.CDLL(None).pthread_exit(None)\n";
+        let Ok(mut child) = std::process::Command::new("python3")
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+        else {
+            eprintln!("python3 not available; skipping");
+            return;
+        };
+        let pid = child.id() as i32;
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        // Wait until the leader thread itself has exited.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| parse_linux_stat(&s))
+            .is_none_or(|(state, ..)| state != 'Z')
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let seen = info(pid);
+        let listed = group_members(pid).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let seen = seen.expect("process readable");
+        assert!(!seen.zombie, "a process with a running thread is alive");
+        assert!(
+            listed.iter().any(|p| p.pid == pid && !p.zombie),
+            "{listed:?}"
+        );
     }
 
     /// The hand-written `kinfo_proc` layout must put `p_starttime` where
@@ -459,11 +941,93 @@ mod tests {
         assert!(got.is_err());
     }
 
+    fn member(pid: i32, pgid: i32) -> ProcInfo {
+        ProcInfo {
+            pid,
+            pgid,
+            start: 100,
+            zombie: false,
+            name: "m".into(),
+        }
+    }
+
+    /// Review item 3 on #3499: a listed process that cannot be read (for
+    /// example `EPERM` under `hidepid=1` after it changed user) may be a
+    /// live member of the run's group, so the scan is an error, never a
+    /// group that looks empty except for the anchor.
     #[test]
-    fn an_exiting_macos_entry_counts_as_unable_to_run() {
+    fn an_unreadable_process_makes_the_group_scan_an_error() {
+        let read = |pid: i32| match pid {
+            1 => Ok(Some(member(1, 1))),
+            2 => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            _ => Ok(None),
+        };
+        assert!(collect_group(1, [1, 2], read).is_err());
+        let eperm = |_pid: i32| Err(std::io::Error::from_raw_os_error(1));
+        assert!(collect_group(1, [7], eperm).is_err());
+    }
+
+    #[test]
+    fn a_process_that_exited_during_the_scan_is_skipped() {
+        let read = |pid: i32| match pid {
+            1 => Ok(Some(member(1, 1))),
+            2 => Ok(Some(member(2, 9))),
+            _ => Ok(None),
+        };
+        let got = collect_group(1, [1, 2, 3], read).unwrap();
+        assert_eq!(got, vec![member(1, 1)]);
+        assert!(linux_entry_gone(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(linux_entry_gone(&std::io::Error::from_raw_os_error(3)));
+        assert!(!linux_entry_gone(&std::io::Error::from_raw_os_error(1)));
+        assert!(!linux_entry_gone(&std::io::Error::from_raw_os_error(13)));
+    }
+
+    #[test]
+    fn a_proc_mount_that_hides_pids_is_detected() {
+        let line = |opts: &str| {
+            format!(
+                "22 1 0:5 / /sys rw - sysfs sysfs rw\n\
+                 25 1 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc {opts}\n"
+            )
+        };
+        assert!(!proc_hides_pids(&line("rw")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=0")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=1")));
+        assert!(!proc_hides_pids(&line("rw,hidepid=noaccess")));
+        assert!(proc_hides_pids(&line("rw,hidepid=2")));
+        assert!(proc_hides_pids(&line("rw,hidepid=invisible,gid=10")));
+        assert!(proc_hides_pids(&line("rw,hidepid=ptraceable")));
+        // A proc mounted elsewhere does not count; the top /proc mount does.
+        assert!(!proc_hides_pids(
+            "30 1 0:40 / /mnt/proc rw - proc proc rw,hidepid=2\n"
+        ));
+        let over = format!(
+            "{}31 25 0:41 / /proc rw - proc proc rw\n",
+            line("rw,hidepid=2")
+        );
+        assert!(!proc_hides_pids(&over));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_hosts_own_group_scan_is_complete() {
+        let me = std::process::id() as i32;
+        let pgid = info(me).expect("own process").pgid;
+        let got = group_members(pgid).expect("scan of a normal /proc");
+        assert!(got.iter().any(|p| p.pid == me));
+    }
+
+    #[test]
+    fn only_a_macos_szomb_entry_is_a_zombie() {
+        // Review item 2 on #3496: XNU exports P_WEXIT (from P_LEXIT) before
+        // it terminates the task's threads, so an exiting multithreaded
+        // process may still run. Only SZOMB means it never runs again.
         const SRUN: u32 = 2;
-        assert!(macos_exited_or_exiting(SRUN, MACOS_P_WEXIT));
+        assert!(!macos_exited_or_exiting(SRUN, MACOS_P_WEXIT));
         assert!(macos_exited_or_exiting(MACOS_SZOMB, 0));
+        assert!(macos_exited_or_exiting(MACOS_SZOMB, MACOS_P_WEXIT));
         assert!(!macos_exited_or_exiting(SRUN, 0));
         assert!(!macos_exited_or_exiting(SRUN, 0x0000_0004));
     }
