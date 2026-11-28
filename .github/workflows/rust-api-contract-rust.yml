@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.10"
+          python-version: "3.12.x"
 
       - name: Validate matrix inputs
         run: python3 rust-api/contract-tests/_harness/rust_matrix.py check
@@ -212,6 +212,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Exact Python on purpose: the Django leg is the oracle, so it must
+      # run production's interpreter (CPython 3.12.10,
+      # apps/api/Dockerfile.api). Later 3.12.x builds carry the new
+      # html.parser, and Page.save()'s strip_tags then keeps <textarea> /
+      # <title> markup that production drops (app_pages shard). Same pin
+      # as the contract-tests job in rust-api-contract-tests.yml and the
+      # live job in rust-api-contract.yml; ubuntu-24.04 still ships 3.12.10.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -219,6 +226,9 @@ jobs:
           cache-dependency-path: |
             apps/api/requirements/base.txt
             rust-api/contract-tests/requirements.txt
+
+      - name: Assert production html.parser (oracle must match CPython 3.12.10)
+        run: python rust-api/contract-tests/_harness/assert_legacy_html_parser.py
 
       - uses: dtolnay/rust-toolchain@stable
 

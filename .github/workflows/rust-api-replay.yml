@@ -127,6 +127,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Exact Python on purpose: this job boots Django as the oracle, so it
+      # must run production's interpreter (CPython 3.12.10,
+      # apps/api/Dockerfile.api); later 3.12.x builds carry the new
+      # html.parser. ubuntu-24.04 still ships 3.12.10.
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -137,6 +141,9 @@ jobs:
             apps/api/requirements/base.txt
             apps/api/requirements/test.txt
             rust-api/contract-tests/requirements.txt
+
+      - name: Assert production html.parser (oracle must match CPython 3.12.10)
+        run: python rust-api/contract-tests/_harness/assert_legacy_html_parser.py
 
       - uses: dtolnay/rust-toolchain@stable
 

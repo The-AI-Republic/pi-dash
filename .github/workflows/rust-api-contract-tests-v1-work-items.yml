@@ -66,9 +66,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Exact Python on purpose: this job boots Django as the oracle, so it
+      # must run production's interpreter (CPython 3.12.10,
+      # apps/api/Dockerfile.api); later 3.12.x builds carry the new
+      # html.parser. ubuntu-24.04 still ships 3.12.10.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
+
+      - name: Assert production html.parser (oracle must match CPython 3.12.10)
+        run: python rust-api/contract-tests/_harness/assert_legacy_html_parser.py
 
       - name: Install system deps for psycopg-c
         run: sudo apt-get update -y && sudo apt-get install -y libpq-dev

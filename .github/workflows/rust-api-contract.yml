@@ -21,11 +21,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.10"
+          python-version: "3.12.x"
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - run: cd rust-api/contract-tests && python -m pytest --collect-only -q
 
   live:
+    # Runs the whole contract tree, including the tasks_webhooks link-crawl
+    # parity tests that need production's html.parser (CPython 3.12.10) and
+    # skip on >=3.12.12. Same pin as the contract-tests job in
+    # rust-api-contract-tests.yml and the contract-rust job in
+    # rust-api-contract-rust.yml: ubuntu-24.04 still ships 3.12.10, so move
+    # them together.
     runs-on: ubuntu-24.04
     needs: collect
     steps:
@@ -33,6 +39,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
+      - name: Assert production html.parser (oracle must match CPython 3.12.10)
+        run: python rust-api/contract-tests/_harness/assert_legacy_html_parser.py
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - name: Run contract suites against the backend
         env:

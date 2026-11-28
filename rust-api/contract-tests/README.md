@@ -27,10 +27,22 @@ Run the Django oracle on CPython **3.12.10** — the same interpreter as
 the production image (`apps/api/Dockerfile.api`). `html.parser`
 differs across 3.12 patch versions (PIDASHCONV-1693): distro 3.12.3
 builds and later 3.12.x carry the HTML5 rewrite, while 3.12.10 has the
-classic parser, and recorded fixtures pin the 3.12.10 behavior. CI
-pins `python-version: "3.12.10"` on every `rust-api-*` workflow; match
-it locally (e.g. a 3.12.10 venv or container) before recording or
-re-recording fixtures.
+classic parser, and recorded fixtures pin the 3.12.10 behavior. In CI,
+the Django-oracle jobs whose suites can reach parser-dependent output
+pin `python-version: "3.12.10"` on `ubuntu-24.04`: `contract-tests` in
+`rust-api-contract-tests.yml` (the `tasks_webhooks/test_link_crawl_*`
+tests), `live` in `rust-api-contract.yml` (the whole tree),
+`contract-rust` in `rust-api-contract-rust.yml` (the HTTP suites,
+including `app_pages`, whose `strip_tags` follows the parser),
+`v1-work-items` in `rust-api-contract-tests-v1-work-items.yml` and
+`replay` in `rust-api-replay.yml` (broad read/write payload coverage).
+Each runs `_harness/assert_legacy_html_parser.py` right after setting
+up Python, so a pin change fails the job instead of silently skipping
+or changing the oracle. The other `rust-api-*` workflows, including
+their Django oracles, use `"3.12.x"`: their suites are not known to
+reach parser-dependent output, and one that starts to needs the same
+pin and step. Match 3.12.10 locally (e.g. a 3.12.10 venv or container)
+before recording or re-recording fixtures.
 
 ## Layout
 
